@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./logo/logo-circle.png" alt="ArgonAgent logo" width="128" height="128" />
+</p>
+
 # ArgonAgent
 
 A zero-coupling TypeScript agent engine, extracted from AragonMesh's "JR Agent"
