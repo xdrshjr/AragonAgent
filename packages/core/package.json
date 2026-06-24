@@ -1,0 +1,98 @@
+{
+  "name": "@argon-agent/core",
+  "version": "0.1.0",
+  "description": "ArgonAgent core engine — LLM provider adapters, streaming, tool registry/execution, steering, idle watchdog, and an optional isolated-vm sandbox.",
+  "license": "MIT",
+  "author": "ArgonAgent contributors",
+  "keywords": [
+    "agent",
+    "ai-agent",
+    "llm",
+    "anthropic",
+    "openai",
+    "google",
+    "tool-calling",
+    "function-calling",
+    "streaming",
+    "agentic",
+    "typescript",
+    "isolated-vm",
+    "codeact",
+    "argonagent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xdrshjr/ArgonAgent.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/xdrshjr/ArgonAgent#readme",
+  "bugs": {
+    "url": "https://github.com/xdrshjr/ArgonAgent/issues"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./llm/types": {
+      "types": "./dist/llm/types.d.ts",
+      "import": "./dist/llm/types.js"
+    },
+    "./llm/providers": {
+      "types": "./dist/llm/providers/index.d.ts",
+      "import": "./dist/llm/providers/index.js"
+    },
+    "./tools/types": {
+      "types": "./dist/tools/types.d.ts",
+      "import": "./dist/tools/types.js"
+    },
+    "./tools/helpers": {
+      "types": "./dist/tools/helpers.d.ts",
+      "import": "./dist/tools/helpers.js"
+    },
+    "./sandbox/*": {
+      "types": "./dist/sandbox/*.d.ts",
+      "import": "./dist/sandbox/*.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "llm/types": ["./dist/llm/types.d.ts"],
+      "llm/providers": ["./dist/llm/providers/index.d.ts"],
+      "tools/types": ["./dist/tools/types.d.ts"],
+      "tools/helpers": ["./dist/tools/helpers.d.ts"],
+      "sandbox/*": ["./dist/sandbox/*.d.ts"]
+    }
+  },
+  "files": [
+    "dist",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "verify:dist": "npm run build && node examples/consumer-smoke/run.mjs",
+    "prepublishOnly": "node scripts/check-publishable.mjs && npm run build"
+  },
+  "optionalDependencies": {
+    "ajv": "^8.18.0",
+    "isolated-vm": "^6.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ajv": "^8.18.0",
+    "isolated-vm": "^6.1.2",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}

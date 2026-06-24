@@ -1,0 +1,14 @@
+{
+  "name": "argon-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ArgonAgent — a zero-coupling TypeScript agent engine (LLM provider adapters, streaming, tool registry/execution, steering, idle watchdog, optional isolated-vm sandbox). Extracted from AragonMesh's JR Agent core for reuse and publishing.",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  }
+}
