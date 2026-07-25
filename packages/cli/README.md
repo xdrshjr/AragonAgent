@@ -15,7 +15,7 @@ steer / configure the session — all without leaving the terminal.
 ```bash
 # Global
 npm i -g @argon-agent/cli
-argon
+aragon
 
 # Zero-install
 npx @argon-agent/cli
@@ -33,22 +33,22 @@ npx @argon-agent/cli
 export ANTHROPIC_API_KEY=sk-ant-...
 # ...or paste it live in the TUI via /settings, or pass --api-key
 
-argon                       # interactive TUI
-argon "summarize README.md" # interactive, auto-submitting the prompt
-echo "list files" | argon -p   # one-shot, prints to stdout then exits
+aragon                       # interactive TUI
+aragon "summarize README.md" # interactive, auto-submitting the prompt
+echo "list files" | aragon -p   # one-shot, prints to stdout then exits
 ```
 
 ## Usage
 
 ```
-argon [prompt]                 Start the interactive TUI (or one-shot with -p / piped stdin)
-argon -p, --print [prompt]     Headless: stream the answer to stdout, then exit
-argon config                   Open the settings screen
-argon config set <key> <value> Non-interactive config write (e.g. model, provider)
-argon config path              Print the config file path
-argon models [--provider p]    List builtin + discovered models
-argon --version | -v           Print the version
-argon --help  | -h             Print help
+aragon [prompt]                 Start the interactive TUI (or one-shot with -p / piped stdin)
+aragon -p, --print [prompt]     Headless: stream the answer to stdout, then exit
+aragon config                   Open the settings screen
+aragon config set <key> <value> Non-interactive config write (e.g. model, provider)
+aragon config path              Print the config file path
+aragon models [--provider p]    List builtin + discovered models
+aragon --version | -v           Print the version
+aragon --help  | -h             Print help
 ```
 
 ### Global flags
@@ -131,7 +131,7 @@ env / `.env` → CLI flags**.
 - **Env / `.env`**: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
   `GOOGLE_API_KEY` / `GEMINI_API_KEY`, plus `ARGON_PROVIDER`, `ARGON_MODEL`,
   `ARGON_BASE_URL`, `ARGON_THINKING`, `ARGON_MAX_TOKENS`, `ARGON_THEME`.
-- **User config file** (`argon config path`): JSON, written `0600` on POSIX.
+- **User config file** (`aragon config path`): JSON, written `0600` on POSIX.
   Holds provider/model/keys and MRU lists. Keys are masked in the UI and never
   logged.
 
@@ -167,7 +167,7 @@ node packages/cli/dist/cli.js --version
 - `npm run build -w packages/cli` produces an executable `dist/cli.js` with a
   shebang; `node packages/cli/dist/cli.js --version` prints the version.
 - `npm pack -w packages/cli --dry-run --json` lists `dist/cli.js` under `files`.
-- With `ANTHROPIC_API_KEY` set: `argon` streams a reply, a tool card renders,
+- With `ANTHROPIC_API_KEY` set: `aragon` streams a reply, a tool card renders,
   `Esc` aborts mid-run, `/model` switches models, `/settings` saves a key,
   `Ctrl+C` twice exits.
 - `echo "list files" | node dist/cli.js -p` prints an answer and exits `0`.

@@ -2,6 +2,14 @@
 
 All notable changes to `@argon-agent/core` are documented here.
 
+## Unreleased
+
+### Changed
+
+- Added a repository-level PowerShell release workflow that versions, verifies,
+  and publishes Core before the dependent CLI, with dry-run rollback and
+  partial-release resume support.
+
 ## 0.1.0
 
 Initial extraction of the ArgonAgent engine from the AragonMesh code base

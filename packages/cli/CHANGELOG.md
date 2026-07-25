@@ -2,6 +2,20 @@
 
 All notable changes to `@argon-agent/cli` are documented here.
 
+## Unreleased
+
+### Breaking
+
+- The globally installed executable is now `aragon`. The previous `argon` and
+  `argon-agent` aliases are no longer installed; the npm package name remains
+  `@argon-agent/cli`.
+
+### Changed
+
+- Added a repository-level PowerShell release workflow that automatically
+  updates CLI and Core versions, synchronizes their dependency and lockfile,
+  verifies both tarballs, and publishes them in dependency order.
+
 ## 0.2.0
 
 A design-elevation & HCI-hardening release. No breaking changes: `@argon-agent/core`

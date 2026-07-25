@@ -12,6 +12,57 @@ workspaces，**不得发布根包**。
 
 > 所有命令均为 PowerShell 命令，并且应在 `argon-agent-core/` 根目录执行。
 
+## 一键自动发布（推荐）
+
+正式稳定版优先使用仓库根目录的 `publish-latest.ps1`。直接运行会同时递增 Core 和
+CLI 的 patch 版本；也可以显式选择同一种 SemVer 递增类型：
+
+```powershell
+# 默认：两个包分别递增 patch
+.\publish-latest.ps1
+
+# 新功能或 0.x breaking change：两个包分别递增 minor
+.\publish-latest.ps1 -Bump minor
+
+# 进入 1.x 后的 breaking change
+.\publish-latest.ps1 -Bump major
+```
+
+本次把安装后的命令从 `argon` / `argon-agent` 改为唯一的 `aragon`，属于 `0.x` 阶段的
+breaking CLI 变更，因此发布包含该变更的首个版本时应运行：
+
+```powershell
+.\publish-latest.ps1 -Bump minor
+```
+
+脚本自动完成以下工作：
+
+1. 要求 `argon-agent-core/` 中没有未提交的源码修改，并检查 npm 官方 registry 登录。
+2. 自动递增两个 workspace 版本，把 CLI 的 Core 依赖更新为新版本的 caret 范围，并同步
+   `package-lock.json`。
+3. 运行全部测试、构建、Core consumer smoke、两个包的 pack dry-run 和 CLI 版本检查。
+4. 确认待发布的精确版本不存在，然后先发布 Core；只有 Core 可查询后才发布 CLI。
+5. 验证 npm 上的 CLI 版本只暴露 `aragon` 可执行入口。
+
+发布前可先完整演练。DryRun 不检查 npm 登录、不调用 publish，并在退出前恢复三个版本文件：
+
+```powershell
+.\publish-latest.ps1 -DryRun
+.\publish-latest.ps1 -DryRun -Bump minor
+```
+
+如果任何检查在首次 publish 前失败，脚本会自动恢复版本文件。如果 Core 可能已经发布、
+但 CLI 发布失败，脚本会保留版本现场；先核对 npm，再运行：
+
+```powershell
+.\publish-latest.ps1 -Resume
+```
+
+`-Resume` 不再次递增版本，并跳过 npm 中已经存在的精确版本。成功发布后，立即提交
+`packages/core/package.json`、`packages/cli/package.json` 和 `package-lock.json`，创建包级
+Git 标签并推送公开仓库。beta/rc 预发布仍使用后文的手动 tagged workflow；本脚本只发布
+稳定版到 `latest`。
+
 ## 1. 发布原则
 
 1. 已经成功进入 npm registry 的 `包名 + 版本号` 永远不能覆盖；只有在确认
@@ -423,7 +474,7 @@ $cliVersion = node -p "require('./packages/cli/package.json').version"
 npm exec --yes `
   --registry $registry `
   --package "@argon-agent/cli@$cliVersion" `
-  -- argon --version
+  -- aragon --version
 ```
 
 还应打开 npm 包页面检查 README、许可证、仓库链接和版本号：

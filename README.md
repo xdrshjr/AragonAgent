@@ -40,12 +40,12 @@ argon-agent-core/
 
 [`@argon-agent/cli`](./packages/cli) is a Claude-Code / Codex-style interactive
 terminal UI built on top of the engine. After `npm i -g @argon-agent/cli` (or a
-zero-install `npx @argon-agent/cli`), run `argon` in any directory for a
+zero-install `npx @argon-agent/cli`), run `aragon` in any directory for a
 full-screen, keyboard-driven chat with a built-in filesystem/shell toolset.
 
 ```bash
 npm run dev:cli          # build + launch the TUI from this monorepo
-argon "summarize README" # or one-shot: echo "list files" | argon -p
+aragon "summarize README" # or one-shot: echo "list files" | aragon -p
 ```
 
 See [`packages/cli/README.md`](./packages/cli/README.md) for install, usage,

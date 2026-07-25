@@ -232,7 +232,7 @@ function buildProgram(): Command {
   const program = new Command();
 
   program
-    .name('argon')
+    .name('aragon')
     .description('ArgonAgent — a Claude-Code / Codex-style terminal UI for the ArgonAgent engine.')
     .version(VERSION, '-v, --version', 'Print the version')
     .argument('[prompt]', 'Task prompt (starts the TUI, or a one-shot run with -p / piped stdin)')
@@ -283,7 +283,7 @@ function buildProgram(): Command {
       runInteractive(flags, { initialPrompt: prompt });
     });
 
-  // argon config [set <key> <value> | path]
+  // aragon config [set <key> <value> | path]
   const configCmd = program
     .command('config')
     .description('Open the settings screen')
@@ -303,14 +303,14 @@ function buildProgram(): Command {
       process.stdout.write(`${getConfigPath()}\n`);
     });
 
-  // argon models [--provider p]
+  // aragon models [--provider p]
   program
     .command('models')
     .description('List builtin + discovered models')
     .option('--provider <id>', 'anthropic | openai | google')
     .action(async (opts: { provider?: string }) => {
       // The root program also declares `--provider`, so commander routes
-      // `argon models --provider x` onto the parent's options; fall back to it.
+      // `aragon models --provider x` onto the parent's options; fall back to it.
       const provider = opts.provider ?? (program.opts() as { provider?: string }).provider;
       await runModels(toFlags(program.opts()), provider);
     });
