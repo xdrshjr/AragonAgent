@@ -9,6 +9,8 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present"
+    "test": "npm run test --workspaces --if-present",
+    "dev:cli": "npm run build -w packages/cli && node packages/cli/dist/cli.js",
+    "start": "node packages/cli/dist/cli.js"
   }
 }
