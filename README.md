@@ -43,6 +43,11 @@ terminal UI built on top of the engine. After `npm i -g @argon-agent/cli` (or a
 zero-install `npx @argon-agent/cli`), run `aragon` in any directory for a
 full-screen, keyboard-driven chat with a built-in filesystem/shell toolset.
 
+<p align="center">
+  <img src="./logo/screenshot.png" width="900"
+       alt="aragon running in Windows PowerShell: the ARGON banner over a full-screen TUI, with the active model and working directory in the header, a message composer at the bottom, and a status bar reporting idle state, thinking level, context usage, token counts, and session cost." />
+</p>
+
 ```bash
 npm run dev:cli          # build + launch the TUI from this monorepo
 aragon "summarize README" # or one-shot: echo "list files" | aragon -p
