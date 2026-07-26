@@ -65,6 +65,34 @@ const EXPECTED = [
   'MessageManager',
   'MessageQueueManager',
   'IdleWatchdog',
+  // skills
+  'SkillRegistry',
+  'parseFrontmatter',
+  'validateSkillFrontmatter',
+  'validateStagedSkill',
+  'renderSkillCatalog',
+  'renderSkillBody',
+  'renderSkillInvocation',
+  'renderSkillFindResults',
+  'rankCatalogRecords',
+  'applySkillArguments',
+  'suggestSkillNames',
+  'sanitizeForPromptBlock',
+  'createSkillTool',
+  'createSkillFindTool',
+  // The turn-scoped tool ceiling (§5). Only the decide/judge pair is promoted to
+  // the root barrel; the alias tables stay on the `./skills` subpath.
+  'computeToolPolicy',
+  'evaluateToolCall',
+  'SKILL_CATALOG_MAX_BYTES',
+  'SKILL_BODY_MAX_BYTES',
+  'SKILL_RESULT_MAX_BYTES',
+  'ALWAYS_SKILLS_MAX_BYTES',
+  'SKILL_MD_MAX_BYTES',
+  'SKILL_DESC_LINE_MAX',
+  'SKILL_FILES_MAX',
+  'SKILL_FIND_MAX_BYTES',
+  'SKILL_NAME_PATTERN',
   // brand alias
   'ArgonAgent',
 ];
@@ -74,8 +102,8 @@ describe('@argon-agent/core public API contract', () => {
     expect(Object.keys(api).sort()).toEqual([...EXPECTED].sort());
   });
 
-  it('expects exactly 33 runtime exports with no duplicates', () => {
-    expect(EXPECTED.length).toBe(33);
+  it('expects exactly 58 runtime exports with no duplicates', () => {
+    expect(EXPECTED.length).toBe(58);
     expect(new Set(EXPECTED).size).toBe(EXPECTED.length);
   });
 });

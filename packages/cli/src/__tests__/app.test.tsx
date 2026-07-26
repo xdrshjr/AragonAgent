@@ -14,7 +14,8 @@ const { App } = await import('../ui/App.js');
 const { runHeadless } = await import('../agent/headless.js');
 const { frameHeight } = await import('../ui/layout/frame.js');
 import type { AgentController } from '../agent/controller.js';
-import type { CliConfig } from '../config/schema.js';
+import { DEFAULT_SKILLS_CONFIG, DEFAULT_SKILLS_RUNTIME, type CliConfig } from '../config/schema.js';
+import type { SkillService } from '../skills/service.js';
 import type { HeadlessController } from '../agent/headless.js';
 import type { RenderMode } from '../ui/layout/frame.js';
 
@@ -56,11 +57,25 @@ const CONFIG: CliConfig = {
   density: 'comfortable',
   hints: true,
   submitCount: 0,
+  skills: DEFAULT_SKILLS_CONFIG,
+  skillsRuntime: DEFAULT_SKILLS_RUNTIME,
   cwd: '/work',
   color: true,
   colorLevel: 3,
   unicode: true,
 };
+
+/**
+ * The narrow slice of `SkillService` the App touches while mounting: command
+ * registration reads `list()`, the trust-gate effect reads `untrustedDirs()`.
+ * Kept as a stub rather than a real service so these tests never touch the
+ * developer's actual skills directory.
+ */
+const EMPTY_SKILL_SERVICE = {
+  list: () => [],
+  untrustedDirs: () => [],
+  getRegistry: () => ({ activeNames: [] as string[] }),
+} as unknown as SkillService;
 
 class FakeController {
   private readonly listeners = new Set<(e: AgentEvent) => void>();
@@ -104,6 +119,10 @@ class FakeController {
   prompt(text: string): Promise<void> {
     return this.onPrompt ? this.onPrompt(text) : Promise.resolve();
   }
+  getSkillService(): SkillService {
+    return EMPTY_SKILL_SERVICE;
+  }
+  setOnSkillsChanged(): void {}
 }
 
 function mount(fc: FakeController, extra: { initialPrompt?: string; mode?: RenderMode } = {}) {

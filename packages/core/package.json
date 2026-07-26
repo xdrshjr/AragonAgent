@@ -1,6 +1,6 @@
 {
   "name": "@argon-agent/core",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "ArgonAgent core engine — LLM provider adapters, streaming, tool registry/execution, steering, idle watchdog, and an optional isolated-vm sandbox.",
   "license": "MIT",
   "author": "ArgonAgent contributors",
@@ -54,6 +54,10 @@
       "types": "./dist/tools/helpers.d.ts",
       "import": "./dist/tools/helpers.js"
     },
+    "./skills": {
+      "types": "./dist/skills/index.d.ts",
+      "import": "./dist/skills/index.js"
+    },
     "./sandbox/*": {
       "types": "./dist/sandbox/*.d.ts",
       "import": "./dist/sandbox/*.js"
@@ -72,6 +76,9 @@
       ],
       "tools/helpers": [
         "./dist/tools/helpers.d.ts"
+      ],
+      "skills": [
+        "./dist/skills/index.d.ts"
       ],
       "sandbox/*": [
         "./dist/sandbox/*.d.ts"

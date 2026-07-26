@@ -84,10 +84,32 @@ export function readEnvConfig(): EnvConfig {
     partial.fullscreen = fullscreen === '1' || fullscreen === 'true' || fullscreen === 'on' || fullscreen === 'yes';
   }
 
+  // ARGON_SKILLS=0 is the kill switch for the whole skill subsystem; the other
+  // two skill env vars (ARGON_SKILLS_PATH, ARGON_SKILLS_DISABLED) are read where
+  // they are used — the search-root resolver and the service respectively —
+  // because neither maps onto a single persisted field.
+  const skills = process.env.ARGON_SKILLS?.trim().toLowerCase();
+  if (skills !== undefined && skills.length > 0) {
+    partial.skills = {
+      ...(partial.skills ?? {}),
+      enabled: !(skills === '0' || skills === 'false' || skills === 'off' || skills === 'no'),
+    } as PersistedConfig['skills'];
+  }
+
   const apiKeys: Record<string, string | undefined> = {};
   for (const [prov, names] of Object.entries(PROVIDER_ENV_KEYS)) {
     apiKeys[prov] = firstEnv(names);
   }
 
   return { partial, apiKeys };
+}
+
+/** Skill names disabled for this run via `ARGON_SKILLS_DISABLED` (comma-separated). */
+export function readEnvDisabledSkills(): string[] {
+  const raw = process.env.ARGON_SKILLS_DISABLED;
+  if (!raw || raw.trim().length === 0) return [];
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 }

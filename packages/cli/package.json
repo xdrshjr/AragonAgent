@@ -1,6 +1,6 @@
 {
   "name": "@argon-agent/cli",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "ArgonAgent CLI — a Claude-Code / Codex-style interactive terminal UI (TUI) on top of the @argon-agent/core engine. Installable and runnable via npm / npx.",
   "license": "MIT",
   "author": "ArgonAgent contributors",
@@ -32,6 +32,7 @@
   },
   "files": [
     "dist",
+    "skills",
     "README.md",
     "CHANGELOG.md"
   ],
@@ -48,12 +49,13 @@
     "start": "node dist/cli.js"
   },
   "dependencies": {
-    "@argon-agent/core": "^0.1.1",
+    "@argon-agent/core": "^0.1.2",
     "chalk": "^5.6.2",
     "cli-highlight": "^2.0.0",
     "commander": "^12.1.0",
     "dotenv": "^16.6.1",
     "env-paths": "^3.0.0",
+    "fflate": "^0.8.3",
     "ink": "^5.0.1",
     "ink-select-input": "^6.0.0",
     "ink-spinner": "^5.0.0",

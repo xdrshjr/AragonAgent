@@ -131,6 +131,175 @@ export function clampTranscriptWindow(v: unknown, fallback: number): number {
 }
 
 // ---------------------------------------------------------------------------
+// Skills (spec §10.3)
+// ---------------------------------------------------------------------------
+
+export interface SkillsConfig {
+  enabled: boolean;
+  /** Skill names the user has switched off. */
+  disabled: string[];
+  /** Gate `skill_install` / `skill_create` behind a human confirmation (D12). */
+  requireApproval: boolean;
+  /** Hosts an install may fetch from. Anything else is refused (SSRF guard). */
+  allowedHosts: string[];
+  /** Project-relative skill roots, in ascending precedence. */
+  projectDirs: string[];
+  /** Absolute, normalized directories the user has trusted (D13 / §9.3). */
+  trustedProjectDirs: string[];
+  /** D19: BYTES, not characters. */
+  catalogMaxBytes: number;
+  /** D19: BYTES, not characters. Upper bound derives from SKILL_RESULT_MAX_BYTES. */
+  bodyMaxBytes: number;
+  /**
+   * What to do when SKILL.md no longer matches the copy that was approved (§8.2).
+   *
+   * Defaults to `warn`, NOT `strict` (D-A13). Hand-editing an installed skill is
+   * a legitimate workflow — the same one `update --force` exists to protect —
+   * and a default that silently removed the edited skill from the catalog would
+   * present as "I changed one line and it disappeared".
+   */
+  integrity: SkillsIntegrityMode;
+  /**
+   * Keep local per-skill use counters to rank the catalog (§9). Name, count and
+   * timestamp only; never transmitted. `false` disables all reads and writes.
+   */
+  usageTracking: boolean;
+  /**
+   * How hard `allowed-tools` bites (§5.5).
+   *
+   * Defaults to `enforce`, NOT `warn` — the opposite of `integrity`, and the two
+   * are not comparable. A false integrity alarm punishes a user for legitimately
+   * editing a file they own; a false ceiling refusal requires a skill AUTHOR to
+   * have under-declared what their own skill uses, which is a bug in the skill
+   * and one that `doctor` reports before it can bite. Add the three narrowings
+   * that already apply — one turn only, only for skills that declared anything,
+   * and every read-only tool in the floor — and shipping it off by default would
+   * just be a second decorative field.
+   */
+  toolPolicy: SkillsToolPolicyMode;
+}
+
+export const SKILLS_INTEGRITY_MODES = ['off', 'warn', 'strict'] as const;
+export type SkillsIntegrityMode = (typeof SKILLS_INTEGRITY_MODES)[number];
+
+export function clampSkillsIntegrity(v: unknown, fallback: SkillsIntegrityMode): SkillsIntegrityMode {
+  return typeof v === 'string' && (SKILLS_INTEGRITY_MODES as readonly string[]).includes(v)
+    ? (v as SkillsIntegrityMode)
+    : fallback;
+}
+
+export const SKILLS_TOOL_POLICY_MODES = ['off', 'warn', 'enforce'] as const;
+export type SkillsToolPolicyMode = (typeof SKILLS_TOOL_POLICY_MODES)[number];
+
+export function isSkillsToolPolicyMode(v: unknown): v is SkillsToolPolicyMode {
+  return typeof v === 'string' && (SKILLS_TOOL_POLICY_MODES as readonly string[]).includes(v);
+}
+
+export function clampSkillsToolPolicy(
+  v: unknown,
+  fallback: SkillsToolPolicyMode,
+): SkillsToolPolicyMode {
+  return isSkillsToolPolicyMode(v) ? v : fallback;
+}
+
+export const DEFAULT_ALLOWED_SKILL_HOSTS = [
+  'github.com',
+  'raw.githubusercontent.com',
+  'codeload.github.com',
+  'gitlab.com',
+  'objects.githubusercontent.com',
+];
+
+export const DEFAULT_SKILLS_CONFIG: SkillsConfig = {
+  enabled: true,
+  disabled: [],
+  requireApproval: true,
+  allowedHosts: DEFAULT_ALLOWED_SKILL_HOSTS,
+  projectDirs: ['.argon/skills', '.claude/skills'],
+  trustedProjectDirs: [],
+  catalogMaxBytes: 6000,
+  bodyMaxBytes: 30_000,
+  integrity: 'warn',
+  usageTracking: true,
+  toolPolicy: 'enforce',
+};
+
+const CATALOG_BYTES_RANGE = { min: 500, max: 40_000 };
+/**
+ * Upper bound is 50 000, NOT the 90 000 an earlier draft used.
+ * `SKILL_RESULT_MAX_BYTES` is 60 000 and must also fit the file list and the
+ * head/tail guidance; 50 000 leaves that margin. A 90 000-CHARACTER body is
+ * 270 000 bytes of CJK, which `ToolExecutor` would chop mid-tag (D19).
+ */
+const BODY_BYTES_RANGE = { min: 1000, max: 50_000 };
+
+function clampInt(v: unknown, fallback: number, range: { min: number; max: number }): number {
+  const n = coercePositiveInt(v, fallback);
+  return Math.min(range.max, Math.max(range.min, n));
+}
+
+function stringArray(v: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(v)) return fallback;
+  const out = v.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+  return out.map((s) => s.trim());
+}
+
+function bool(v: unknown, fallback: boolean): boolean {
+  return typeof v === 'boolean' ? v : fallback;
+}
+
+/**
+ * THE single gate for every skills-config read AND write (§10.3.1).
+ *
+ * Shared by `loadConfig()`, `loadPersistedConfig()` and `updatePersistedConfig()`
+ * on purpose: hardening only the read path would leave a corrupt value on disk
+ * that silently reverts to a default on every launch — the failure looks like
+ * "my setting won't stick" with no error anywhere.
+ */
+export function clampSkillsConfig(raw: unknown): SkillsConfig {
+  const src = (raw && typeof raw === 'object' ? raw : {}) as Partial<Record<keyof SkillsConfig, unknown>>;
+  return {
+    enabled: bool(src.enabled, DEFAULT_SKILLS_CONFIG.enabled),
+    disabled: stringArray(src.disabled, DEFAULT_SKILLS_CONFIG.disabled),
+    requireApproval: bool(src.requireApproval, DEFAULT_SKILLS_CONFIG.requireApproval),
+    allowedHosts: stringArray(src.allowedHosts, DEFAULT_SKILLS_CONFIG.allowedHosts),
+    projectDirs: stringArray(src.projectDirs, DEFAULT_SKILLS_CONFIG.projectDirs),
+    trustedProjectDirs: stringArray(src.trustedProjectDirs, DEFAULT_SKILLS_CONFIG.trustedProjectDirs),
+    catalogMaxBytes: clampInt(
+      src.catalogMaxBytes,
+      DEFAULT_SKILLS_CONFIG.catalogMaxBytes,
+      CATALOG_BYTES_RANGE,
+    ),
+    bodyMaxBytes: clampInt(src.bodyMaxBytes, DEFAULT_SKILLS_CONFIG.bodyMaxBytes, BODY_BYTES_RANGE),
+    integrity: clampSkillsIntegrity(src.integrity, DEFAULT_SKILLS_CONFIG.integrity),
+    usageTracking: bool(src.usageTracking, DEFAULT_SKILLS_CONFIG.usageTracking),
+    toolPolicy: clampSkillsToolPolicy(src.toolPolicy, DEFAULT_SKILLS_CONFIG.toolPolicy),
+  };
+}
+
+/**
+ * Run-time-only skill switches (§7.5). These come from flags / env and are
+ * NEVER persisted, which is why they do not live in `SkillsConfig`.
+ */
+export interface SkillsRuntimeOptions {
+  /** `--skill <name>` ×N — force Level 2 injection for this run only. */
+  forcedSkills: string[];
+  /** `--skills-yes` — approve installs for this run only. */
+  approveAll: boolean;
+  /**
+   * `--skill-tool-policy <mode>` — override the ceiling mode for this run.
+   *
+   * Sits BETWEEN the session override and the config file (D-G19), not on top of
+   * everything: the refusal text tells the user to run `/skills policy off`, and
+   * a flag that outranked that command would make the documented escape hatch a
+   * no-op with no message to explain it.
+   */
+  toolPolicy?: SkillsToolPolicyMode;
+}
+
+export const DEFAULT_SKILLS_RUNTIME: SkillsRuntimeOptions = { forcedSkills: [], approveAll: false };
+
+// ---------------------------------------------------------------------------
 // Persisted config (the JSON file at `envPaths('argon-agent').config`)
 // ---------------------------------------------------------------------------
 
@@ -163,6 +332,8 @@ export interface PersistedConfig {
   hints: boolean;
   /** Lifetime submit count driving the progressive-disclosure fade (§4.6). */
   submitCount: number;
+  /** Skill system settings. The SECOND nested object in this file after apiKeys. */
+  skills: SkillsConfig;
 }
 
 export const DEFAULT_CONFIG: PersistedConfig = {
@@ -186,6 +357,7 @@ export const DEFAULT_CONFIG: PersistedConfig = {
   density: 'comfortable',
   hints: true,
   submitCount: 0,
+  skills: DEFAULT_SKILLS_CONFIG,
 };
 
 // ---------------------------------------------------------------------------
@@ -225,6 +397,9 @@ export interface CliConfig {
   density: DensityMode;
   hints: boolean;
   submitCount: number;
+  skills: SkillsConfig;
+  /** Flag/env-only skill switches for this run (§7.5). Never persisted. */
+  skillsRuntime: SkillsRuntimeOptions;
 
   // Resolved, non-persisted fields.
   /** Working directory for tools (default `process.cwd()`, overridable). */

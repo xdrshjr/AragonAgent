@@ -136,9 +136,16 @@ export function moveVertical(
   return { cursor: start + Math.min(col, lines[target]!.length) };
 }
 
-/** Slash-command suggestions when the buffer is a bare `/word` (no space yet). */
+/**
+ * Slash-command suggestions when the buffer is a bare `/word` (no space yet).
+ *
+ * The character class covers `-` and `:` as well as `\w` (D16). Skill names are
+ * kebab-case and the namespaced fallback is `/skill:<name>`; with the original
+ * `^\/(\w*)$` a user typing `/my-sk` got NO popup at all — not an error message,
+ * just silence, which reads as "that command does not exist".
+ */
 export function slashSuggestions(buffer: string, commands: CommandOption[]): Suggestion[] | null {
-  const m = /^\/(\w*)$/.exec(buffer);
+  const m = /^\/([\w:-]*)$/.exec(buffer);
   if (!m) return null;
   const q = m[1]!.toLowerCase();
   return commands

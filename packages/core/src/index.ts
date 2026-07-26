@@ -154,6 +154,72 @@ export { ToolExecutor } from './tools/executor.js';
 export type { ToolExecutorOptions } from './tools/executor.js';
 
 // ---------------------------------------------------------------------------
+// Skills — progressive-disclosure skill system
+//
+// Pure logic only (D1): parsing, validation, registry, budgeting, rendering and
+// the Level 2 tool factory. All filesystem / network / process work lives in the
+// CLI and reaches this module through the injected `SkillHost` port, which is
+// what keeps this package free of `node:*` imports.
+// ---------------------------------------------------------------------------
+
+export { SkillRegistry } from './skills/skill-registry.js';
+export { parseFrontmatter } from './skills/frontmatter.js';
+export { validateSkillFrontmatter, validateStagedSkill } from './skills/validate.js';
+export {
+  renderSkillCatalog,
+  renderSkillBody,
+  renderSkillInvocation,
+  renderSkillFindResults,
+  rankCatalogRecords,
+  applySkillArguments,
+  suggestSkillNames,
+  sanitizeForPromptBlock,
+} from './skills/disclosure.js';
+export { createSkillTool } from './skills/skill-tool.js';
+export { createSkillFindTool } from './skills/skill-find-tool.js';
+// The turn-scoped tool ceiling (§5). Only the two entry points the host needs to
+// decide and to judge a call; the alias tables and the rendering helpers stay on
+// the `./skills` subpath, matching the existing split of this barrel.
+export { computeToolPolicy, evaluateToolCall } from './skills/tool-policy.js';
+export {
+  // Every budget below is measured in UTF-8 BYTES (D19).
+  SKILL_CATALOG_MAX_BYTES,
+  SKILL_BODY_MAX_BYTES,
+  SKILL_RESULT_MAX_BYTES,
+  ALWAYS_SKILLS_MAX_BYTES,
+  SKILL_MD_MAX_BYTES,
+  SKILL_DESC_LINE_MAX,
+  SKILL_FILES_MAX,
+  SKILL_FIND_MAX_BYTES,
+  SKILL_NAME_PATTERN,
+} from './skills/constants.js';
+
+export type {
+  SkillScope,
+  SkillActivation,
+  SkillFrontmatter,
+  SkillRecord,
+  SkillFileRef,
+  SkillHost,
+  SkillManifest,
+  SkillValidationIssue,
+  SkillCatalogOptions,
+  SkillBodyOptions,
+  SkillFindOptions,
+  SkillIntegrity,
+  SkillUsageStat,
+  SkillUsageMap,
+  SkillInvocationOptions,
+  SkillPlatform,
+  SkillPolicyView,
+  SkillToolPolicyMode,
+  ToolPolicyDecision,
+  ToolPolicyInput,
+  ToolPolicySource,
+  ToolPolicyVerdict,
+} from './skills/types.js';
+
+// ---------------------------------------------------------------------------
 // Agent event types
 // ---------------------------------------------------------------------------
 

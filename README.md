@@ -16,6 +16,11 @@ ArgonAgent provides the full agentic LLM execution loop:
   executor with per-tool timeouts.
 - **Engine** — multi-turn agent loop, message management, a steering/follow-up
   queue, and an idle watchdog.
+- **Skills** — reusable expert procedures on disk, surfaced to the model through
+  three levels of progressive disclosure so fifty of them cost a few thousand
+  characters of context. Parsing, validation, budgeting and rendering live in
+  core; all I/O lives in the CLI behind an injected `SkillHost` port. See the
+  [Skills section of the CLI README](packages/cli/README.md#skills).
 - **Optional sandbox** — an `isolated-vm` based JavaScript CodeAct sandbox
   (lazy-loaded; `isolated-vm` is an optional dependency).
 
@@ -39,14 +44,25 @@ argon-agent-core/
 ## CLI
 
 [`@argon-agent/cli`](./packages/cli) is a Claude-Code / Codex-style interactive
-terminal UI built on top of the engine. After `npm i -g @argon-agent/cli` (or a
-zero-install `npx @argon-agent/cli`), run `aragon` in any directory for a
+terminal UI built on top of the engine. Run `aragon` in any directory for a
 full-screen, keyboard-driven chat with a built-in filesystem/shell toolset.
 
 <p align="center">
   <img src="./logo/screenshot.png" width="900"
        alt="aragon running in Windows PowerShell: the ARGON banner over a full-screen TUI, with the active model and working directory in the header, a message composer at the bottom, and a status bar reporting idle state, thinking level, context usage, token counts, and session cost." />
 </p>
+
+```bash
+# Global
+npm i -g @argon-agent/cli
+aragon
+
+# Zero-install
+npx @argon-agent/cli
+```
+
+From a clone of this monorepo, build and launch it against your working copy
+instead:
 
 ```bash
 npm run dev:cli          # build + launch the TUI from this monorepo

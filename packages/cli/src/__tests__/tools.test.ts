@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentTool, ToolExecutionContext, ToolResult } from '@argon-agent/core';
-import { createBuiltinTools } from '../tools/index.js';
+import { createBuiltinTools, HOST_TOOL_NAMES, SKILL_TOOL_FLOOR } from '../tools/index.js';
 
 let dir: string;
 let tools: Record<string, AgentTool>;
@@ -138,4 +138,96 @@ describe('bash', () => {
     expect(r.isError).toBe(true);
     expect(text(r)).toContain('timed out');
   }, 8000);
+});
+
+// ---------------------------------------------------------------------------
+// The tool ceiling wrapper (§5.4b)
+// ---------------------------------------------------------------------------
+
+describe('SKILL_TOOL_FLOOR / HOST_TOOL_NAMES (D-G6 / D-G7 / P1-8)', () => {
+  it('the floor is read-only work plus the two skill lookups, and nothing else', () => {
+    // Anything that CHANGES the world must stay outside the floor, or the
+    // ceiling controls nothing worth controlling.
+    expect([...SKILL_TOOL_FLOOR]).toEqual([
+      'read_file',
+      'list_dir',
+      'glob',
+      'grep',
+      'skill',
+      'skill_find',
+    ]);
+    for (const mutating of ['write_file', 'edit_file', 'bash', 'skill_install', 'skill_create']) {
+      expect(SKILL_TOOL_FLOOR).not.toContain(mutating);
+    }
+  });
+
+  it('C7: HOST_TOOL_NAMES matches what createBuiltinTools actually produces', () => {
+    // Two lists of tool names is one more than the system can keep honest by
+    // itself. Drift here means doctor silently reports a valid declaration as
+    // NOT ENFORCEABLE, or misses one that really is broken.
+    const skillTools = ['skill', 'skill_find', 'skill_install', 'skill_create'].map((name) => ({
+      name,
+      label: name,
+      description: name,
+      parameters: { type: 'object', properties: {} },
+      execute: async () => ({ content: [] }),
+    }));
+    const produced = createBuiltinTools({ getCwd: () => dir, skillTools }).map((t) => t.name);
+    expect([...HOST_TOOL_NAMES].sort()).toEqual(produced.sort());
+  });
+
+  it('every floor entry is a real host tool', () => {
+    for (const name of SKILL_TOOL_FLOOR) expect(HOST_TOOL_NAMES).toContain(name);
+  });
+});
+
+describe('AC-G17 — the --no-skills path is untouched', () => {
+  it('yields exactly seven tools', () => {
+    expect(createBuiltinTools({ getCwd: () => dir })).toHaveLength(7);
+  });
+
+  it('leaves the tool objects UNTOUCHED, proven by identity', () => {
+    // A ceiling that always allowed would behave the same, so this assertion
+    // buys nothing at run time — it buys the ability to PROVE "this path is
+    // unchanged from iteration 2" instead of asking anyone to take it on trust.
+    //
+    // A sentinel passed through `skillTools` is what makes identity checkable at
+    // all: the built-ins are freshly constructed on every call, so only an object
+    // supplied by the caller can be compared with `toBe`.
+    const sentinel: AgentTool = {
+      name: 'sentinel',
+      label: 'Sentinel',
+      description: 'identity probe',
+      parameters: { type: 'object', properties: {} },
+      execute: async () => ({ content: [] }),
+    };
+
+    const bare = createBuiltinTools({ getCwd: () => dir, skillTools: [sentinel] });
+    expect(bare[bare.length - 1]).toBe(sentinel);
+
+    const wrapped = createBuiltinTools({
+      getCwd: () => dir,
+      skillTools: [sentinel],
+      toolPolicy: () => ({ mode: 'off', allowed: null, sources: [], sourceNames: [], ignored: [] }),
+    });
+    // With a decision provider every tool is a copy — including the sentinel.
+    expect(wrapped[wrapped.length - 1]).not.toBe(sentinel);
+    expect(wrapped[wrapped.length - 1]!.name).toBe('sentinel');
+  });
+
+  it('a decision provider is what switches wrapping on', async () => {
+    const decision = {
+      mode: 'enforce' as const,
+      allowed: new Set(['read_file']),
+      sources: [{ name: 's', declared: ['read_file'], granted: ['read_file'] }],
+      sourceNames: ['s'],
+      ignored: [],
+    };
+    const wrapped = Object.fromEntries(
+      createBuiltinTools({ getCwd: () => dir, toolPolicy: () => decision }).map((t) => [t.name, t]),
+    );
+    const refused = await wrapped.bash!.execute('1', { command: 'echo hi' }, ctx);
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toContain('not permitted');
+  });
 });

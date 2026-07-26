@@ -23,14 +23,18 @@ import {
   clampDensity,
   clampTheme,
   clampThinkingLevel,
+  clampSkillsIntegrity,
+  clampSkillsToolPolicy,
   clampTranscriptWindow,
   coerceMaxTokens,
   coercePositiveInt,
   isAdapterProvider,
+  DEFAULT_SKILLS_CONFIG,
   type PersistedConfig,
 } from './config/schema.js';
 import { makeGetApiKey } from './config/load.js';
-import { AgentController } from './agent/controller.js';
+import { AgentController, DENY_ALL_APPROVAL } from './agent/controller.js';
+import { runSkillsCommand, type SkillsCliOptions } from './skills/cli-commands.js';
 import { runHeadless } from './agent/headless.js';
 import { App, type ConfirmBridge } from './ui/App.js';
 import { decideRenderMode } from './ui/layout/frame.js';
@@ -83,6 +87,10 @@ interface RawOpts {
   quiet?: boolean;
   compact?: boolean;
   hints?: boolean;
+  skills?: boolean;
+  skill?: string[];
+  skillsYes?: boolean;
+  skillToolPolicy?: string;
 }
 
 function toFlags(opts: RawOpts): CliFlags {
@@ -103,6 +111,10 @@ function toFlags(opts: RawOpts): CliFlags {
     exitTranscript: opts.exitTranscript,
     compact: opts.compact,
     hints: opts.hints,
+    skills: opts.skills,
+    skill: opts.skill,
+    skillsYes: opts.skillsYes,
+    skillToolPolicy: opts.skillToolPolicy,
   };
 }
 
@@ -110,12 +122,47 @@ function toFlags(opts: RawOpts): CliFlags {
 // Modes
 // ---------------------------------------------------------------------------
 
-function makeController(flags: CliFlags): { controller: AgentController; confirmBridge: ConfirmBridge } {
+/**
+ * Build the controller for a mode.
+ *
+ * TWO DIFFERENT APPROVAL CHANNELS, AND THEY MUST NOT BE CONFLATED:
+ *
+ *   `confirm`  — the `--confirm` gate for mutating tools. Its `handler === null`
+ *                fallback is `Promise.resolve(true)`, which is fine because that
+ *                path is opt-in and only reachable with the TUI mounted.
+ *
+ *   `approval` — the skill-install gate. It PROBES for a human first and denies
+ *                when there is none (D17 / §8.3.1). Passing the `confirm`
+ *                closure here instead would inherit the auto-approve fallback
+ *                and make `requireApproval: true` a no-op under `-p`, silently.
+ *
+ * `interactive: false` (the headless path) gets the deny-all gate, so a model
+ * calling `skill_install` in `-p` mode is refused with an actionable message
+ * instead of writing to disk unattended.
+ */
+function makeController(
+  flags: CliFlags,
+  opts: { interactive: boolean } = { interactive: true },
+): { controller: AgentController; confirmBridge: ConfirmBridge } {
   const config = loadConfig(flags);
   const confirmBridge: ConfirmBridge = { handler: null };
   const controller = new AgentController(config, {
+    version: VERSION,
     confirm: (req: ConfirmRequest) =>
       confirmBridge.handler ? confirmBridge.handler(req) : Promise.resolve(true),
+    approval: opts.interactive
+      ? {
+          // Read live on every call: the App's effect cleanup nulls the handler
+          // on unmount, and a cached `true` would keep the gate open after the
+          // human channel is gone.
+          canPrompt: () => confirmBridge.handler !== null,
+          request: (req: ConfirmRequest) =>
+            confirmBridge.handler ? confirmBridge.handler(req) : Promise.resolve(false),
+        }
+      : DENY_ALL_APPROVAL,
+    notify: (level, text) => {
+      if (!opts.interactive) process.stderr.write(`[skills] ${level}: ${text}\n`);
+    },
   });
   return { controller, confirmBridge };
 }
@@ -211,7 +258,16 @@ function runInteractive(
 }
 
 async function runOneShot(flags: CliFlags, prompt: string, quiet: boolean): Promise<void> {
-  const { controller } = makeController(flags);
+  // Headless: no App is ever rendered, so there is no human to approve a skill
+  // install. The gate must know that up front rather than discovering a null
+  // handler and defaulting to "yes" (§7.4 / AC-13).
+  const { controller } = makeController(flags, { interactive: false });
+  const untrusted = controller.getSkillService().untrustedDirs();
+  for (const dir of untrusted) {
+    process.stderr.write(
+      `[skills] project skills in ${dir} skipped (untrusted). Run: aragon skills trust ${dir}\n`,
+    );
+  }
   const code = await runHeadless(controller, prompt, { quiet });
   process.exitCode = code;
 }
@@ -275,6 +331,14 @@ const CONFIG_SET_KEYS = new Set([
   // flags and never persist -- inconsistent with every other config field.
   'density',
   'hints',
+  // Dotted keys route into the nested `skills` object; see the switch below.
+  'skills.enabled',
+  'skills.requireApproval',
+  'skills.catalogMaxBytes',
+  'skills.bodyMaxBytes',
+  'skills.integrity',
+  'skills.usageTracking',
+  'skills.toolPolicy',
 ]);
 
 function runConfigSet(key: string, value: string): void {
@@ -329,6 +393,41 @@ function runConfigSet(key: string, value: string): void {
     case 'hints':
       patch.hints = value === 'true' || value === '1';
       break;
+    // The dotted keys write a PARTIAL `skills` object. That is safe only
+    // because `updatePersistedConfig` deep-merges this section (§10.3.2) —
+    // with the old shallow merge each of these would wipe trustedProjectDirs.
+    case 'skills.enabled':
+      patch.skills = { enabled: value === 'true' || value === '1' } as PersistedConfig['skills'];
+      break;
+    case 'skills.requireApproval':
+      patch.skills = {
+        requireApproval: value === 'true' || value === '1',
+      } as PersistedConfig['skills'];
+      break;
+    case 'skills.catalogMaxBytes':
+      patch.skills = { catalogMaxBytes: coercePositiveInt(value, 6000) } as PersistedConfig['skills'];
+      break;
+    case 'skills.bodyMaxBytes':
+      patch.skills = { bodyMaxBytes: coercePositiveInt(value, 30_000) } as PersistedConfig['skills'];
+      break;
+    // Clamped rather than rejected, exactly like `theme` and `thinkingLevel`:
+    // hardening only the READ path leaves a bad value on disk that reverts to
+    // the default on every launch, which presents as "my setting won't stick".
+    case 'skills.integrity':
+      patch.skills = {
+        integrity: clampSkillsIntegrity(value, DEFAULT_SKILLS_CONFIG.integrity),
+      } as PersistedConfig['skills'];
+      break;
+    case 'skills.usageTracking':
+      patch.skills = {
+        usageTracking: value === 'true' || value === '1',
+      } as PersistedConfig['skills'];
+      break;
+    case 'skills.toolPolicy':
+      patch.skills = {
+        toolPolicy: clampSkillsToolPolicy(value, DEFAULT_SKILLS_CONFIG.toolPolicy),
+      } as PersistedConfig['skills'];
+      break;
   }
   updatePersistedConfig(patch);
   process.stdout.write(`Set ${key} = ${value}\n`);
@@ -371,6 +470,17 @@ function buildProgram(): Command {
     .option('--fullscreen', 'Force the full-screen TUI (overrides auto-downgrade, except non-TTY)')
     .option('--no-fullscreen', 'Force the inline renderer (v0.2.0 behavior)')
     .option('--no-exit-transcript', 'Do not replay the session summary after exiting')
+    .option('--no-skills', 'Disable the skill system entirely (no catalog, no skill tools)')
+    .option(
+      '--skill <name>',
+      'Force-load a skill at Level 2 for this run (repeatable)',
+      (value: string, previous: string[] = []) => [...previous, value],
+    )
+    .option('--skills-yes', 'Approve skill installs for this run (CI / headless)')
+    .option(
+      '--skill-tool-policy <mode>',
+      'Tool ceiling from allowed-tools for this run: off | warn | enforce (not persisted)',
+    )
     .option('--no-color', 'Disable ANSI color')
     .option('--quiet', '(print mode) suppress tool/usage lines on stderr')
     .action(async (prompt: string | undefined, opts: RawOpts) => {
@@ -424,6 +534,34 @@ function buildProgram(): Command {
     .description('Print the config file path')
     .action(() => {
       process.stdout.write(`${getConfigPath()}\n`);
+    });
+
+  // aragon skills <sub> [arg] [--scope] [--name] [--description] [--yes] [--json]
+  program
+    .command('skills [subcommand] [argument]')
+    .description(
+      'Manage skills: list | info | install | update | remove | create | path | doctor | usage | trust | untrust',
+    )
+    .option('--scope <scope>', 'user | project')
+    .option('--name <name>', 'Override the installed skill name')
+    .option('--description <text>', 'Description for `skills create`')
+    .option('--yes', 'Approve without prompting (required for non-interactive installs)')
+    .option('--json', 'Machine-readable output for list / info')
+    .option('--all', 'Apply `skills update` to every skill that has an upstream')
+    .option('--force', 'Let `skills update` overwrite local edits to an installed skill')
+    .option('--dry-run', 'Show what `skills update` would change without writing anything')
+    .option('--check', 'Ask whether an update exists, without downloading it')
+    .option('--sort <order>', 'name | recent (for `skills list`)')
+    .option('--reset', 'Delete the local usage counters (`skills usage`; needs --yes)')
+    .action(async (subcommand: string | undefined, argument: string | undefined, opts: SkillsCliOptions) => {
+      const code = await runSkillsCommand(
+        subcommand ?? 'list',
+        argument,
+        opts,
+        toFlags(program.opts()),
+        VERSION,
+      );
+      process.exitCode = code;
     });
 
   // aragon models [--provider p]

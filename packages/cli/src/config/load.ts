@@ -11,17 +11,20 @@ import {
   DEFAULT_CONFIG,
   IDLE_TIMEOUT_MARGIN_MS,
   clampDensity,
+  clampSkillsConfig,
   clampTheme,
   clampThinkingLevel,
   clampTranscriptWindow,
   coerceMaxTokens,
   coercePositiveInt,
+  isSkillsToolPolicyMode,
   type CliConfig,
   type DensityMode,
   type PersistedConfig,
+  type SkillsConfig,
   type ThemeName,
 } from './schema.js';
-import { loadDotenv, readEnvConfig } from './env.js';
+import { loadDotenv, readEnvConfig, readEnvDisabledSkills } from './env.js';
 import { readConfigFile } from './store.js';
 import { detectCapabilities } from '../ui/capabilities.js';
 
@@ -57,6 +60,14 @@ export interface CliFlags {
   compact?: boolean;
   /** `--hints` ⇒ true, `--no-hints` ⇒ false, absent ⇒ undefined. */
   hints?: boolean;
+  /** `--no-skills` ⇒ false. Turns the whole skill subsystem off (§7.5). */
+  skills?: boolean;
+  /** `--skill <name>` ×N — force Level 2 injection for this run. */
+  skill?: string[];
+  /** `--skills-yes` — approve skill installs for this run only. */
+  skillsYes?: boolean;
+  /** `--skill-tool-policy <mode>` — override the tool ceiling for this run (§5.5). */
+  skillToolPolicy?: string;
 }
 
 /**
@@ -164,6 +175,18 @@ export function loadConfig(flags: CliFlags = {}): CliConfig {
       fileKey && fileKey.trim().length > 0 ? fileKey.trim() : env.apiKeys[prov];
   }
 
+  // Skills: file › env › flags, with `--no-skills` as the final word. The env
+  // layer only ever carries `enabled`, so the file's other fields survive it.
+  const skills: SkillsConfig = clampSkillsConfig({
+    ...DEFAULT_CONFIG.skills,
+    ...(file.skills ?? {}),
+    ...(env.partial.skills ?? {}),
+    ...(flags.skills === false ? { enabled: false } : {}),
+    disabled: [
+      ...new Set([...(file.skills?.disabled ?? []), ...readEnvDisabledSkills()]),
+    ],
+  });
+
   const color = flags.color !== undefined ? flags.color : !process.env.NO_COLOR;
 
   // `--no-color` implies calmer chrome; env / file may also opt in explicitly.
@@ -199,6 +222,18 @@ export function loadConfig(flags: CliFlags = {}): CliConfig {
     density,
     hints,
     submitCount: coercePositiveInt(file.submitCount, 0),
+    skills,
+    skillsRuntime: {
+      forcedSkills: flags.skill ?? [],
+      approveAll: flags.skillsYes === true,
+      // Left ABSENT when the flag was not given (or was given a bad value), so
+      // `effectiveToolPolicy()` can fall through to the config layer. Writing a
+      // resolved default here instead would make the flag look permanently
+      // supplied and mask the config file for the whole session.
+      ...(isSkillsToolPolicyMode(flags.skillToolPolicy)
+        ? { toolPolicy: flags.skillToolPolicy }
+        : {}),
+    },
     cwd,
     color,
     colorLevel,

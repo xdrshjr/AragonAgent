@@ -52,6 +52,7 @@ import { SettingsScreen, type SettingsValues } from './overlays/SettingsScreen.j
 import { ConfirmDialog, type ConfirmState } from './overlays/ConfirmDialog.js';
 import { CommandRegistry, runSlashInput, type CommandContext } from '../commands/registry.js';
 import { registerBuiltinCommands } from '../commands/builtins.js';
+import { makeSkillsCommand, registerSkillCommands } from '../commands/skills.js';
 
 export interface ConfirmBridge {
   handler: ((req: ConfirmRequest) => Promise<boolean>) | null;
@@ -104,6 +105,10 @@ export function App({
   // closing an overlay cannot leave a stale offset behind, and reset whenever
   // the active overlay changes.
   const [overlayScroll, setOverlayScroll] = useState(0);
+  // Bumped whenever the installed skill set changes. The command registry and
+  // the completion list are memoized against it, so a skill installed mid-session
+  // gets its `/<name>` command and its autocomplete entry immediately.
+  const [skillsNonce, setSkillsNonce] = useState(0);
 
   const cfg = controller.getConfig();
   const caps = useMemo<TermCapabilities>(() => {
@@ -129,9 +134,17 @@ export function App({
 
   const registry = useMemo(() => {
     const r = new CommandRegistry();
+    // Order matters: built-ins first, so `registerSkillCommands` sees them when
+    // it probes for name conflicts and a skill can never displace `/exit` (D6).
     registerBuiltinCommands(r);
+    const skills = controller.getSkillService();
+    if (cfg.skills.enabled) {
+      r.register(makeSkillsCommand(skills, version));
+      registerSkillCommands(r, skills);
+    }
     return r;
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller, cfg.skills.enabled, version, skillsNonce]);
   const commandOptions = useMemo(
     () => registry.all().map((c) => ({ name: c.name, description: c.description })),
     [registry],
@@ -232,7 +245,7 @@ export function App({
     });
   }, [state.entries, state.usageTotal, cfg.provider, cfg.model]);
 
-  // --- Confirm bridge (confirmTools mode). -------------------------------
+  // --- Confirm bridge (confirmTools mode + skill approvals). -------------
   useEffect(() => {
     if (!confirmBridge) return;
     confirmBridge.handler = (req: ConfirmRequest) =>
@@ -241,9 +254,51 @@ export function App({
         dispatch({ type: 'setOverlay', overlay: 'confirm' });
       });
     return () => {
+      // The skill ApprovalGate reads `handler !== null` LIVE on every call, so
+      // this cleanup is what makes approvals fail closed again once the App
+      // unmounts. Caching the probe result anywhere would defeat it (Q7).
       confirmBridge.handler = null;
     };
   }, [confirmBridge]);
+
+  // --- Let the controller drive command-list rebuilds. -------------------
+  useEffect(() => {
+    controller.setOnSkillsChanged(() => setSkillsNonce((n) => n + 1));
+  }, [controller]);
+
+  // --- Project skill-directory trust gate (D13 / §9.3). ------------------
+  // Asked once per untrusted root, after the first render so the confirm bridge
+  // is attached. Declining does NOT write anything: the root is skipped for this
+  // session and the question comes back next time, which is the right default
+  // for "I have not looked at this repo yet".
+  const trustAsked = useRef(false);
+  useEffect(() => {
+    if (trustAsked.current || !cfg.skills.enabled) return;
+    const service = controller.getSkillService();
+    const pending = service.untrustedDirs();
+    if (pending.length === 0) return;
+    trustAsked.current = true;
+
+    void (async () => {
+      for (const dir of pending) {
+        const approved = await new Promise<boolean>((resolve) => {
+          setConfirmState({
+            summary:
+              `Load project skills from ${dir}?\n` +
+              'Skills in this directory can inject instructions into this session.',
+            resolve,
+          });
+          dispatch({ type: 'setOverlay', overlay: 'confirm' });
+        });
+        if (approved) {
+          service.trustDir(dir);
+          service.reload();
+          setSkillsNonce((n) => n + 1);
+        }
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller, cfg.skills.enabled]);
 
   // --- Helpers -----------------------------------------------------------
 
@@ -276,6 +331,8 @@ export function App({
     toast,
     persistConfig,
     exit: doExit,
+    submit: (text: string) => submitMessage(text),
+    refreshSkills: () => setSkillsNonce((n) => n + 1),
   });
 
   const recordPrompt = (text: string) => {
@@ -293,15 +350,16 @@ export function App({
     setScrollIntent((prev) => ({ kind, nonce: (prev?.nonce ?? 0) + 1 }));
   }, []);
 
-  const handleSubmit = async (raw: string) => {
-    // Submitting is an unconditional "take me to the newest output" (§4.5).
-    setPinToBottomNonce((n) => n + 1);
-    const handled = await runSlashInput(registry, raw, makeCtx);
-    if (handled) return;
-
-    const message = raw.startsWith('//') ? raw.slice(1) : raw;
-
-    if (state.status === 'running') {
+  /**
+   * Send a message to the agent, bypassing slash parsing.
+   *
+   * Split out of `handleSubmit` so a dynamic skill command can submit the
+   * expanded skill body on the user's behalf: routing that text back through
+   * `handleSubmit` would re-parse it as input and, for a body that happens to
+   * start with `/`, recurse into command dispatch.
+   */
+  const submitMessage = (message: string) => {
+    if (stateRef.current.status === 'running') {
       controller.steer(message);
       toast('info', 'Steering queued.');
       return;
@@ -318,6 +376,15 @@ export function App({
     }
     // Fire-and-forget: events drive the UI. prompt() never rejects.
     void controller.prompt(message);
+  };
+
+  const handleSubmit = async (raw: string) => {
+    // Submitting is an unconditional "take me to the newest output" (§4.5).
+    setPinToBottomNonce((n) => n + 1);
+    const handled = await runSlashInput(registry, raw, makeCtx);
+    if (handled) return;
+
+    submitMessage(raw.startsWith('//') ? raw.slice(1) : raw);
   };
 
   const handleSettingsSave = (values: SettingsValues) => {

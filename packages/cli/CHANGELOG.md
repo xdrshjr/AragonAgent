@@ -10,11 +10,107 @@ All notable changes to `@argon-agent/cli` are documented here.
   `argon-agent` aliases are no longer installed; the npm package name remains
   `@argon-agent/cli`.
 
+### Added
+
+- **Skills.** A skill is a directory holding a `SKILL.md` (YAML frontmatter +
+  Markdown body) plus optional `reference/`, `scripts/` and `assets/`. Skills
+  reach the model through three levels of progressive disclosure: a name +
+  one-line "when to use" catalog in the system prompt (≤ 6 000 bytes total),
+  the full body only when the model calls the `skill` tool, and bundled files
+  only when it reads them with `read_file` / `bash`. A skill therefore costs a
+  line of context rather than its whole body. How many fit in Level 1 depends on
+  description length and language — roughly 30 with terse English descriptions,
+  roughly 10 with Chinese ones at the character cap; past that the catalog
+  truncates and `skill_find` covers the remainder.
+- Four model-facing tools: `skill` (load), `skill_find` (search installed
+  skills), `skill_install` (install from a local directory, git repo, or https
+  `SKILL.md` / `.zip`) and `skill_create` (author a new one from a procedure the
+  agent just worked out).
+- **`aragon skills update <name> | --all`**, with `--dry-run`, `--force` and
+  `--check`. Re-fetches from the source recorded in the install manifest,
+  preserving `installedAt` and recording `updatedAt` / `previousVersion`. Refuses
+  before downloading anything when the installed copy has local edits, and
+  re-validates the source against the *current* `skills.allowedHosts` rather than
+  the one in force at install time. Not exposed to the model.
+- **Catalog ranking.** Level 1 entries are ordered by scope, then by how recently
+  and often each skill was used, so truncation drops what you do not use rather
+  than what sorts last alphabetically. With no usage data the order is unchanged.
+- **`skill_find`**, advertised in the prompt only when the catalog actually
+  truncated. Searches installed skills by name, description and keyword; never
+  reaches the network, never returns `activation: manual` skills, and tells the
+  model to ask for a source rather than invent one when nothing matches.
+- **Cross-process install lock.** Install / create / remove / update take a
+  per-directory advisory lock, closing a race in which two concurrent installs
+  could interleave their atomic-replace steps and delete a skill with no error.
+  Self-expires after 60 s; waits at most 5 s; only ever released by its owner.
+- **Load-time integrity.** Discovery re-checks `SKILL.md` against the sha256
+  recorded at install, at no extra I/O. `skills.integrity` selects
+  `off` / `warn` (default) / `strict`.
+- **Local usage counters** at `<data>/skill-usage.json` — skill name, count and
+  timestamp only, never transmitted, disabled with `skills.usageTracking=false`.
+  Automatically injected `activation: always` skills are not counted.
+- Config keys `skills.integrity` and `skills.usageTracking`; `aragon skills list
+  --sort=recent` and `/skills list --sort=recent`.
+- Every usable skill also becomes a slash command: `/<skill-name> [args]`, with
+  `$ARGUMENTS` / `$1..$9` substitution. On a name clash the built-in command
+  always wins and the skill is reachable as `/skill:<name>`.
+- `/skills` management: `list`, `info`, `install`, `remove`, `enable`,
+  `disable`, `reload`, `create`, `trust`, `untrust`.
+- `aragon skills …` non-interactive equivalents plus `path` and `doctor`.
+  Exit codes follow `config set`: `0` ok, `1` run-time failure, `2` usage.
+- Four discovery scopes in ascending precedence: bundled (`<pkg>/skills`), user
+  (`<data>/skills`), project (`<cwd>/.argon/skills` and, read-only,
+  `<cwd>/.claude/skills` for Claude Code interop), and `ARGON_SKILLS_PATH`.
+- New flags `--no-skills`, `--skill <name>` (repeatable) and `--skills-yes`;
+  env `ARGON_SKILLS`, `ARGON_SKILLS_PATH`, `ARGON_SKILLS_DISABLED`; config keys
+  `skills.enabled`, `skills.requireApproval`, `skills.catalogMaxBytes`,
+  `skills.bodyMaxBytes`.
+- One bundled skill, `skill-creator`, documenting how to write a good one.
+- New runtime dependency: `fflate` (~30 KB, MIT, zero transitive deps) for zip
+  extraction. `@argon-agent/core` gains no dependency.
+
 ### Changed
 
+- `config/store.ts` now deep-merges the `skills` section on both read and write,
+  the same treatment `apiKeys` already received. Without it a partial patch such
+  as the one `/skills disable` sends would replace the whole section and
+  silently discard `trustedProjectDirs`, `allowedHosts` and `requireApproval`.
+- `slashSuggestions` accepts `-` and `:`, so kebab-case and `skill:`-namespaced
+  commands autocomplete. Previously `/my-sk` produced no popup at all.
+- `AgentController` now has a single `agent.setSystemPrompt()` call site, so a
+  `/cwd` change can no longer drop the skill catalog out of the prompt.
+- With skills off or none installed, the system prompt and the 7-tool array are
+  byte-identical to the previous release.
 - Added a repository-level PowerShell release workflow that automatically
   updates CLI and Core versions, synchronizes their dependency and lockfile,
   verifies both tarballs, and publishes them in dependency order.
+
+### Security
+
+- Installing a skill requires an explicit human approval that **probes for a
+  human first and refuses when there is none**. Under `-p` there is no TUI and
+  therefore no approver, so `skill_install` is refused with an actionable
+  message rather than writing a third-party directory unattended. Use
+  `--skills-yes` (or `skills.requireApproval=false`) to opt out deliberately.
+- Project skill directories require a one-time trust confirmation before they
+  are loaded — cloning an unfamiliar repository does not grant it the ability
+  to inject instructions into your session.
+- Git is invoked only via `execFile` with an argv array and `shell: false`, and
+  owner / repo / ref / subdirectory fragments are whitelisted and refused if
+  they begin with `-`. A leading dash matters even with a pure argv array:
+  `--upload-pack=<program>` makes git execute that program.
+- Zip extraction is streamed and gated on **actually written** bytes, per-entry
+  size, compression ratio and entry count, all of which can abort mid-archive.
+  The size a zip *declares* is written by whoever built it and is never trusted.
+  Path traversal, absolute entries, symlinks and Windows device names are
+  refused, and a rejected archive is removed rather than left half-extracted.
+- Network fetches are `https:` only, restricted to `skills.allowedHosts`,
+  re-checked on every redirect (max 3), size-capped, and refuse IP literals and
+  loopback.
+- Nothing a skill ships is executed at install time, and the executable bit is
+  not preserved. Scripts run only when the model invokes `bash` explicitly.
+  There is no sandbox: approval blocks *silent* installation, it does not make
+  a skill you approved safe.
 
 ## 0.3.0
 

@@ -49,6 +49,18 @@ const COMMANDS: [string, string][] = [
   ['/exit', 'Exit'],
 ];
 
+const SKILL_ROWS: [string, string][] = [
+  ['/skills', 'List installed skills'],
+  ['/skills info <name>', 'Show a skill\'s source, files and status'],
+  ['/skills install <src>', 'Install from a dir, git repo, or https URL'],
+  ['/skills enable|disable', 'Turn a skill on or off'],
+  ['/skills policy [mode]', 'Tool ceiling from allowed-tools: off | warn | enforce'],
+  ['/skills unload', 'Drop the tool ceiling (does not reclaim context)'],
+  ['/skills usage [--reset]', 'Show or delete the local skill use counters'],
+  ['/<skill-name> [args]', 'Run a skill directly ($ARGUMENTS / $1..$9)'],
+  ['skill / skill_install', 'Tools the model uses to load and install skills'],
+];
+
 /** Build the overlay's rows. Exported so `app.test.tsx` can count them. */
 export function helpRows(theme: Theme, caps: TermCapabilities): React.ReactElement[] {
   const glyphs = pickGlyphs(caps);
@@ -70,5 +82,7 @@ export function helpRows(theme: Theme, caps: TermCapabilities): React.ReactEleme
   for (const [k, d] of keyRows(glyphs.times)) rows.push(pair(k, d));
   rows.push(section('Slash commands'));
   for (const [c, d] of COMMANDS) rows.push(pair(c, d));
+  rows.push(section('Skills'));
+  for (const [c, d] of SKILL_ROWS) rows.push(pair(c, d));
   return rows;
 }

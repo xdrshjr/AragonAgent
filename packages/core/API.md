@@ -10,7 +10,7 @@
 > All symbols are re-exported from the package root (`@argon-agent/core`). The
 > "Subpath" column also notes the dedicated `exports` entry where one exists.
 
-## Runtime (value) exports — 33
+## Runtime (value) exports — 56
 
 | Symbol | Kind | Subpath | Purpose |
 | --- | --- | --- | --- |
@@ -47,6 +47,39 @@
 | `ToolValidationError` | class | `.` | Error thrown on tool parameter validation failure. |
 | `formatValidationErrors` | fn | `.` | Format `ValidationError[]` into a readable string. |
 | `ToolExecutor` | class | `.` | Execute a tool by name with timeout + validation. |
+| `SkillRegistry` | class | `.`, `./skills` | In-memory skill table: precedence, shadowing, session activation. |
+| `parseFrontmatter` | fn | `.`, `./skills` | Strict-subset YAML frontmatter parser for `SKILL.md`. Returns `null`, never throws. |
+| `validateSkillFrontmatter` | fn | `.`, `./skills` | Frontmatter contract check → `SkillValidationIssue[]` with stable codes. |
+| `validateStagedSkill` | fn | `.`, `./skills` | Pre-install safety check (zip-slip, symlinks, size / count / depth caps). |
+| `renderSkillCatalog` | fn | `.`, `./skills` | Level 1 `<available_skills>` block. `''` when nothing is eligible. |
+| `renderSkillBody` | fn | `.`, `./skills` | Level 2 payload for the `skill` tool result. |
+| `renderSkillInvocation` | fn | `.`, `./skills` | User message produced by a `/<skill-name>` command. |
+| `renderSkillFindResults` | fn | `.`, `./skills` | `skill_find` result block; falls back to an explicit "do not invent a source" refusal on zero matches. |
+| `rankCatalogRecords` | fn | `.`, `./skills` | Catalog order: scope first, then usage recency/frequency. Without a usage map, identical to `catalogRecords`. |
+| `applySkillArguments` | fn | `.`, `./skills` | `$ARGUMENTS` / `$1..$9` / `$$` substitution. |
+| `suggestSkillNames` | fn | `.`, `./skills` | "Did you mean" candidates for an unknown skill name. |
+| `sanitizeForPromptBlock` | fn | `.`, `./skills` | Neutralize untrusted text before it enters a tagged prompt block. Idempotent. |
+| `createSkillTool` | fn | `.`, `./skills` | Build the `skill` (Level 2) `AgentTool` from a registry + a `loadBody` port. |
+| `createSkillFindTool` | fn | `.`, `./skills` | Build the `skill_find` `AgentTool`. Searches the injected registry only — never the network. |
+| `SKILL_CATALOG_MAX_BYTES` | const | `.`, `./skills` | Level 1 block ceiling (UTF-8 **bytes**). |
+| `SKILL_BODY_MAX_BYTES` | const | `.`, `./skills` | SKILL.md body ceiling inside a tool result (bytes). |
+| `SKILL_RESULT_MAX_BYTES` | const | `.`, `./skills` | Whole-result ceiling, kept below `ToolExecutor`'s 100 000-byte cap. |
+| `ALWAYS_SKILLS_MAX_BYTES` | const | `.`, `./skills` | Combined ceiling for `activation: always` bodies (bytes). |
+| `SKILL_MD_MAX_BYTES` | const | `.`, `./skills` | Largest `SKILL.md` the scanner will read. |
+| `SKILL_DESC_LINE_MAX` | const | `.`, `./skills` | Per-entry description cap in the catalog (characters). |
+| `SKILL_FILES_MAX` | const | `.`, `./skills` | Max entries listed in `<skill_files>`. |
+| `SKILL_FIND_MAX_BYTES` | const | `.`, `./skills` | `skill_find` result-block ceiling (UTF-8 **bytes**). |
+| `SKILL_NAME_PATTERN` | const | `.`, `./skills` | Kebab-case validity regex for a skill name. |
+
+> **Units.** Every skill budget named `*_BYTES` is measured with
+> `Buffer.byteLength`, never `String.length`. `ToolExecutor` truncates at
+> 100 000 **bytes**, so a character-based budget silently triples for CJK text
+> and gets cut mid-tag.
+>
+> The `./skills` subpath additionally exposes internals the CLI needs
+> (`renderAlwaysSkills`, `normalizeFrontmatter`, `checkStagedPath`,
+> `byteLength`, `truncateToBytes`, the staging/archive limits) without widening
+> the frozen root surface.
 
 ## Type-only exports (not seen by `Object.keys`; documented here)
 
@@ -73,3 +106,11 @@
 | `ModelRef` | `.` | `{ providerId, modelId, baseUrl? }` model reference. |
 | `CodeActSandbox`, `CodeActResult` | `.` | CodeAct sandbox interface + result (impl lazy-loaded). |
 | `SandboxConfig`, `ExecuteOptions`, `ExecuteResult`, `ConsoleEntry`, `SandboxToolCall` | `./sandbox/*` | Sandbox types. The sandbox **implementation** is NOT re-exported from the root (`isolated-vm` is incompatible with some embedded V8 runtimes); import `@argon-agent/core/sandbox/*` directly and lazily when needed. |
+| `SkillScope`, `SkillActivation` | `.`, `./skills` | `bundled \| user \| project \| env`; `auto \| always \| manual`. |
+| `SkillFrontmatter`, `SkillRecord`, `SkillFileRef` | `.`, `./skills` | Parsed frontmatter, the in-memory skill record, and a bundled-file reference. |
+| `SkillHost` | `.`, `./skills` | The injected filesystem port. Every method MAY THROW; callers own the try/catch. This is what keeps core free of `node:*`. |
+| `SkillManifest` | `.`, `./skills` | Parsed `.argon-skill.json` (provenance + per-file sha256). |
+| `SkillValidationIssue` | `.`, `./skills` | `{ level, code, message }`; the codes are a stable public surface. |
+| `SkillCatalogOptions`, `SkillBodyOptions`, `SkillFindOptions` | `.`, `./skills` | Render options for Level 1 / Level 2 / `skill_find`. |
+| `SkillIntegrity` | `.`, `./skills` | `unverified \| ok \| modified` — how `SKILL.md` compares to the copy recorded at install. |
+| `SkillUsageStat`, `SkillUsageMap` | `.`, `./skills` | `{ useCount, lastUsedAt }` per skill name, used to rank the catalog. Local only. |

@@ -199,6 +199,19 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
   for (const command of COMMANDS) registry.register(command);
 }
 
+/**
+ * Every built-in command name INCLUDING aliases (`quit`), for documentation and
+ * tests.
+ *
+ * Not for run-time conflict detection — `registerSkillCommands` probes
+ * `registry.get(name)` instead, because that is the only check that stays
+ * correct when commands are registered dynamically (§7.1 / P1-2).
+ */
+export const BUILTIN_COMMAND_NAMES: string[] = COMMANDS.flatMap((c) => [
+  c.name,
+  ...(c.aliases ?? []),
+]).sort();
+
 /** Best-effort clipboard copy via the platform's clipboard CLI. */
 function copyToClipboard(text: string): boolean {
   const cmd =

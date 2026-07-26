@@ -96,4 +96,19 @@ describe('autocomplete suggestion computation', () => {
     expect(fileTokenAt('see @READ', 9)).toEqual({ start: 4, end: 9, query: 'READ' });
     expect(fileTokenAt('plain text', 4)).toBeNull();
   });
+
+  it('matches kebab-case and namespaced skill commands (D16)', () => {
+    // Skill names are kebab-case; the old `^\/(\w*)$` returned null for them,
+    // so `/my-sk` showed no popup at all — indistinguishable, from the user's
+    // side, from the command not existing.
+    const withSkills = [
+      ...commands,
+      { name: 'my-skill', description: 'A skill' },
+      { name: 'skill:my-skill', description: 'A skill' },
+    ];
+    expect(slashSuggestions('/my-sk', withSkills)?.map((s) => s.label)).toEqual(['/my-skill']);
+    expect(slashSuggestions('/skill:', withSkills)?.map((s) => s.label)).toEqual([
+      '/skill:my-skill',
+    ]);
+  });
 });

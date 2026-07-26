@@ -20,6 +20,15 @@ export interface CommandContext {
   toast: (level: ToastLevel, text: string) => void;
   persistConfig: (patch: Partial<PersistedConfig>) => void;
   exit: () => void;
+  /**
+   * Submit `text` as if the user had typed it (steers when running, prompts when
+   * idle). Dynamic skill commands need this: they turn `/pdf-forms a.pdf` into a
+   * real user message. It is a separate entry point from `handleSubmit` on
+   * purpose — routing back through that would re-enter slash-command parsing.
+   */
+  submit: (text: string) => void;
+  /** Rebuild the system prompt and the dynamic command list after a skill change. */
+  refreshSkills: () => void;
 }
 
 export interface SlashCommand {

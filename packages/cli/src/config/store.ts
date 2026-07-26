@@ -11,6 +11,7 @@ import envPaths from 'env-paths';
 import {
   CONFIG_VERSION,
   DEFAULT_CONFIG,
+  clampSkillsConfig,
   type PersistedConfig,
 } from './schema.js';
 
@@ -30,6 +31,11 @@ export function getConfigPath(): string {
 
 export function getSessionsDir(): string {
   return join(paths.data, 'sessions');
+}
+
+/** User-scope skills root — `aragon skills install`'s default target. */
+export function getSkillsDir(): string {
+  return join(paths.data, 'skills');
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +108,9 @@ export function loadPersistedConfig(): PersistedConfig {
     apiKeys: { ...DEFAULT_CONFIG.apiKeys, ...(partial.apiKeys ?? {}) },
     recentModels: partial.recentModels ?? [],
     promptHistory: partial.promptHistory ?? [],
+    // `skills` is the second nested object in this file and needs the same
+    // treatment `apiKeys` gets — see the note on updatePersistedConfig below.
+    skills: clampSkillsConfig({ ...DEFAULT_CONFIG.skills, ...(partial.skills ?? {}) }),
   };
 }
 
@@ -109,6 +118,18 @@ export function loadPersistedConfig(): PersistedConfig {
  * Read the persisted config, apply a patch, write it back atomically, and
  * return the merged result. This is the single write path used by the settings
  * screen and `argon config set` so env-provided keys never leak into the file.
+ *
+ * NESTED OBJECTS MUST BE DEEP-MERGED HERE. The top-level spread is shallow, so
+ * a patch of `{ skills: { disabled: ['x'] } }` — which is exactly what
+ * `/skills disable x` sends — would otherwise REPLACE the whole `skills`
+ * section and take `trustedProjectDirs`, `allowedHosts` and `requireApproval`
+ * with it. The user's symptom would be that disabling one skill quietly makes
+ * every previously-trusted project folder prompt again, with nothing anywhere
+ * explaining why.
+ *
+ * `SkillsConfig` is therefore capped at ONE level of nesting (scalars and
+ * string arrays only). A third level requires replacing this hand-written merge
+ * with a real deep-merge utility first, or the same bug returns.
  */
 export function updatePersistedConfig(patch: Partial<PersistedConfig>): PersistedConfig {
   const current = loadPersistedConfig();
@@ -117,6 +138,7 @@ export function updatePersistedConfig(patch: Partial<PersistedConfig>): Persiste
     ...patch,
     version: CONFIG_VERSION,
     apiKeys: { ...current.apiKeys, ...(patch.apiKeys ?? {}) },
+    skills: clampSkillsConfig({ ...current.skills, ...(patch.skills ?? {}) }),
   };
   writeConfigFile(merged);
   return merged;
