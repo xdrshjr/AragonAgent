@@ -1,18 +1,25 @@
 /**
- * Header (spec §3.3). An expanded gradient wordmark banner with a model chip and
- * an API-key status dot while the transcript is empty; a slim single-line sticky
- * bar (progressive disclosure) once a turn exists. The big banner is only ever
- * rendered in the empty-state live frame so it never drifts below the `<Static>`
- * history (P1-4 — read with §3.8).
+ * Header (spec §4.2) — the always-present brand bar.
+ *
+ * In full-screen this is EXACTLY ONE ROW at every size, which is what makes the
+ * viewport height monotonic in `rows` and the first submit jump-free. The 6-row
+ * wordmark it used to host now lives in `SessionOpener`, inside the viewport.
+ *
+ * `banner` survives for the inline path only (`App.tsx` picks it with a local
+ * ternary and never calls `pickHeaderVariant`), so inline keeps its v0.3.0
+ * geometry. `art` is no longer reachable from here.
+ *
+ * Every line is `wrap="truncate"`: a long cwd silently costing a second row
+ * would push the bottom chrome off-frame and break R2.
  */
 
 import React from 'react';
 import { homedir } from 'node:os';
-import { Box, Text } from 'ink';
 import { basename } from 'node:path';
+import { Box, Text } from 'ink';
 import type { Theme } from './theme.js';
 import type { TermCapabilities } from './capabilities.js';
-import { gradientLine } from './gradient.js';
+import { Logo, type HeaderVariant } from './Logo.js';
 
 interface HeaderProps {
   version: string;
@@ -20,7 +27,7 @@ interface HeaderProps {
   provider: string;
   model: string;
   hasKey: boolean;
-  compact: boolean;
+  variant: HeaderVariant;
   theme: Theme;
   caps: TermCapabilities;
 }
@@ -46,48 +53,53 @@ export function Header({
   provider,
   model,
   hasKey,
-  compact,
+  variant,
   theme,
   caps,
 }: HeaderProps): React.ReactElement {
-  const wordmark = `${theme.symbols.wordmark} ArgonAgent`;
-
-  if (compact) {
+  if (variant === 'mini') {
     return (
-      <Box flexDirection="row" marginBottom={1}>
-        <Text color={theme.primary} bold>
-          {theme.symbols.wordmark} ArgonAgent
+      <Box flexDirection="column" flexShrink={0}>
+        <Text wrap="truncate">
+          <Logo variant="mini" theme={theme} caps={caps} />
         </Text>
-        <Text color={theme.accent}>
-          {'  '}
-          {provider}:{model}
-        </Text>
-        <Text color={theme.muted}>  {basename(cwd) || cwd}</Text>
       </Box>
     );
   }
 
+  if (variant === 'bar') {
+    return (
+      <Box flexDirection="column" flexShrink={0}>
+        <Text wrap="truncate">
+          <Logo variant="bar" theme={theme} caps={caps} />
+          <Text color={theme.accent}>
+            {'  '}
+            {provider}:{model}
+          </Text>
+          <Text color={theme.muted}>{'  '}{basename(cwd) || cwd}</Text>
+          <Text color={hasKey ? theme.toolDone : theme.toolRunning}>
+            {'  '}
+            {hasKey ? theme.symbols.keyOn : theme.symbols.keyOff}
+          </Text>
+        </Text>
+      </Box>
+    );
+  }
+
+  // `banner` (inline only): wordmark row + meta row.
   return (
-    <Box
-      flexDirection="column"
-      borderStyle="round"
-      borderColor={theme.primary}
-      paddingX={1}
-      marginBottom={1}
-    >
-      <Text bold color={theme.gradient.length > 0 ? undefined : theme.primary}>
-        {gradientLine(wordmark, theme.gradient, caps.colorLevel)}
-      </Text>
-      <Box flexDirection="row">
+    <Box flexDirection="column" flexShrink={0}>
+      <Logo variant={variant} theme={theme} caps={caps} />
+      <Text wrap="truncate">
         <Text color={theme.muted}>v{version}</Text>
         <Text color={theme.accent}>
-          {'  '}
+          {'   '}
           {provider}:{model}
         </Text>
-        <Text>{'  '}</Text>
+        <Text>{'   '}</Text>
         <KeyDot hasKey={hasKey} theme={theme} />
-      </Box>
-      <Text color={theme.muted}>{tildeCwd(cwd)}</Text>
+        <Text color={theme.muted}>{'   '}{tildeCwd(cwd)}</Text>
+      </Text>
     </Box>
   );
 }

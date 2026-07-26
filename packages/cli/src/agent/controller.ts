@@ -106,6 +106,15 @@ export class AgentController {
     this.config = { ...this.config, theme: name };
   }
 
+  /**
+   * Advance the lifetime submit counter that drives the composer's progressive
+   * disclosure (§4.6). Lives here rather than in React state so incrementing it
+   * on every submit does not re-render the transcript.
+   */
+  setSubmitCount(n: number): void {
+    this.config = { ...this.config, submitCount: n };
+  }
+
   // -----------------------------------------------------------------------
   // Event subscription (delegates to the core Agent)
   // -----------------------------------------------------------------------
@@ -140,7 +149,7 @@ export class AgentController {
       return {
         ok: false,
         kind: 'config',
-        message: `No API key for "${provider}" — open /settings or set ${envVar}.`,
+        message: `No API key for "${provider}" - open /settings or set ${envVar}.`,
       };
     }
     return { ok: true };

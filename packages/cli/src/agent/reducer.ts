@@ -160,9 +160,19 @@ export const STORED_PREVIEW_CHARS = 8000;
 export const STORED_PREVIEW_LINES = 200;
 
 /**
- * Flatten a ToolResult into a stored preview string. Truncation appends a `…`
- * marker (line- or char-based) so a card footer never over-promises how much
- * more is expandable.
+ * Marker appended to a truncated tool preview. ASCII on purpose: this string is
+ * produced outside `src/ui/**`, where no terminal capabilities are available, so
+ * it must be safe on a legacy `cmd.exe` (spec §4.1 tier A). `ToolPreview` dims
+ * this line and imports the constant rather than re-spelling it — the two used
+ * to be a matched pair of `…` literals, and splitting the spelling would break
+ * the dimming silently.
+ */
+export const PREVIEW_TRUNCATION_MARK = '...';
+
+/**
+ * Flatten a ToolResult into a stored preview string. Truncation appends
+ * `PREVIEW_TRUNCATION_MARK` (line- or char-based) so a card footer never
+ * over-promises how much more is expandable.
  */
 export function buildToolPreview(result: ToolResult): string {
   const text = result.content
@@ -173,9 +183,9 @@ export function buildToolPreview(result: ToolResult): string {
   let preview = lines.join('\n');
   const lineTruncated = allLines.length > STORED_PREVIEW_LINES;
   if (preview.length > STORED_PREVIEW_CHARS) {
-    preview = `${preview.slice(0, STORED_PREVIEW_CHARS)}…`;
+    preview = `${preview.slice(0, STORED_PREVIEW_CHARS)}${PREVIEW_TRUNCATION_MARK}`;
   } else if (lineTruncated) {
-    preview = `${preview}\n…`;
+    preview = `${preview}\n${PREVIEW_TRUNCATION_MARK}`;
   }
   return preview;
 }
@@ -264,13 +274,13 @@ export function formatStreamError(error: Error): string {
   const base = error.message || 'Unknown error';
   switch (errorType) {
     case 'auth_error':
-      return `Authentication failed — check your API key. (${base})`;
+      return `Authentication failed - check your API key. (${base})`;
     case 'rate_limit':
-      return `Rate limited by the provider — please retry shortly. (${base})`;
+      return `Rate limited by the provider - please retry shortly. (${base})`;
     case 'overloaded':
-      return `Provider overloaded — please retry shortly. (${base})`;
+      return `Provider overloaded - please retry shortly. (${base})`;
     case 'context_overflow':
-      return `Context length exceeded — start a new conversation with /reset. (${base})`;
+      return `Context length exceeded - start a new conversation with /reset. (${base})`;
     case 'network_error':
       return `Network error reaching the provider. (${base})`;
     case 'timeout':
@@ -285,7 +295,7 @@ export function formatStreamError(error: Error): string {
 // ---------------------------------------------------------------------------
 
 const GENERIC_RUN_FAILURE =
-  'The run ended without producing a response — check your API key, model, and network.';
+  'The run ended without producing a response - check your API key, model, and network.';
 
 function nextId(state: ViewState): { id: string; seq: number } {
   const seq = state.seq + 1;

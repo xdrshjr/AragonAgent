@@ -20,8 +20,10 @@ import { loadConfig, type CliFlags } from './config/load.js';
 import { getConfigPath, updatePersistedConfig } from './config/store.js';
 import {
   ADAPTER_PROVIDERS,
+  clampDensity,
   clampTheme,
   clampThinkingLevel,
+  clampTranscriptWindow,
   coerceMaxTokens,
   coercePositiveInt,
   isAdapterProvider,
@@ -31,6 +33,12 @@ import { makeGetApiKey } from './config/load.js';
 import { AgentController } from './agent/controller.js';
 import { runHeadless } from './agent/headless.js';
 import { App, type ConfirmBridge } from './ui/App.js';
+import { decideRenderMode } from './ui/layout/frame.js';
+import { enterAltScreen, writeExitTranscript, type ScreenHandle } from './ui/screen.js';
+import { readExitSnapshot } from './ui/exit-snapshot.js';
+import { renderTranscriptText } from './ui/transcript-text.js';
+import { detectCapabilities } from './ui/capabilities.js';
+import { pickGlyphs } from './ui/glyphs.js';
 import type { Overlay } from './agent/reducer.js';
 import type { ConfirmRequest } from './tools/index.js';
 
@@ -58,6 +66,8 @@ const VERSION = readVersion();
 
 interface RawOpts {
   print?: boolean;
+  fullscreen?: boolean;
+  exitTranscript?: boolean;
   provider?: string;
   model?: string;
   baseUrl?: string;
@@ -71,6 +81,8 @@ interface RawOpts {
   theme?: string;
   color?: boolean;
   quiet?: boolean;
+  compact?: boolean;
+  hints?: boolean;
 }
 
 function toFlags(opts: RawOpts): CliFlags {
@@ -87,6 +99,10 @@ function toFlags(opts: RawOpts): CliFlags {
     confirm: opts.confirm,
     toolTimeout: opts.toolTimeout,
     idleTimeout: opts.idleTimeout,
+    fullscreen: opts.fullscreen,
+    exitTranscript: opts.exitTranscript,
+    compact: opts.compact,
+    hints: opts.hints,
   };
 }
 
@@ -104,22 +120,94 @@ function makeController(flags: CliFlags): { controller: AgentController; confirm
   return { controller, confirmBridge };
 }
 
+/** POSIX signal numbers for the `128 + signo` exit-code convention. */
+const SIGNAL_NUMBERS: Record<string, number> = { SIGINT: 2, SIGTERM: 15, SIGHUP: 1 };
+
+/**
+ * The interactive TUI — and the ONLY place that may touch the screen.
+ *
+ * Screen take-over stays inside this function on purpose (§4.4). Hoisting it up
+ * to `buildProgram()` / `parseAsync` would push `\x1b[?1049h` into `argon -p
+ * "…" > out.txt`, `argon config set`, and `argon --version`, because the
+ * interactive and headless paths are disjoint branches: `runInteractive()`
+ * renders Ink, `runOneShot()` goes to `runHeadless()`, which never does.
+ */
 function runInteractive(
   flags: CliFlags,
   extras: { initialPrompt?: string; initialOverlay?: Overlay } = {},
 ): void {
   const { controller, confirmBridge } = makeController(flags);
-  render(
+  const config = controller.getConfig();
+  const mode = decideRenderMode({ fullscreen: config.fullscreen }, process.env, process.stdout);
+
+  let screen: ScreenHandle | null = null;
+  let replayed = false;
+
+  const replayTranscript = (): void => {
+    if (replayed || mode !== 'fullscreen' || !config.exitTranscript) return;
+    replayed = true;
+    const snapshot = readExitSnapshot();
+    if (!snapshot) return; // Never published (instant exit) — skip, do not throw.
+    writeExitTranscript(
+      process.stdout,
+      renderTranscriptText(snapshot.entries, {
+        // Same terminal the TUI just left, so the same glyph tier applies.
+        glyphs: pickGlyphs(detectCapabilities(process.env, process.stdout)),
+        usageTotal: snapshot.usageTotal,
+        provider: snapshot.provider,
+        model: snapshot.model,
+        elapsedMs: Date.now() - snapshot.startedAt,
+      }),
+    );
+  };
+
+  if (mode === 'fullscreen') {
+    screen = enterAltScreen(process.stdout);
+    const restore = (): void => screen?.restore();
+
+    // Four idempotent restore paths (§4.4). The signal hook is NOT redundant:
+    //   - `waitUntilExit().then()` is a microtask and may never be reached when
+    //     the process is killed;
+    //   - Node does not emit `'exit'` at all on signal termination;
+    //   - Ink's own `signalExit` only unmounts the component tree — it knows
+    //     nothing about the alternate screen.
+    // Without it, `kill <pid>`, closing the terminal window (SIGHUP), or a dying
+    // parent all leave the user staring at a blank alternate screen with `reset`
+    // as their only way out.
+    process.on('exit', restore);
+    for (const [name, signo] of Object.entries(SIGNAL_NUMBERS)) {
+      process.on(name as NodeJS.Signals, () => {
+        restore(); // Synchronous: stdout.write on a TTY is sync on every platform.
+        process.exit(128 + signo);
+      });
+    }
+  }
+
+  const instance = render(
     <App
       controller={controller}
       version={VERSION}
+      mode={mode}
       confirmBridge={confirmBridge}
       initialPrompt={extras.initialPrompt}
       initialOverlay={extras.initialOverlay}
     />,
-    // Redirect any core console.* writes above the frame (R8); own Ctrl+C.
-    { exitOnCtrlC: false, patchConsole: true },
+    // Full-screen owns console.* itself (I-4): Ink's patchConsole writes
+    // straight to stdout and permanently shifts the fixed frame's accounting.
+    { exitOnCtrlC: false, patchConsole: mode === 'inline' },
   );
+
+  // The return value MUST be captured — `waitUntilExit()` is the normal-exit
+  // restore path and it cannot be registered otherwise.
+  void instance
+    .waitUntilExit()
+    .then(() => {
+      screen?.restore();
+      replayTranscript();
+    })
+    .catch(() => {
+      screen?.restore();
+    });
 }
 
 async function runOneShot(flags: CliFlags, prompt: string, quiet: boolean): Promise<void> {
@@ -153,7 +241,7 @@ async function runModels(flags: CliFlags, providerArg?: string): Promise<void> {
   for (const provider of providers) {
     process.stdout.write(`\n${provider}:\n`);
     for (const model of registry.getModels(provider)) {
-      process.stdout.write(`  ${model.id}  —  ${model.name}\n`);
+      process.stdout.write(`  ${model.id}  -  ${model.name}\n`);
     }
     const key = getKey(provider);
     if (key) {
@@ -163,7 +251,7 @@ async function runModels(flags: CliFlags, providerArg?: string): Promise<void> {
       if (extra.length > 0) {
         process.stdout.write('  (discovered):\n');
         for (const model of extra) {
-          process.stdout.write(`    ${model.id}  —  ${model.name}\n`);
+          process.stdout.write(`    ${model.id}  -  ${model.name}\n`);
         }
       }
     }
@@ -180,6 +268,13 @@ const CONFIG_SET_KEYS = new Set([
   'confirmTools',
   'toolTimeoutMs',
   'idleTimeoutMs',
+  'fullscreen',
+  'exitTranscript',
+  'transcriptWindow',
+  // Without these two, `density` and `hints` would be settable only as one-shot
+  // flags and never persist -- inconsistent with every other config field.
+  'density',
+  'hints',
 ]);
 
 function runConfigSet(key: string, value: string): void {
@@ -219,6 +314,21 @@ function runConfigSet(key: string, value: string): void {
     case 'idleTimeoutMs':
       patch.idleTimeoutMs = coercePositiveInt(value, 210_000);
       break;
+    case 'fullscreen':
+      patch.fullscreen = value === 'true' || value === '1';
+      break;
+    case 'exitTranscript':
+      patch.exitTranscript = value === 'true' || value === '1';
+      break;
+    case 'transcriptWindow':
+      patch.transcriptWindow = clampTranscriptWindow(value, 300);
+      break;
+    case 'density':
+      patch.density = clampDensity(value, 'comfortable');
+      break;
+    case 'hints':
+      patch.hints = value === 'true' || value === '1';
+      break;
   }
   updatePersistedConfig(patch);
   process.stdout.write(`Set ${key} = ${value}\n`);
@@ -233,7 +343,7 @@ function buildProgram(): Command {
 
   program
     .name('aragon')
-    .description('ArgonAgent — a Claude-Code / Codex-style terminal UI for the ArgonAgent engine.')
+    .description('ArgonAgent - a Claude-Code / Codex-style terminal UI for the ArgonAgent engine.')
     .version(VERSION, '-v, --version', 'Print the version')
     .argument('[prompt]', 'Task prompt (starts the TUI, or a one-shot run with -p / piped stdin)')
     .option('-p, --print', 'Headless: stream the answer to stdout, then exit')
@@ -246,8 +356,21 @@ function buildProgram(): Command {
     .option('--cwd <dir>', 'Working directory for tools')
     .option('--confirm', 'Confirm each mutating tool call')
     .option('--tool-timeout <ms>', 'Per-tool executor ceiling (default 180000)')
-    .option('--idle-timeout <ms>', 'Watchdog idle timeout (auto-raised to ≥ tool-timeout+30s)')
-    .option('--theme <name>', 'auto|dark|light')
+    .option('--idle-timeout <ms>', 'Watchdog idle timeout (auto-raised to >= tool-timeout+30s)')
+    .option('--theme <name>', 'auto|warm|cool|light ("dark" is an alias for "cool")')
+    // Same tri-state shape as `--fullscreen`: declaring the positive form first
+    // keeps the default `undefined`, so "no opinion" stays distinguishable from
+    // an explicit choice and the config layer below can still win.
+    .option('--compact', 'Compact transcript density (no blank rows between turns)')
+    .option('--no-compact', 'Comfortable transcript density')
+    .option('--hints', 'Always show the composer hint row')
+    .option('--no-hints', 'Hide the composer hint row')
+    // Declaring `--fullscreen` BEFORE `--no-fullscreen` keeps the default
+    // `undefined` instead of `true`, which is what makes the tri-state work:
+    // "no opinion" must stay distinguishable from "force it".
+    .option('--fullscreen', 'Force the full-screen TUI (overrides auto-downgrade, except non-TTY)')
+    .option('--no-fullscreen', 'Force the inline renderer (v0.2.0 behavior)')
+    .option('--no-exit-transcript', 'Do not replay the session summary after exiting')
     .option('--no-color', 'Disable ANSI color')
     .option('--quiet', '(print mode) suppress tool/usage lines on stderr')
     .action(async (prompt: string | undefined, opts: RawOpts) => {
@@ -274,7 +397,7 @@ function buildProgram(): Command {
         if (prompt && prompt.trim().length > 0) {
           await runOneShot(flags, prompt, !!opts.quiet);
         } else {
-          process.stderr.write('Not a TTY and no prompt given — nothing to do. Use -p "<prompt>".\n');
+          process.stderr.write('Not a TTY and no prompt given - nothing to do. Use -p "<prompt>".\n');
           process.exitCode = 2;
         }
         return;

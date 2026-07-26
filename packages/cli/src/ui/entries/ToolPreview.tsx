@@ -12,7 +12,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import type { Theme } from '../theme.js';
-import type { ToolStatus } from '../../agent/reducer.js';
+import { PREVIEW_TRUNCATION_MARK, type ToolStatus } from '../../agent/reducer.js';
 
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested in tool-preview.test.ts)
@@ -82,6 +82,12 @@ export function parseListRow(line: string): ListRow | null {
 // Renderers
 // ---------------------------------------------------------------------------
 
+/**
+ * No `caps` here on purpose. The only glyph this component ever spelled was the
+ * preview truncation marker, and that now comes from the constant its producer
+ * writes (`PREVIEW_TRUNCATION_MARK`), so there is nothing left to degrade — and
+ * a prop no body reads is exactly the kind of dead weight the last round removed.
+ */
 interface ToolPreviewProps {
   name: string;
   lines: string[];
@@ -132,7 +138,14 @@ function renderRead(lines: string[], theme: Theme): React.ReactElement[] {
 
 function renderBash(lines: string[], theme: Theme): React.ReactElement[] {
   return lines.map((line, i) => {
-    const dim = line.startsWith('$ ') || BASH_FOOTER_RE.test(line.trimEnd()) || line === '…';
+    // The truncation marker is compared against the constant the reducer
+    // actually writes. These used to be two independently spelled `…` literals;
+    // once the producer moved to ASCII, a re-spelled copy here would have
+    // stopped matching and quietly lost the dimming.
+    const dim =
+      line.startsWith('$ ') ||
+      BASH_FOOTER_RE.test(line.trimEnd()) ||
+      line === PREVIEW_TRUNCATION_MARK;
     return (
       <Text key={i} color={dim ? theme.muted : undefined}>
         {line.length > 0 ? line : ' '}

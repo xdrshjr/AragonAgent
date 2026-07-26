@@ -10,11 +10,14 @@ import process from 'node:process';
 import {
   DEFAULT_CONFIG,
   IDLE_TIMEOUT_MARGIN_MS,
+  clampDensity,
   clampTheme,
   clampThinkingLevel,
+  clampTranscriptWindow,
   coerceMaxTokens,
   coercePositiveInt,
   type CliConfig,
+  type DensityMode,
   type PersistedConfig,
   type ThemeName,
 } from './schema.js';
@@ -46,6 +49,30 @@ export interface CliFlags {
   confirm?: boolean;
   toolTimeout?: string | number;
   idleTimeout?: string | number;
+  /** `--fullscreen` ⇒ true, `--no-fullscreen` ⇒ false, absent ⇒ undefined. */
+  fullscreen?: boolean;
+  /** `--no-exit-transcript` ⇒ false. */
+  exitTranscript?: boolean;
+  /** `--compact` ⇒ true, `--no-compact` ⇒ false, absent ⇒ undefined. */
+  compact?: boolean;
+  /** `--hints` ⇒ true, `--no-hints` ⇒ false, absent ⇒ undefined. */
+  hints?: boolean;
+}
+
+/**
+ * Resolve the tri-state full-screen preference (see `CliConfig.fullscreen`).
+ * Only a flag or the env var counts as an explicit FORCE; a config file holding
+ * the default `true` must not disable the automatic downgrades.
+ */
+function resolveFullscreen(
+  flags: CliFlags,
+  env: Partial<PersistedConfig>,
+  file: Partial<PersistedConfig>,
+): boolean | undefined {
+  if (flags.fullscreen !== undefined) return flags.fullscreen;
+  if (env.fullscreen !== undefined) return env.fullscreen;
+  if (file.fullscreen === false) return false;
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -90,10 +117,21 @@ export function loadConfig(flags: CliFlags = {}): CliConfig {
     pick(flags.maxTokens, env.partial.maxTokens, file.maxTokens),
   );
 
+  // `clampTheme` is also where the v0.3.0 `dark` name is migrated to `cool`,
+  // so reading a legacy config file needs no extra step here (§4.5 / R-4).
   const theme: ThemeName = clampTheme(
     pick(flags.theme, env.partial.theme, file.theme),
     DEFAULT_CONFIG.theme,
   );
+
+  const density: DensityMode =
+    flags.compact !== undefined
+      ? flags.compact
+        ? 'compact'
+        : 'comfortable'
+      : clampDensity(file.density, DEFAULT_CONFIG.density);
+
+  const hints = flags.hints !== undefined ? flags.hints : file.hints ?? DEFAULT_CONFIG.hints;
 
   const confirmTools =
     flags.confirm !== undefined ? flags.confirm : file.confirmTools ?? DEFAULT_CONFIG.confirmTools;
@@ -146,12 +184,21 @@ export function loadConfig(flags: CliFlags = {}): CliConfig {
     maxTokens,
     theme,
     reducedMotion,
+    fullscreen: resolveFullscreen(flags, env.partial, file),
+    exitTranscript:
+      flags.exitTranscript !== undefined
+        ? flags.exitTranscript
+        : file.exitTranscript ?? DEFAULT_CONFIG.exitTranscript,
+    transcriptWindow: clampTranscriptWindow(file.transcriptWindow, DEFAULT_CONFIG.transcriptWindow),
     confirmTools,
     toolTimeoutMs,
     idleTimeoutMs,
     apiKeys,
     recentModels: file.recentModels ?? [],
     promptHistory: file.promptHistory ?? [],
+    density,
+    hints,
+    submitCount: coercePositiveInt(file.submitCount, 0),
     cwd,
     color,
     colorLevel,

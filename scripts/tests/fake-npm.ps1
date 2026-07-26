@@ -115,6 +115,11 @@ switch ($command) {
     exit 0
   }
   'whoami' {
+    if ($env:ARGON_FAKE_NPM_UNAUTHENTICATED -eq '1') {
+      [Console]::Error.WriteLine('npm error code E401')
+      [Console]::Error.WriteLine('npm error 401 Unauthorized - GET https://registry.npmjs.org/-/whoami')
+      exit 1
+    }
     Write-Output 'release-test-user'
     exit 0
   }
@@ -132,10 +137,14 @@ switch ($command) {
       exit 1
     }
     if ($packageKey -eq 'cli' -and $NpmArgs -contains 'bin') {
+      # npm normalizes bin paths when it accepts a publish, so the registry serves
+      # 'dist/cli.js' even though the source manifest declares './dist/cli.js'.
+      # npm also emits notices on stderr, which the release script captures next to stdout.
+      [Console]::Error.WriteLine('npm notice using registry https://registry.npmjs.org/')
       [ordered]@{
         version = $version
-        bin = [ordered]@{ aragon = './dist/cli.js' }
-      } | ConvertTo-Json -Compress | Write-Output
+        bin = [ordered]@{ aragon = 'dist/cli.js' }
+      } | ConvertTo-Json | Write-Output
     } else {
       Write-Output $version
     }

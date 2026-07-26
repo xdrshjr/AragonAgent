@@ -6,6 +6,7 @@
 
 import type { Theme } from './theme.js';
 import type { TermCapabilities } from './capabilities.js';
+import { pickGlyphs } from './glyphs.js';
 
 export interface Gauge {
   /** The filled portion of the bar. */
@@ -40,8 +41,12 @@ export function buildGauge(
   const clamped = Math.max(0, Math.min(100, Math.round(pct)));
   const cells = Math.max(1, width);
   const filledCells = Math.max(0, Math.min(cells, Math.round((clamped / 100) * cells)));
-  const full = caps.unicode ? '█' : '#';
-  const empty = caps.unicode ? '░' : '-';
+  // Was `caps.unicode ? '█' : '#'` inline. The branch was correct but the
+  // literals still had to move: leaving even a well-formed pair here would mean
+  // the A-1 scan needs an exception, and exceptions get copied (§4.1).
+  const glyphs = pickGlyphs(caps);
+  const full = glyphs.gaugeFull;
+  const empty = glyphs.gaugeEmpty;
   return {
     filled: full.repeat(filledCells),
     empty: empty.repeat(cells - filledCells),

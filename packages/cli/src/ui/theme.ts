@@ -1,40 +1,33 @@
 /**
  * Theme — palette + symbols used across the Ink component tree (spec §3.2).
  *
- * A real theming engine: two distinct `DARK` / `LIGHT` hex palettes, an `auto`
- * resolution that is deterministic (`auto → dark`, since terminals cannot
- * reliably report their background), color degradation across terminal depth
- * (truecolor → 256 → 16 → monochrome), and an ASCII symbol swap for terminals
- * without Unicode support. Every field from the v1 flat palette is preserved so
- * existing components keep working; the new fields are additive.
+ * A real theming engine: distinct `WARM` / `COOL` / `LIGHT` hex palettes, an
+ * `auto` resolution that is deterministic (`auto -> warm`, since terminals
+ * cannot reliably report their background), color degradation across terminal
+ * depth (truecolor -> 256 -> 16 -> monochrome), and an ASCII symbol swap for
+ * terminals without Unicode support.
+ *
+ * Two things used to live here and no longer do (spec §4.1 / §4.5):
+ *  - the three symbol tables moved to `glyphs.ts`, which is now the single
+ *    source of truth for every user-visible character. `symbols` is a VIEW of
+ *    `pickGlyphs(caps)`, so every existing `theme.symbols.x` consumer is
+ *    unchanged;
+ *  - the palette data moved to `palettes.ts`.
  */
 
 import type { ThemeName } from '../config/schema.js';
 import type { TermCapabilities } from './capabilities.js';
+import { pickGlyphs, type Glyphs } from './glyphs.js';
+import { resolvePalette, type Palette } from './palettes.js';
 
 /** A resolved color: a hex/name string, or `undefined` (Ink renders plain). */
 type Color = string | undefined;
 
-export interface ThemeSymbols {
-  user: string;
-  assistant: string;
-  thinking: string;
-  toolPending: string;
-  toolRunning: string;
-  toolDone: string;
-  toolError: string;
-  info: string;
-  warn: string;
-  error: string;
-  bullet: string;
-  /** Static spinner glyph (reduced motion / no-Unicode fallback). */
-  spinnerStill: string;
-  gaugeFull: string;
-  gaugeEmpty: string;
-  keyOn: string;
-  keyOff: string;
-  wordmark: string;
-}
+/**
+ * Retained name for the symbol view on `Theme`. It is exactly `Glyphs`: the
+ * split is by ownership (glyphs.ts owns the data), not by shape.
+ */
+export type ThemeSymbols = Glyphs;
 
 export interface Theme {
   name: ThemeName;
@@ -57,6 +50,16 @@ export interface Theme {
   border: Color;
   code: Color;
 
+  // v0.3 additions (full-screen chrome).
+  /** Composer border while the input holds a draft. */
+  focusBorder: Color;
+  /** Composer border while idle and empty (matches the legacy `border`). */
+  idleBorder: Color;
+  /** Hint lines, collapse notices, and the off-bottom indicator. */
+  hintFg: Color;
+  /** Single-color wordmark fallback below ansi-256. */
+  logoShadow: Color;
+
   // v0.2 additions.
   gradient: string[]; // wordmark hex stops (empty below ansi-256)
   gauge: { track: Color; low: Color; mid: Color; high: Color };
@@ -65,140 +68,8 @@ export interface Theme {
   chip: { fg: Color; bg: Color };
 }
 
-/**
- * Legacy default symbol set (Unicode). Kept as a named export so components not
- * rewritten in v0.2 (UserEntry / AssistantEntry) keep importing it unchanged;
- * capability-aware components read `theme.symbols` instead.
- */
-export const SYMBOLS = {
-  user: '›',
-  assistant: '●',
-  thinking: '✱',
-  toolPending: '◦',
-  toolRunning: '◍',
-  toolDone: '✔',
-  toolError: '✖',
-  info: 'ℹ',
-  warn: '▲',
-  error: '✖',
-  bullet: '•',
-} as const;
-
-const UNICODE_SYMBOLS: ThemeSymbols = {
-  user: '›',
-  assistant: '●',
-  thinking: '✱',
-  toolPending: '◦',
-  toolRunning: '◍',
-  toolDone: '✔',
-  toolError: '✖',
-  info: 'ℹ',
-  warn: '▲',
-  error: '✖',
-  bullet: '•',
-  spinnerStill: '·',
-  gaugeFull: '█',
-  gaugeEmpty: '░',
-  keyOn: '●',
-  keyOff: '○',
-  wordmark: '◇',
-};
-
-const ASCII_SYMBOLS: ThemeSymbols = {
-  user: '>',
-  assistant: '*',
-  thinking: '*',
-  toolPending: 'o',
-  toolRunning: '*',
-  toolDone: '[ok]',
-  toolError: '[x]',
-  info: 'i',
-  warn: '!',
-  error: 'x',
-  bullet: '-',
-  spinnerStill: '*',
-  gaugeFull: '#',
-  gaugeEmpty: '-',
-  keyOn: '*',
-  keyOff: 'o',
-  wordmark: '<>',
-};
-
 // ---------------------------------------------------------------------------
-// Palettes (hex). DARK and LIGHT differ on every field.
-// ---------------------------------------------------------------------------
-
-interface Palette {
-  primary: string;
-  accent: string;
-  user: string;
-  assistant: string;
-  thinking: string;
-  toolPending: string;
-  toolRunning: string;
-  toolDone: string;
-  toolError: string;
-  noticeInfo: string;
-  noticeWarn: string;
-  noticeError: string;
-  muted: string;
-  border: string;
-  code: string;
-  gradient: [string, string, string];
-  gauge: { track: string; low: string; mid: string; high: string };
-  diff: { add: string; remove: string; meta: string; context: string };
-  toast: { info: string; warn: string; error: string; success: string };
-  chip: { fg: string; bg: string };
-}
-
-const DARK: Palette = {
-  primary: '#7aa2f7',
-  accent: '#bb9af7',
-  user: '#7dcfff',
-  assistant: '#c0caf5',
-  thinking: '#7a86b8',
-  toolPending: '#565f89',
-  toolRunning: '#e0af68',
-  toolDone: '#9ece6a',
-  toolError: '#f7768e',
-  noticeInfo: '#7aa2f7',
-  noticeWarn: '#e0af68',
-  noticeError: '#f7768e',
-  muted: '#565f89',
-  border: '#3b4261',
-  code: '#9ece6a',
-  gradient: ['#7aa2f7', '#bb9af7', '#7dcfff'],
-  gauge: { track: '#3b4261', low: '#9ece6a', mid: '#e0af68', high: '#f7768e' },
-  diff: { add: '#9ece6a', remove: '#f7768e', meta: '#7aa2f7', context: '#7a86b8' },
-  toast: { info: '#7aa2f7', warn: '#e0af68', error: '#f7768e', success: '#9ece6a' },
-  chip: { fg: '#1a1b26', bg: '#7aa2f7' },
-};
-
-const LIGHT: Palette = {
-  primary: '#2959aa',
-  accent: '#8c4bc9',
-  user: '#0f7490',
-  assistant: '#1f2430',
-  thinking: '#6b7280',
-  toolPending: '#9aa0ab',
-  toolRunning: '#b5730f',
-  toolDone: '#2e7d32',
-  toolError: '#c62828',
-  noticeInfo: '#2959aa',
-  noticeWarn: '#b5730f',
-  noticeError: '#c62828',
-  muted: '#6b7280',
-  border: '#c8cdd6',
-  code: '#3f7f2f',
-  gradient: ['#2959aa', '#8c4bc9', '#0f7490'],
-  gauge: { track: '#c8cdd6', low: '#2e7d32', mid: '#b5730f', high: '#c62828' },
-  diff: { add: '#2e7d32', remove: '#c62828', meta: '#2959aa', context: '#6b7280' },
-  toast: { info: '#2959aa', warn: '#b5730f', error: '#c62828', success: '#2e7d32' },
-  chip: { fg: '#ffffff', bg: '#2959aa' },
-};
-
-// ---------------------------------------------------------------------------
-// Color degradation (truecolor → 256 → 16 → monochrome)
+// Color degradation (truecolor -> 256 -> 16 -> monochrome)
 // ---------------------------------------------------------------------------
 
 /** The 16 standard ANSI colours as chalk names + representative RGB. */
@@ -254,12 +125,6 @@ function degrade(hex: string, level: 0 | 1 | 2 | 3): Color {
 // getTheme (memoized)
 // ---------------------------------------------------------------------------
 
-/** `auto` never guesses light — terminals can't report their background. */
-function resolvePalette(name: ThemeName): { palette: Palette; resolved: ThemeName } {
-  if (name === 'light') return { palette: LIGHT, resolved: 'light' };
-  return { palette: DARK, resolved: name === 'auto' ? 'auto' : 'dark' };
-}
-
 const cache = new Map<string, Theme>();
 
 export function getTheme(name: ThemeName, caps: TermCapabilities): Theme {
@@ -267,13 +132,13 @@ export function getTheme(name: ThemeName, caps: TermCapabilities): Theme {
   const hit = cache.get(key);
   if (hit) return hit;
 
-  const { palette } = resolvePalette(name);
+  const palette: Palette = resolvePalette(name);
   const level = caps.colorLevel;
   const d = (hex: string): Color => degrade(hex, level);
 
   const theme: Theme = {
     name,
-    symbols: caps.unicode ? UNICODE_SYMBOLS : ASCII_SYMBOLS,
+    symbols: pickGlyphs(caps),
     primary: d(palette.primary),
     accent: d(palette.accent),
     user: d(palette.user),
@@ -289,6 +154,10 @@ export function getTheme(name: ThemeName, caps: TermCapabilities): Theme {
     muted: d(palette.muted),
     border: d(palette.border),
     code: d(palette.code),
+    focusBorder: d(palette.focusBorder),
+    idleBorder: d(palette.idleBorder),
+    hintFg: d(palette.hintFg),
+    logoShadow: d(palette.logoShadow),
     gradient: level >= 2 ? [...palette.gradient] : [],
     gauge: {
       track: d(palette.gauge.track),

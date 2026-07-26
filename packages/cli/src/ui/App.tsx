@@ -7,7 +7,7 @@
 
 import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import process from 'node:process';
-import { Box, useApp, useInput, useStdout } from 'ink';
+import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import type { AgentController } from '../agent/controller.js';
 import type { ConfirmRequest } from '../tools/index.js';
 import {
@@ -19,17 +19,34 @@ import {
   type ViewAction,
 } from '../agent/reducer.js';
 import { mergeDeltas } from '../agent/coalesce.js';
-import { coerceMaxTokens, PROMPT_HISTORY_CAP, type PersistedConfig } from '../config/schema.js';
+import {
+  coerceMaxTokens,
+  DEFAULT_TRANSCRIPT_WINDOW,
+  PROMPT_HISTORY_CAP,
+  type PersistedConfig,
+} from '../config/schema.js';
 import { updatePersistedConfig } from '../config/store.js';
 import { detectCapabilities, type TermCapabilities } from './capabilities.js';
 import { getTheme } from './theme.js';
+import { pickGlyphs } from './glyphs.js';
 import { Header } from './Header.js';
-import { Welcome } from './Welcome.js';
-import { Transcript } from './Transcript.js';
+import { pickHeaderVariant, pickOpenerVariant } from './Logo.js';
+import { SessionOpener } from './SessionOpener.js';
+import { Transcript, TranscriptList } from './Transcript.js';
 import { PromptInput } from './PromptInput.js';
+import { Composer } from './Composer.js';
 import { StatusBar } from './StatusBar.js';
 import { ToastStack } from './ToastStack.js';
-import { HelpOverlay } from './overlays/HelpOverlay.js';
+import { AppShell } from './layout/AppShell.js';
+import { ScrollViewport } from './layout/ScrollViewport.js';
+import { useTerminalSize } from './layout/useTerminalSize.js';
+import { frameHeight, MIN_FULLSCREEN_ROWS, type RenderMode } from './layout/frame.js';
+import { HINT_MIN_ROWS, viewportRows as computeViewportRows } from './layout/budget.js';
+import type { ScrollIntent } from './layout/scroll.js';
+import { installConsoleBridge } from './console-bridge.js';
+import { publishExitSnapshot } from './exit-snapshot.js';
+import { OverlayFrame } from './layout/OverlayFrame.js';
+import { helpRows } from './overlays/HelpOverlay.js';
 import { ModelPicker } from './overlays/ModelPicker.js';
 import { SettingsScreen, type SettingsValues } from './overlays/SettingsScreen.js';
 import { ConfirmDialog, type ConfirmState } from './overlays/ConfirmDialog.js';
@@ -43,6 +60,8 @@ export interface ConfirmBridge {
 export interface AppProps {
   controller: AgentController;
   version: string;
+  /** Decided once in `cli.tsx::runInteractive()`; never switched at run time. */
+  mode: RenderMode;
   initialOverlay?: Overlay;
   initialPrompt?: string;
   confirmBridge?: ConfirmBridge;
@@ -51,15 +70,21 @@ export interface AppProps {
 /** Merge pending delta actions ~33 ms and flush the coalescer buffer. */
 const COALESCE_MS = 33;
 
+/** Rows a PgUp/PgDn moves inside a controlled overlay. */
+const OVERLAY_PAGE = 8;
+
 export function App({
   controller,
   version,
+  mode,
   initialOverlay,
   initialPrompt,
   confirmBridge,
 }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const fullscreen = mode === 'fullscreen';
+  const { rows, cols } = useTerminalSize();
 
   const [state, dispatch] = useReducer(viewReducer, undefined, initialViewState);
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -67,6 +92,18 @@ export function App({
   const [promptHistory, setPromptHistory] = useState<string[]>(
     () => controller.getConfig().promptHistory ?? [],
   );
+  // Scroll plumbing: intent goes down, one derived display number comes back.
+  const [scrollIntent, setScrollIntent] = useState<{ kind: ScrollIntent; nonce: number }>();
+  const [pinToBottomNonce, setPinToBottomNonce] = useState(0);
+  const [scrolledLines, setScrolledLines] = useState(0);
+  // I-5 (§4.13): Ctrl+L cannot repaint by writing escapes — Ink dedupes
+  // identical output twice over — so it bumps this instead, and StatusBar turns
+  // it into a one-byte, zero-width change that both dedupe gates let through.
+  const [redrawNonce, setRedrawNonce] = useState(0);
+  // Overlay scroll offset. Held here rather than inside `OverlayFrame` so that
+  // closing an overlay cannot leave a stale offset behind, and reset whenever
+  // the active overlay changes.
+  const [overlayScroll, setOverlayScroll] = useState(0);
 
   const cfg = controller.getConfig();
   const caps = useMemo<TermCapabilities>(() => {
@@ -77,10 +114,12 @@ export function App({
     };
   }, [cfg.color, cfg.colorLevel, cfg.unicode, stdout]);
   const theme = useMemo(() => getTheme(cfg.theme, caps), [cfg.theme, caps]);
+  const glyphs = useMemo(() => pickGlyphs(caps), [caps]);
   const reducedMotion = cfg.reducedMotion ?? false;
 
   const stateRef = useRef(state);
   stateRef.current = state;
+  const startedAt = useRef(Date.now());
   const confirmRef = useRef<ConfirmState | null>(null);
   confirmRef.current = confirmState;
   const ctrlCArmed = useRef(false);
@@ -174,6 +213,25 @@ export function App({
     [],
   );
 
+  // --- Console bridge (fullscreen only, I-4). ----------------------------
+  // Ink's own patchConsole writes straight to stdout, which shifts the fixed
+  // frame by a row and breaks its line accounting for good.
+  useEffect(() => {
+    if (!fullscreen) return undefined;
+    return installConsoleBridge((level, text) => dispatch({ type: 'notice', level, text }));
+  }, [fullscreen]);
+
+  // --- Exit snapshot: the only way state reaches cli.tsx (§4.4). ----------
+  useEffect(() => {
+    publishExitSnapshot({
+      entries: state.entries,
+      usageTotal: state.usageTotal,
+      provider: cfg.provider,
+      model: cfg.model,
+      startedAt: startedAt.current,
+    });
+  }, [state.entries, state.usageTotal, cfg.provider, cfg.model]);
+
   // --- Confirm bridge (confirmTools mode). -------------------------------
   useEffect(() => {
     if (!confirmBridge) return;
@@ -223,10 +281,21 @@ export function App({
   const recordPrompt = (text: string) => {
     const next = [...promptHistory.filter((p) => p !== text), text].slice(-PROMPT_HISTORY_CAP);
     setPromptHistory(next);
-    persistConfig({ promptHistory: next });
+    // The submit counter rides along with the history write rather than opening
+    // a second I/O path (§4.6). It is read back through `controller.getConfig()`
+    // and never enters React state — nothing re-renders on its account.
+    const nextCount = (controller.getConfig().submitCount ?? 0) + 1;
+    controller.setSubmitCount(nextCount);
+    persistConfig({ promptHistory: next, submitCount: nextCount });
   };
 
+  const scrollBy = useCallback((kind: ScrollIntent) => {
+    setScrollIntent((prev) => ({ kind, nonce: (prev?.nonce ?? 0) + 1 }));
+  }, []);
+
   const handleSubmit = async (raw: string) => {
+    // Submitting is an unconditional "take me to the newest output" (§4.5).
+    setPinToBottomNonce((n) => n + 1);
     const handled = await runSlashInput(registry, raw, makeCtx);
     if (handled) return;
 
@@ -285,6 +354,12 @@ export function App({
     dispatch({ type: 'setOverlay', overlay: null });
   };
 
+  // A fresh overlay always opens at the top; carrying the previous overlay's
+  // offset over would open Help mid-list for no reason the user can see.
+  useEffect(() => {
+    setOverlayScroll(0);
+  }, [state.overlay]);
+
   // --- Initial overlay / prompt (after handlers are defined). ------------
   useEffect(() => {
     if (initialOverlay) dispatch({ type: 'setOverlay', overlay: initialOverlay });
@@ -313,13 +388,67 @@ export function App({
       return;
     }
 
+    // R-P1-7: the overlay branch MUST come before the transcript scroll branch
+    // and MUST return. `PgUp` used to fall through to `scrollBy()` while an
+    // overlay was open; `ScrollViewport` is unmounted then, but its
+    // `useEffect([intentNonce])` fires once on REMOUNT, so the stale intent was
+    // applied when the overlay closed and the transcript jumped a page on its
+    // own. Even overlays that ignore the key must swallow it here.
+    if (stateRef.current.overlay) {
+      const overlay = stateRef.current.overlay;
+      // Modes A only. `model` / `confirm` manage their own keys; registering an
+      // arrow handler for them would double every keypress (R-12).
+      const controlled = overlay === 'help' || overlay === 'settings';
+      if (key.pageUp) {
+        if (controlled) setOverlayScroll((n) => Math.max(0, n - OVERLAY_PAGE));
+        return;
+      }
+      if (key.pageDown) {
+        if (controlled) setOverlayScroll((n) => n + OVERLAY_PAGE);
+        return;
+      }
+      // `settings` keeps Up/Down for field movement — a high-frequency action
+      // worth more than scrolling six fields (§4.9).
+      if (overlay === 'help' && (key.upArrow || key.downArrow)) {
+        setOverlayScroll((n) => Math.max(0, n + (key.upArrow ? -1 : 1)));
+        return;
+      }
+    }
+
     if (key.ctrl && (input === 'l' || input === 'L')) {
+      if (fullscreen) {
+        // Writing \x1B[2J here would erase the screen and then leave it blank:
+        // Ink sees no output change and skips the repaint (ink.js:132 +
+        // log-update.js:13), possibly forever on an idle empty session. Bump
+        // the nonce instead and let Ink redraw the frame normally (§4.13).
+        setRedrawNonce((n) => n + 1);
+        return;
+      }
       try {
         stdout.write('\x1B[2J\x1B[3J\x1B[H');
       } catch {
         /* ignore */
       }
       return;
+    }
+
+    if (fullscreen) {
+      if (key.pageUp) {
+        scrollBy('pageUp');
+        return;
+      }
+      if (key.pageDown) {
+        scrollBy('pageDown');
+        return;
+      }
+      if (key.shift && key.upArrow) {
+        scrollBy('lineUp');
+        return;
+      }
+      if (key.shift && key.downArrow) {
+        scrollBy('lineDown');
+        return;
+      }
     }
 
     if (key.ctrl && (input === 't' || input === 'T')) {
@@ -369,101 +498,220 @@ export function App({
         )
       : 0;
 
-  return (
-    <Box flexDirection="column">
-      {empty ? (
-        <>
-          <Header
-            version={version}
-            cwd={controller.getCwd()}
-            provider={cfg.provider}
-            model={cfg.model}
-            hasKey={hasKey}
-            compact={false}
-            theme={theme}
-            caps={caps}
-          />
-          <Welcome provider={cfg.provider} model={cfg.model} hasKey={hasKey} theme={theme} />
-        </>
-      ) : (
-        <Header
-          version={version}
-          cwd={controller.getCwd()}
-          provider={cfg.provider}
-          model={cfg.model}
-          hasKey={hasKey}
-          compact
+  // Row budget for the viewport and everything sized against it (§4.2a). The
+  // inline path has no fixed frame, hence no height to fit into: `Infinity`
+  // tells `OverlayFrame` to render everything and show no position indicator.
+  const viewportBudget = computeViewportRows(rows);
+  const overlayMaxRows = fullscreen ? viewportBudget : Number.POSITIVE_INFINITY;
+
+  const overlayNode =
+    overlay === 'help' ? (
+      <OverlayFrame
+        title="Help"
+        hint={`Esc close ${glyphs.midDot} PgUp/PgDn scroll`}
+        maxRows={overlayMaxRows}
+        cols={cols}
+        rows={helpRows(theme, caps)}
+        scrollOffset={overlayScroll}
+        onScrollClamp={setOverlayScroll}
+        theme={theme}
+        caps={caps}
+      />
+    ) : overlay === 'model' ? (
+      <ModelPicker
+        registry={controller.getModelRegistry()}
+        currentProvider={cfg.provider}
+        currentModel={cfg.model}
+        maxRows={overlayMaxRows}
+        cols={cols}
+        theme={theme}
+        caps={caps}
+        onSelect={handleModelSelect}
+      />
+    ) : overlay === 'settings' ? (
+      <SettingsScreen
+        initial={{
+          provider: cfg.provider,
+          model: cfg.model,
+          baseUrl: cfg.baseUrl ?? '',
+          thinkingLevel: cfg.thinkingLevel,
+          maxTokens: cfg.maxTokens ? String(cfg.maxTokens) : '',
+          apiKey: '',
+        }}
+        apiKeys={cfg.apiKeys}
+        maxRows={overlayMaxRows}
+        cols={cols}
+        scrollOffset={overlayScroll}
+        onScrollClamp={setOverlayScroll}
+        theme={theme}
+        caps={caps}
+        onSave={handleSettingsSave}
+      />
+    ) : overlay === 'confirm' && confirmState ? (
+      <ConfirmDialog
+        state={confirmState}
+        maxRows={overlayMaxRows}
+        cols={cols}
+        theme={theme}
+        caps={caps}
+        onClose={closeConfirm}
+      />
+    ) : null;
+
+  // A resize can drop below the usable floor. Do NOT leave the alt-screen —
+  // entering and leaving it on every drag is worse than a placeholder — and take
+  // the height from `frameHeight()` like everything else, because this is the
+  // one path that reaches rows < 12 and a hard-coded height here would land on
+  // `outputHeight >= rows` exactly when the user is dragging the window (§4.11).
+  if (fullscreen && rows < MIN_FULLSCREEN_ROWS) {
+    return (
+      <Box flexDirection="column" height={frameHeight(rows)} width={cols} overflow="hidden">
+        <Text wrap="truncate" color={theme.noticeWarn}>
+          {glyphs.warn} Terminal too small - needs at least {MIN_FULLSCREEN_ROWS} rows.
+        </Text>
+      </Box>
+    );
+  }
+
+  // Full-screen: a constant one-row brand bar at every size, which is what makes
+  // the viewport monotonic and the first submit jump-free (§4.2). Inline keeps
+  // its v0.3.0 ternary and never calls `pickHeaderVariant`.
+  const header = (
+    <Header
+      version={version}
+      cwd={controller.getCwd()}
+      provider={cfg.provider}
+      model={cfg.model}
+      hasKey={hasKey}
+      variant={fullscreen ? pickHeaderVariant(cols) : empty ? 'banner' : 'bar'}
+      theme={theme}
+      caps={caps}
+    />
+  );
+
+  // The wordmark + getting-started card now live INSIDE the viewport, as its
+  // first block of content, so they scroll away instead of being yanked out of
+  // the header the moment the first message lands.
+  const opener = empty ? (
+    <SessionOpener
+      variant={fullscreen ? pickOpenerVariant(viewportBudget, cols, caps) : 'none'}
+      version={version}
+      cwd={controller.getCwd()}
+      hasKey={hasKey}
+      viewportRows={fullscreen ? viewportBudget : Number.POSITIVE_INFINITY}
+      theme={theme}
+      caps={caps}
+    />
+  ) : null;
+
+  const density = cfg.density;
+
+  const viewport = fullscreen ? (
+    overlayNode ? (
+      <Box flexDirection="column" flexGrow={1} overflow="hidden">
+        {overlayNode}
+      </Box>
+    ) : (
+      <ScrollViewport
+        intent={scrollIntent}
+        pinToBottomNonce={pinToBottomNonce}
+        onScrolledLinesChange={setScrolledLines}
+        theme={theme}
+        caps={caps}
+      >
+        {opener}
+        <TranscriptList
+          entries={state.entries}
+          expandedToolIds={state.expandedToolIds}
+          thinkingVisible={state.thinkingVisible}
+          reducedMotion={reducedMotion}
+          density={density}
           theme={theme}
           caps={caps}
+          windowSize={cfg.transcriptWindow ?? DEFAULT_TRANSCRIPT_WINDOW}
         />
-      )}
-
+      </ScrollViewport>
+    )
+  ) : (
+    <>
+      {opener}
       <Transcript
         entries={state.entries}
         expandedToolIds={state.expandedToolIds}
         thinkingVisible={state.thinkingVisible}
         reducedMotion={reducedMotion}
-        theme={theme}
-      />
-
-      {overlay === 'help' && <HelpOverlay theme={theme} />}
-      {overlay === 'model' && (
-        <ModelPicker
-          registry={controller.getModelRegistry()}
-          currentProvider={cfg.provider}
-          currentModel={cfg.model}
-          theme={theme}
-          onSelect={handleModelSelect}
-        />
-      )}
-      {overlay === 'settings' && (
-        <SettingsScreen
-          initial={{
-            provider: cfg.provider,
-            model: cfg.model,
-            baseUrl: cfg.baseUrl ?? '',
-            thinkingLevel: cfg.thinkingLevel,
-            maxTokens: cfg.maxTokens ? String(cfg.maxTokens) : '',
-            apiKey: '',
-          }}
-          apiKeys={cfg.apiKeys}
-          theme={theme}
-          onSave={handleSettingsSave}
-        />
-      )}
-      {overlay === 'confirm' && confirmState && (
-        <ConfirmDialog state={confirmState} theme={theme} onClose={closeConfirm} />
-      )}
-
-      <Box marginTop={1}>
-        <PromptInput
-          isActive={overlay === null}
-          running={state.status === 'running'}
-          history={promptHistory}
-          commands={commandOptions}
-          cwd={controller.getCwd()}
-          theme={theme}
-          onSubmit={(text) => void handleSubmit(text)}
-          onHelp={() => dispatch({ type: 'setOverlay', overlay: 'help' })}
-        />
-      </Box>
-
-      <ToastStack toasts={state.toasts} theme={theme} />
-
-      <StatusBar
-        model={cfg.model}
-        provider={cfg.provider}
-        usageTotal={state.usageTotal}
-        contextTokens={state.contextTokens}
-        contextWindow={modelInfo.contextWindow}
-        contextWindowKnown={modelKnown}
-        status={state.status}
-        elapsedMs={elapsedMs}
-        thinkingLevel={cfg.thinkingLevel}
-        tokPerSec={tokPerSec}
+        density={density}
         theme={theme}
         caps={caps}
       />
+      {overlayNode}
+    </>
+  );
+
+  // The completion popup lives inside the bottom chrome and can add up to 9
+  // rows; unbounded, it pushes the status bar past the frame height where
+  // `overflow: hidden` clips it away (R-14 / M-14). Cap it against the viewport.
+  const popupMaxRows = fullscreen ? Math.max(1, viewportBudget - 4) : undefined;
+
+  const composer = fullscreen ? (
+    <Composer
+      isActive={overlay === null}
+      running={state.status === 'running'}
+      history={promptHistory}
+      commands={commandOptions}
+      cwd={controller.getCwd()}
+      showHint={rows >= HINT_MIN_ROWS}
+      submitCount={cfg.submitCount}
+      hintsEnabled={cfg.hints}
+      popupMaxRows={popupMaxRows}
+      theme={theme}
+      caps={caps}
+      onSubmit={(text) => void handleSubmit(text)}
+      onHelp={() => dispatch({ type: 'setOverlay', overlay: 'help' })}
+    />
+  ) : (
+    <Box marginTop={1}>
+      <PromptInput
+        isActive={overlay === null}
+        running={state.status === 'running'}
+        history={promptHistory}
+        commands={commandOptions}
+        cwd={controller.getCwd()}
+        theme={theme}
+        caps={caps}
+        onSubmit={(text) => void handleSubmit(text)}
+        onHelp={() => dispatch({ type: 'setOverlay', overlay: 'help' })}
+      />
     </Box>
+  );
+
+  return (
+    <AppShell
+      mode={mode}
+      rows={rows}
+      cols={cols}
+      header={header}
+      viewport={viewport}
+      toast={<ToastStack toasts={state.toasts} theme={theme} mode={mode} />}
+      composer={composer}
+      status={
+        <StatusBar
+          model={cfg.model}
+          provider={cfg.provider}
+          usageTotal={state.usageTotal}
+          contextTokens={state.contextTokens}
+          contextWindow={modelInfo.contextWindow}
+          contextWindowKnown={modelKnown}
+          status={state.status}
+          elapsedMs={elapsedMs}
+          thinkingLevel={cfg.thinkingLevel}
+          tokPerSec={tokPerSec}
+          theme={theme}
+          caps={caps}
+          scrolledLines={scrolledLines}
+          redrawNonce={redrawNonce}
+        />
+      }
+    />
   );
 }

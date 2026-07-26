@@ -26,6 +26,11 @@ $registry = 'https://registry.npmjs.org/'
 $coreManifestPath = 'packages/core/package.json'
 $cliManifestPath = 'packages/cli/package.json'
 $lockfilePath = 'package-lock.json'
+$cliBinName = 'aragon'
+# npm strips the leading './' from bin paths when it accepts a publish, so the source
+# manifest and the registry/lockfile metadata legitimately disagree on this one detail.
+$cliBinSourcePath = './dist/cli.js'
+$cliBinNormalizedPath = 'dist/cli.js'
 $versionFiles = @($coreManifestPath, $cliManifestPath, $lockfilePath)
 $publishMayHaveStarted = $false
 $snapshots = @{}
@@ -94,6 +99,52 @@ function Invoke-GitCapture {
 
 function Read-JsonFile([string]$Path) {
   return Get-Content -Raw -LiteralPath $Path -Encoding utf8 | ConvertFrom-Json
+}
+
+# Set-StrictMode 2.0 turns a missing property into a terminating error, which would mask
+# the descriptive assertion messages below with a raw PowerShell stack trace.
+function Get-ObjectProperty($Object, [string]$Name) {
+  if ($null -eq $Object) {
+    return $null
+  }
+  $property = $Object.PSObject.Properties[$Name]
+  if ($null -eq $property) {
+    return $null
+  }
+  return $property.Value
+}
+
+# A missing 'bin' object would otherwise surface as "The property 'Properties' cannot be
+# found on this object" instead of the descriptive assertion below it.
+# The unary comma keeps PowerShell from unrolling a single-property result into a scalar,
+# which would make the .Count checks below fail under Set-StrictMode.
+function Get-PropertyList($Object) {
+  if ($null -eq $Object) {
+    return ,@()
+  }
+  return ,@($Object.PSObject.Properties)
+}
+
+# Invoke-NpmCapture merges stderr into stdout so registry 404s stay matchable, which means
+# any npm notice or Node warning lands in front of (or behind) a --json payload.
+function ConvertFrom-NpmJsonText([string]$Text) {
+  if ([string]::IsNullOrWhiteSpace($Text)) {
+    return $null
+  }
+  $start = $Text.IndexOfAny([char[]]@('{', '['))
+  $end = [Math]::Max($Text.LastIndexOf('}'), $Text.LastIndexOf(']'))
+  if ($start -lt 0 -or $end -lt $start) {
+    return $null
+  }
+  try {
+    return $Text.Substring($start, $end - $start + 1) | ConvertFrom-Json
+  } catch {
+    return $null
+  }
+}
+
+function ConvertTo-NormalizedBinPath([string]$Path) {
+  return ($Path -replace '^\./', '')
 }
 
 function Read-LockfileMetadata {
@@ -216,13 +267,13 @@ function Assert-PackageState {
     throw "CLI must depend on $expectedCoreRange in both package.json and package-lock.json"
   }
 
-  $binProperties = @($cli.bin.PSObject.Properties)
-  if ($binProperties.Count -ne 1 -or $binProperties[0].Name -ne 'aragon' -or $binProperties[0].Value -ne './dist/cli.js') {
-    throw 'CLI package must expose only bin.aragon = ./dist/cli.js'
+  $binProperties = Get-PropertyList (Get-ObjectProperty $cli 'bin')
+  if ($binProperties.Count -ne 1 -or $binProperties[0].Name -ne $cliBinName -or $binProperties[0].Value -ne $cliBinSourcePath) {
+    throw "CLI package must expose only bin.$cliBinName = $cliBinSourcePath"
   }
-  $lockBinProperties = @($lockMetadata.cliBin.PSObject.Properties)
-  if ($lockBinProperties.Count -ne 1 -or $lockBinProperties[0].Name -ne 'aragon' -or $lockBinProperties[0].Value -ne 'dist/cli.js') {
-    throw 'CLI lockfile metadata must expose only npm-normalized bin.aragon = dist/cli.js'
+  $lockBinProperties = Get-PropertyList (Get-ObjectProperty $lockMetadata 'cliBin')
+  if ($lockBinProperties.Count -ne 1 -or $lockBinProperties[0].Name -ne $cliBinName -or $lockBinProperties[0].Value -ne $cliBinNormalizedPath) {
+    throw "CLI lockfile metadata must expose only npm-normalized bin.$cliBinName = $cliBinNormalizedPath"
   }
 
   return [pscustomobject]@{
@@ -255,17 +306,47 @@ function Assert-PublishedCliMetadata([string]$Version) {
   if ($result.ExitCode -ne 0) {
     throw "Published CLI metadata is not queryable:`n$($result.Text)"
   }
-  try {
-    $metadata = $result.Text | ConvertFrom-Json
-  } catch {
+  $metadata = ConvertFrom-NpmJsonText $result.Text
+  if ($null -eq $metadata) {
     throw "Published CLI metadata is not valid JSON:`n$($result.Text)"
   }
-  if ($metadata.version -ne $Version -or $metadata.bin.aragon -ne './dist/cli.js') {
-    throw "Published CLI metadata does not contain version $Version and bin.aragon"
+
+  $publishedVersion = [string](Get-ObjectProperty $metadata 'version')
+  if ($publishedVersion -ne $Version) {
+    throw "Published CLI metadata reports version '$publishedVersion', expected '$Version'"
   }
-  if (@($metadata.bin.PSObject.Properties).Count -ne 1) {
-    throw 'Published CLI metadata exposes an unexpected executable alias'
+
+  $binProperties = Get-PropertyList (Get-ObjectProperty $metadata 'bin')
+  if ($binProperties.Count -ne 1 -or $binProperties[0].Name -ne $cliBinName) {
+    $aliases = ($binProperties | ForEach-Object { $_.Name }) -join ', '
+    throw "Published CLI metadata must expose only bin.$cliBinName; got: $aliases"
   }
+  # The registry serves the npm-normalized path, never the './' form in the source manifest.
+  $publishedBinPath = ConvertTo-NormalizedBinPath ([string]$binProperties[0].Value)
+  if ($publishedBinPath -ne $cliBinNormalizedPath) {
+    throw "Published CLI metadata exposes bin.$cliBinName = '$($binProperties[0].Value)', expected '$cliBinNormalizedPath'"
+  }
+}
+
+function Assert-NpmAuthentication {
+  Write-Host "> npm whoami --registry $registry" -ForegroundColor DarkGray
+  $result = Invoke-NpmCapture @('whoami', '--registry', $registry)
+  if ($result.ExitCode -eq 0) {
+    $account = ($result.Output | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_.Length -gt 0 } | Select-Object -Last 1)
+    Write-Host "npm account: $account" -ForegroundColor DarkGray
+    return
+  }
+  if ($result.Text -match '(?i)E401|ENEEDAUTH|Unauthorized') {
+    throw @"
+Not authenticated against $registry (npm credentials are missing or expired).
+Log in, then re-run this script:
+  npm login --scope "@argon-agent" --registry "$registry" --auth-type web
+  npm whoami --registry "$registry"
+npm reported:
+$($result.Text)
+"@
+  }
+  throw "Unable to verify npm authentication:`n$($result.Text)"
 }
 
 if ($DryRun -and $Resume) {
@@ -314,7 +395,7 @@ try {
     throw 'NODE_TLS_REJECT_UNAUTHORIZED=0 disables TLS verification. Remove it before publishing.'
   }
 
-  Invoke-NpmCommand @('whoami', '--registry', $registry)
+  Assert-NpmAuthentication
   $coreExists = Test-NpmVersionExists '@argon-agent/core' $packageState.CoreVersion
   $cliExists = Test-NpmVersionExists '@argon-agent/cli' $packageState.CliVersion
 

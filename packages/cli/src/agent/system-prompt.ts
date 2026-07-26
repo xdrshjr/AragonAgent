@@ -57,7 +57,7 @@ export function buildSystemPrompt(params: SystemPromptParams): string {
     '- Make focused edits with edit_file; create new files with write_file.',
     `- ${shellGuidance}`,
     '- All file paths passed to tools resolve against the working directory above unless absolute.',
-    '- You run at full permission with no sandbox — be careful with destructive commands.',
+    '- You run at full permission with no sandbox - be careful with destructive commands.',
     '- When the task is complete, stop and give the user a concise summary.',
     '- Respond in the language the user writes in.',
   ].join('\n');

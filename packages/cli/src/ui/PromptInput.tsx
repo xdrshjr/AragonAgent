@@ -9,10 +9,12 @@
  * exported for `input.test.ts`, so the component itself stays thin.
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { glob as tinyGlob } from 'tinyglobby';
 import type { Theme } from './theme.js';
+import type { TermCapabilities } from './capabilities.js';
+import { pickGlyphs } from './glyphs.js';
 import { recognize, type EditIntent, type KeyState } from '../input/keymap.js';
 import { AutocompletePopup, type Suggestion } from './AutocompletePopup.js';
 
@@ -28,8 +30,28 @@ interface PromptInputProps {
   commands: CommandOption[];
   cwd: string;
   theme: Theme;
+  caps: TermCapabilities;
+  /**
+   * Row budget for the completion popup (§5.2 / R-14).
+   *
+   * The popup renders INSIDE this component, inside the shell's `flexShrink={0}`
+   * bottom chrome, and can add up to 9 rows. On a short terminal that pushes the
+   * status bar past the frame height, where the root box's `overflow: hidden`
+   * clips it away — the one piece of chrome R2 promises is always visible.
+   * `App` derives this from `budget.ts` so the popup shrinks instead.
+   */
+  popupMaxRows?: number;
   onSubmit: (text: string) => void;
   onHelp?: () => void;
+  /**
+   * Set by `Composer` in full-screen mode: draw the rounded frame around the
+   * input row only, so the autocomplete popup lands OUTSIDE it (spec §4.7)
+   * without lifting the editor's buffer/cursor state out of this component.
+   * Unset ⇒ the v0.2.0 borderless inline rendering.
+   */
+  bordered?: { color?: string };
+  /** Fires only when the draft flips empty ⇄ non-empty, for the border color. */
+  onDraftChange?: (hasDraft: boolean) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -155,8 +177,12 @@ export function PromptInput({
   commands,
   cwd,
   theme,
+  caps,
+  popupMaxRows,
   onSubmit,
   onHelp,
+  bordered,
+  onDraftChange,
 }: PromptInputProps): React.ReactElement {
   const [buffer, setBuffer] = useState('');
   const [cursor, setCursor] = useState(0);
@@ -208,6 +234,17 @@ export function PromptInput({
       clearTimeout(id);
     };
   }, [fileQuery, cwd]);
+
+  // --- Draft presence, reported only on the transition. ---------------------
+  // Notifying on every keystroke would re-render the whole App tree per key.
+  const hasDraft = buffer.length > 0;
+  const lastReportedDraft = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (!onDraftChange) return;
+    if (lastReportedDraft.current === hasDraft) return;
+    lastReportedDraft.current = hasDraft;
+    onDraftChange(hasDraft);
+  }, [hasDraft, onDraftChange]);
 
   // --- Mutators. -----------------------------------------------------------
   const resetDraftFlags = () => {
@@ -352,11 +389,14 @@ export function PromptInput({
         setCursor(Math.min(buffer.length, cursor + 1));
         return;
       }
-      if (key.upArrow) {
+      // `!key.shift` is load-bearing: Shift+↑/↓ is the viewport's line-scroll
+      // binding (§4.10). Without the guard the history recall below swallows it
+      // and scrolling appears to be broken for no visible reason.
+      if (key.upArrow && !key.shift) {
         verticalOrHistory('up');
         return;
       }
-      if (key.downArrow) {
+      if (key.downArrow && !key.shift) {
         verticalOrHistory('down');
         return;
       }
@@ -373,30 +413,53 @@ export function PromptInput({
     { isActive },
   );
 
-  const marker = running ? '⇢' : '❯';
+  const glyphs = pickGlyphs(caps);
+  const marker = running ? glyphs.steer : glyphs.caret;
   const markerColor = running ? theme.toolRunning : theme.primary;
   const placeholder = running
-    ? 'Type to steer the run, Esc to abort…'
-    : 'Send a message (/ for commands, @ for files)…';
+    ? `Type to steer the run, Esc to abort${glyphs.ellipsis}`
+    : `Send a message (/ for commands, @ for files)${glyphs.ellipsis}`;
   const lines = renderWithCursor(buffer, cursor, isActive);
 
-  return (
-    <Box flexDirection="column">
-      {popupItems.length > 0 && (
-        <AutocompletePopup items={popupItems} selected={clampedSel} theme={theme} />
-      )}
-      <Box flexDirection="row">
-        <Text color={markerColor} bold>
-          {marker}{' '}
-        </Text>
-        <Box flexDirection="column">
-          {buffer.length === 0 ? (
-            <Text color={theme.muted}>{placeholder}</Text>
-          ) : (
-            lines.map((line, i) => <Text key={i}>{line}</Text>)
-          )}
-        </Box>
+  const inputRow = (
+    <Box flexDirection="row">
+      <Text color={markerColor} bold>
+        {marker}{' '}
+      </Text>
+      <Box flexDirection="column">
+        {buffer.length === 0 ? (
+          <Text color={theme.muted}>{placeholder}</Text>
+        ) : (
+          lines.map((line, i) => <Text key={i}>{line}</Text>)
+        )}
       </Box>
+    </Box>
+  );
+
+  return (
+    <Box flexDirection="column" flexShrink={0}>
+      {popupItems.length > 0 && (
+        <AutocompletePopup
+          items={popupItems}
+          selected={clampedSel}
+          theme={theme}
+          caps={caps}
+          maxRows={popupMaxRows}
+        />
+      )}
+      {bordered ? (
+        <Box
+          flexDirection="column"
+          flexShrink={0}
+          borderStyle={glyphs.boxStyle}
+          borderColor={bordered.color}
+          paddingX={1}
+        >
+          {inputRow}
+        </Box>
+      ) : (
+        inputRow
+      )}
     </Box>
   );
 }

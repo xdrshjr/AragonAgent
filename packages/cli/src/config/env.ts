@@ -77,6 +77,13 @@ export function readEnvConfig(): EnvConfig {
     partial.theme = clampTheme(process.env.ARGON_THEME.trim(), 'auto');
   }
 
+  // ARGON_FULLSCREEN=0|1 — the one channel that works where neither a flag nor
+  // a config file is reachable (containers, SSH, being spawned by another tool).
+  const fullscreen = process.env.ARGON_FULLSCREEN?.trim().toLowerCase();
+  if (fullscreen !== undefined && fullscreen.length > 0) {
+    partial.fullscreen = fullscreen === '1' || fullscreen === 'true' || fullscreen === 'on' || fullscreen === 'yes';
+  }
+
   const apiKeys: Record<string, string | undefined> = {};
   for (const [prov, names] of Object.entries(PROVIDER_ENV_KEYS)) {
     apiKeys[prov] = firstEnv(names);

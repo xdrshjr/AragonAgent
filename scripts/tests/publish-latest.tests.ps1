@@ -84,12 +84,14 @@ function New-ReleaseFixture(
   return [pscustomobject]@{ Base = $base; Repo = $repo; Log = $log; State = $state }
 }
 
-function Invoke-ReleaseFixture($Fixture, [string[]]$Arguments) {
+function Invoke-ReleaseFixture($Fixture, [string[]]$Arguments, [switch]$Unauthenticated) {
   $previousLog = $env:ARGON_FAKE_NPM_LOG
   $previousState = $env:ARGON_FAKE_NPM_STATE
+  $previousUnauthenticated = $env:ARGON_FAKE_NPM_UNAUTHENTICATED
   try {
     $env:ARGON_FAKE_NPM_LOG = $Fixture.Log
     $env:ARGON_FAKE_NPM_STATE = $Fixture.State
+    $env:ARGON_FAKE_NPM_UNAUTHENTICATED = if ($Unauthenticated) { '1' } else { $null }
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $output = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Fixture.Repo 'publish-latest.ps1') @Arguments 2>&1
@@ -100,6 +102,7 @@ function Invoke-ReleaseFixture($Fixture, [string[]]$Arguments) {
     $ErrorActionPreference = 'Stop'
     $env:ARGON_FAKE_NPM_LOG = $previousLog
     $env:ARGON_FAKE_NPM_STATE = $previousState
+    $env:ARGON_FAKE_NPM_UNAUTHENTICATED = $previousUnauthenticated
   }
 }
 
@@ -166,8 +169,24 @@ try {
   $resumeState = Read-Json $resumeFixture.State
   Assert-True (@($resumeState.core) -contains '0.1.1') 'Core state changed during resume'
   Assert-True (@($resumeState.cli) -contains '0.2.1') 'CLI was not published during resume'
+  # The published-metadata check must accept npm's normalized 'dist/cli.js' and tolerate
+  # notices on stderr; both used to fail after a successful publish, which made -Resume
+  # unable to ever converge.
+  Assert-Command $resumeCommands "view @argon-agent/cli@0.2.1 version bin --json --registry https://registry.npmjs.org/"
 
-  Write-Host '[release-test] PASS (3 scenarios)'
+  Write-Host '[release-test] unauthenticated registry'
+  $authFixture = New-ReleaseFixture
+  $fixtures += $authFixture
+  $authResult = Invoke-ReleaseFixture $authFixture @('-NpmCommand', $fakeNpm) -Unauthenticated
+  Assert-True ($authResult.ExitCode -ne 0) 'unauthenticated release unexpectedly succeeded'
+  $authText = ($authResult.Output | ForEach-Object { $_.ToString() }) -join "`n"
+  Assert-True ($authText -match 'npm login') 'auth failure did not point at npm login'
+  $authCommands = Get-LoggedCommands $authFixture
+  Assert-True (-not ($authCommands | Where-Object { $_ -like 'publish *' })) 'unauthenticated run reached npm publish'
+  Assert-Equal '0.1.0' (Read-Json (Join-Path $authFixture.Repo 'packages\core\package.json')).version 'Core manifest was not restored after auth failure'
+  Assert-Equal '0.2.0' (Read-Json (Join-Path $authFixture.Repo 'packages\cli\package.json')).version 'CLI manifest was not restored after auth failure'
+
+  Write-Host '[release-test] PASS (4 scenarios)'
 } finally {
   foreach ($fixture in $fixtures) {
     if ($fixture -and (Test-Path -LiteralPath $fixture.Base)) {

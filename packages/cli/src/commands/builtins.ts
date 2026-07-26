@@ -8,7 +8,14 @@ import { spawn } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import process from 'node:process';
-import { clampThinkingLevel, clampTheme, THINKING_LEVELS } from '../config/schema.js';
+import {
+  clampThinkingLevel,
+  clampTheme,
+  isThemeName,
+  LEGACY_DARK_THEME,
+  THEME_NAMES,
+  THINKING_LEVELS,
+} from '../config/schema.js';
 import type { Entry } from '../agent/reducer.js';
 import { loadSession, resolveSessionPath, saveSession } from '../session/persist.js';
 import { CommandRegistry, type SlashCommand } from './registry.js';
@@ -46,19 +53,22 @@ const COMMANDS: SlashCommand[] = [
   },
   {
     name: 'theme',
-    description: 'Switch the color theme (auto|dark|light)',
+    description: 'Switch the color theme (auto|warm|cool|light)',
     run: (ctx) => {
       const arg = ctx.args.trim().toLowerCase();
       const current = ctx.controller.getConfig().theme;
       if (!arg) {
-        ctx.notify('info', `Theme: ${current}. Use /theme <auto|dark|light>.`);
+        ctx.notify('info', `Theme: ${current}. Use /theme <auto|warm|cool|light>.`);
+        return;
+      }
+      // Validate BEFORE clamping. The old `arg !== clampTheme(arg)` test would
+      // now reject `/theme dark`, which is a legal compatibility alias for
+      // `cool` rather than an unknown name (§4.5).
+      if (!isThemeName(arg) && arg !== LEGACY_DARK_THEME) {
+        ctx.notify('warn', `Unknown theme "${arg}" - use ${THEME_NAMES.join(', ')}.`);
         return;
       }
       const name = clampTheme(arg, current);
-      if (arg !== name) {
-        ctx.notify('warn', `Unknown theme "${arg}" — use auto, dark, or light.`);
-        return;
-      }
       ctx.controller.setTheme(name);
       ctx.persistConfig({ theme: name });
       ctx.toast('success', `Theme set to ${name}.`);
@@ -86,7 +96,7 @@ const COMMANDS: SlashCommand[] = [
     run: (ctx) => {
       const lines = ctx.controller
         .listTools()
-        .map((t) => `• ${t.name} — ${t.description.split('\n')[0]}`)
+        .map((t) => `- ${t.name}: ${t.description.split('\n')[0]}`)
         .join('\n');
       ctx.notify('info', `Active tools:\n${lines}`);
     },

@@ -65,7 +65,12 @@ aragon --help  | -h             Print help
 | `--confirm` | Confirm each mutating tool call |
 | `--tool-timeout <ms>` | Per-tool executor ceiling (default 180000) |
 | `--idle-timeout <ms>` | Watchdog idle timeout (auto-raised to ≥ tool-timeout + 30s) |
-| `--theme <name>` | `auto\|dark\|light` |
+| `--theme <name>` | `auto\|warm\|cool\|light` (`dark` is a compatibility alias for `cool`) |
+| `--compact` / `--no-compact` | Transcript density: no blank rows between turns, or the default |
+| `--hints` / `--no-hints` | Show or hide the composer hint row |
+| `--fullscreen` | Force the full-screen TUI, overriding the automatic downgrades |
+| `--no-fullscreen` | Force the inline renderer (the 0.2.0 behavior) |
+| `--no-exit-transcript` | Do not replay the session summary after exiting |
 | `--no-color` | Disable ANSI color |
 | `--quiet` | (print mode) suppress tool/usage lines on stderr |
 
@@ -86,7 +91,7 @@ Exit codes: `0` success · `1` agent/runtime error · `2` config/usage error ·
 | `/cwd [dir]` | Show / change the tool working directory |
 | `/save [file]` | Save the session to JSON |
 | `/resume [file]` | Load a saved session |
-| `/theme <auto\|dark\|light>` | Switch the color theme live (persisted) |
+| `/theme <auto\|warm\|cool\|light>` | Switch the color theme live (persisted) |
 | `/expand [n]` | Expand / collapse the n-th-from-last (default last) tool card |
 | `/copy` | Copy the last answer to the clipboard |
 | `/exit` (`/quit`) | Exit |
@@ -103,9 +108,11 @@ completes, `Up` / `Down` moves the selection, `Esc` closes it.
 | `Alt+Enter` / `Shift+Enter` | Insert a newline |
 | `Esc` | Abort the run / close an overlay / close a popup |
 | `Ctrl+C` ×2 | Exit (first press warns) |
-| `Ctrl+L` | Clear the screen |
+| `Ctrl+L` | Redraw the frame (clear the screen in inline mode) |
 | `Ctrl+T` | Toggle thinking blocks |
 | `Ctrl+O` | Expand / collapse the most recent tool card |
+| `PgUp` / `PgDn` | Scroll the transcript a page (full-screen mode) |
+| `Shift+↑` / `Shift+↓` | Scroll the transcript a line (full-screen mode) |
 | `Home` / `End`, `Ctrl+A` / `Ctrl+E` | Cursor to line start / end |
 | `Alt/Ctrl+←` / `→` | Word-wise cursor jump |
 | `Ctrl+W`, `Alt+Backspace` | Delete the previous word |
@@ -113,8 +120,64 @@ completes, `Up` / `Down` moves the selection, `Esc` closes it.
 | `Up` / `Down` | Move between draft lines; recall prompt history at the edges |
 | `?` | Open help (empty input) |
 
-History scrollback lives in your terminal's **native scrollback** (settled
-turns are printed once via Ink `<Static>`); scroll the terminal to review them.
+In **full-screen mode** the transcript is scrolled by the app itself: `PgUp` /
+`PgDn` and `Shift+↑` / `Shift+↓`. While pinned to the bottom the viewport follows
+new output automatically; once you scroll away the status bar shows `↑N` and a
+hint counts the lines below you. Submitting a message always re-pins to the
+newest output. In **inline mode** (`--no-fullscreen`) history lives in your
+terminal's native scrollback, printed once via Ink `<Static>`.
+
+## Themes
+
+Three palettes plus `auto`:
+
+| Name | Look |
+| --- | --- |
+| `warm` | Terracotta + amber over warm neutrals. The default (`auto` resolves here). |
+| `cool` | The blue/violet palette that shipped as `dark` through 0.3.x. |
+| `light` | For light terminal backgrounds. |
+
+`auto` never guesses `light`: terminals cannot report their background reliably,
+and guessing wrong makes the app unreadable rather than merely wrong-looking.
+
+**Migrating from 0.3.x** — `dark` was renamed `cool` when `warm` became the
+default, and the old name still works everywhere: `--theme dark`,
+`aragon config set theme dark`, `/theme dark`, and a config file containing
+`"theme": "dark"` all resolve to `cool`, so a screen you explicitly chose does
+not change under you. The value is rewritten as `cool` the next time the config
+is saved. Only users who never picked a theme see the new default.
+
+Density and hints are settable the same three ways: `--compact` / `--no-hints`
+for one run, `aragon config set density compact` / `aragon config set hints false`
+to persist. The composer hint row also shortens to `? help` on its own after a
+few sessions — except while a run is in progress, when it always spells out
+`esc abort` in full.
+
+## Full-screen mode
+
+`aragon` takes over the terminal's **alternate screen buffer** — the mechanism
+`vim`, `htop`, and `lazygit` use. Two consequences worth knowing:
+
+- Your previous shell output is **covered, not erased**, and returns untouched
+  when you exit. Nothing in your scrollback is destroyed.
+- The frame is fixed at `rows - 1` tall, which is what keeps the composer and the
+  status bar at the bottom of the screen even on an empty session.
+
+On exit the session is replayed into the normal buffer as plain text so the
+conversation survives leaving the screen (`--no-exit-transcript` opts out;
+`/save` still exports the full JSON).
+
+It downgrades to the inline renderer automatically when stdout is not a TTY,
+`TERM=dumb`, a CI environment variable is set, or the terminal is under 12 rows
+or 40 columns. `--fullscreen` overrides all of those except the non-TTY check —
+writing screen-control sequences into a pipe or a redirected file is never safe.
+`--no-fullscreen`, `ARGON_FULLSCREEN=0`, or `aragon config set fullscreen false`
+opt out permanently.
+
+The terminal's native scrollback and mouse wheel do not scroll the transcript in
+this mode, and mouse tracking is deliberately left off because enabling it costs
+text selection and copy in most terminals. If a crash ever strands your terminal
+on the alternate screen, `reset` restores it.
 
 ## Built-in tools
 
@@ -130,15 +193,26 @@ env / `.env` → CLI flags**.
 
 - **Env / `.env`**: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
   `GOOGLE_API_KEY` / `GEMINI_API_KEY`, plus `ARGON_PROVIDER`, `ARGON_MODEL`,
-  `ARGON_BASE_URL`, `ARGON_THINKING`, `ARGON_MAX_TOKENS`, `ARGON_THEME`.
+  `ARGON_BASE_URL`, `ARGON_THINKING`, `ARGON_MAX_TOKENS`, `ARGON_THEME`,
+  `ARGON_FULLSCREEN`.
 - **User config file** (`aragon config path`): JSON, written `0600` on POSIX.
   Holds provider/model/keys and MRU lists. Keys are masked in the UI and never
   logged.
 
+| Config key | Default | Meaning |
+| --- | --- | --- |
+| `fullscreen` | `true` | Use the full-screen TUI (still subject to the automatic downgrades). Setting it to `false` opts out permanently; leaving it `true` is *not* a force — only `--fullscreen` / `ARGON_FULLSCREEN=1` override the heuristics. |
+| `exitTranscript` | `true` | Replay a plain-text session summary after exiting (full-screen only). |
+| `transcriptWindow` | `300` | How many trailing entries the full-screen viewport renders, clamped to `[50, 2000]`. The full history stays in memory and in `/save`. |
+
+All three are additive: a config file written by an earlier version loads
+unchanged, with no migration and no version bump.
+
 ### Theming & color
 
-`--theme` / `config.theme` / `/theme` pick a palette: `dark`, `light`, or `auto`
-(which resolves to `dark` — terminals can't reliably report their background).
+`--theme` / `config.theme` / `/theme` pick a palette: `warm`, `cool`, `light`, or
+`auto` (which resolves to `warm` — terminals can't reliably report their
+background). `dark` remains accepted everywhere as an alias for `cool`.
 Colors degrade automatically to your terminal's depth (truecolor → 256 → 16 →
 monochrome) and glyphs fall back to ASCII on terminals without Unicode. Color is
 disabled — and the UI renders plain monochrome with ASCII glyphs — when any of

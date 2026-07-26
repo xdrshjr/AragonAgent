@@ -72,7 +72,7 @@ export async function runSlashInput(
   const command = registry.get(name);
   const ctx = makeCtx(args);
   if (!command) {
-    ctx.notify('warn', `Unknown command "/${name}" — try /help.`);
+    ctx.notify('warn', `Unknown command "/${name}" - try /help.`);
     return true;
   }
   await command.run(ctx);

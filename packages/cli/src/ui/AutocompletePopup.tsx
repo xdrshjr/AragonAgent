@@ -7,6 +7,8 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import type { Theme } from './theme.js';
+import type { TermCapabilities } from './capabilities.js';
+import { pickGlyphs } from './glyphs.js';
 
 export interface Suggestion {
   label: string;
@@ -17,6 +19,7 @@ interface AutocompletePopupProps {
   items: Suggestion[];
   selected: number;
   theme: Theme;
+  caps: TermCapabilities;
   maxRows?: number;
 }
 
@@ -26,9 +29,11 @@ export function AutocompletePopup({
   items,
   selected,
   theme,
+  caps,
   maxRows = DEFAULT_MAX_ROWS,
 }: AutocompletePopupProps): React.ReactElement | null {
   if (items.length === 0) return null;
+  const glyphs = pickGlyphs(caps);
 
   // Keep the highlighted row within a window of `maxRows`.
   const start = Math.max(0, Math.min(selected - maxRows + 1, items.length - maxRows));
@@ -39,7 +44,7 @@ export function AutocompletePopup({
   return (
     <Box
       flexDirection="column"
-      borderStyle="round"
+      borderStyle={glyphs.boxStyle}
       borderColor={theme.border}
       paddingX={1}
     >

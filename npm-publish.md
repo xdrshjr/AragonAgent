@@ -296,10 +296,7 @@ Remove-Item Env:NODE_TLS_REJECT_UNAUTHORIZED -ErrorAction SilentlyContinue
 ```powershell
 $registry = 'https://registry.npmjs.org/'
 
-npm login `
-  --scope "@argon-agent" `
-  --registry $registry `
-  --auth-type "web"
+npm login --scope "@argon-agent" --registry 'https://registry.npmjs.org/' --auth-type "web"
 ```
 
 登录后验证：

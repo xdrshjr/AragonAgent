@@ -147,7 +147,7 @@ export function makeEditFile(deps: ToolDeps): AgentTool {
       try {
         const original = await fs.readFile(target, 'utf-8');
         if (params.old_string === params.new_string) {
-          return errorResult('old_string and new_string are identical — nothing to change.');
+          return errorResult('old_string and new_string are identical - nothing to change.');
         }
         const occurrences = countOccurrences(original, params.old_string);
         if (occurrences === 0) {
