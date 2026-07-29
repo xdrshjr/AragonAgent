@@ -31,6 +31,8 @@ import { LLMError, classifyHttpError, wrapFetchError } from '../provider.js';
 import { parseSSEStream } from '../stream-utils.js';
 import { consumeStream } from '../stream-utils.js';
 
+const DEFAULT_MAX_TOKENS = 64_000;
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -206,7 +208,7 @@ export class GoogleProvider implements LLMProvider {
             name: String(m.displayName || id),
             provider: this.id,
             contextWindow: (m.inputTokenLimit as number) || 128_000,
-            maxOutputTokens: (m.outputTokenLimit as number) || 8192,
+            maxOutputTokens: (m.outputTokenLimit as number) || DEFAULT_MAX_TOKENS,
             supportsThinking: false,
             supportsTools: true,
             supportsImages: true,
@@ -243,10 +245,9 @@ function buildRequestBody(request: LLMRequest): Record<string, unknown> {
   }
 
   // Generation config
-  const genConfig: Record<string, unknown> = {};
-  if (request.maxTokens) {
-    genConfig.maxOutputTokens = request.maxTokens;
-  }
+  const genConfig: Record<string, unknown> = {
+    maxOutputTokens: request.maxTokens ?? DEFAULT_MAX_TOKENS,
+  };
   if (request.temperature !== undefined) {
     genConfig.temperature = request.temperature;
   }

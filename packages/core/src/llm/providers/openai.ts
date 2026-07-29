@@ -34,7 +34,7 @@ import { consumeStream } from '../stream-utils.js';
 // ---------------------------------------------------------------------------
 
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
-const DEFAULT_MAX_TOKENS = 16384;
+const DEFAULT_MAX_TOKENS = 64_000;
 
 // Model ID patterns to filter out non-chat models
 const NON_CHAT_PATTERNS = [
@@ -279,7 +279,7 @@ export class OpenAIProvider implements LLMProvider {
           name: String(m.id || ''),
           provider: this.id,
           contextWindow: 128_000,
-          maxOutputTokens: 16_384,
+          maxOutputTokens: DEFAULT_MAX_TOKENS,
           supportsThinking: false,
           supportsTools: true,
           supportsImages: /gpt-4|o1|o3/i.test(String(m.id)),
@@ -305,9 +305,7 @@ function buildRequestBody(request: LLMRequest): Record<string, unknown> {
     stream_options: { include_usage: true },
   };
 
-  if (request.maxTokens) {
-    body.max_tokens = request.maxTokens;
-  }
+  body.max_tokens = request.maxTokens ?? DEFAULT_MAX_TOKENS;
 
   if (request.temperature !== undefined) {
     body.temperature = request.temperature;

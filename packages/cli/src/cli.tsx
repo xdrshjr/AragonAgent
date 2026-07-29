@@ -451,7 +451,7 @@ function buildProgram(): Command {
     .option('--base-url <url>', 'Override the provider base URL')
     .option('--api-key <key>', 'One-shot API key override (not persisted)')
     .option('--thinking <level>', 'off|minimal|low|medium|high|xhigh')
-    .option('--max-tokens <n>', 'Output token cap')
+    .option('--max-tokens <n>', 'Output token cap (default 64000)')
     .option('--cwd <dir>', 'Working directory for tools')
     .option('--confirm', 'Confirm each mutating tool call')
     .option('--tool-timeout <ms>', 'Per-tool executor ceiling (default 180000)')

@@ -342,7 +342,7 @@ export const DEFAULT_CONFIG: PersistedConfig = {
   model: DEFAULT_MODEL,
   baseUrl: null,
   thinkingLevel: 'off',
-  maxTokens: null,
+  maxTokens: 64_000,
   theme: 'auto',
   reducedMotion: false,
   fullscreen: true,

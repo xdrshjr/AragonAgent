@@ -38,7 +38,7 @@ import { consumeStream } from '../stream-utils.js';
 
 const DEFAULT_BASE_URL = 'https://api.anthropic.com';
 const ANTHROPIC_VERSION = '2023-06-01';
-const DEFAULT_MAX_TOKENS = 16384;
+const DEFAULT_MAX_TOKENS = 64_000;
 
 // ---------------------------------------------------------------------------
 // Anthropic provider
@@ -313,7 +313,7 @@ export class AnthropicProvider implements LLMProvider {
         name: String(m.display_name || m.id || ''),
         provider: this.id,
         contextWindow: 200_000,
-        maxOutputTokens: 8192,
+        maxOutputTokens: DEFAULT_MAX_TOKENS,
         supportsThinking: /claude-(sonnet-4|opus-4)/i.test(String(m.id)),
         supportsTools: true,
         supportsImages: true,

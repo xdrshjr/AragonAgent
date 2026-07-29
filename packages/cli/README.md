@@ -60,7 +60,7 @@ aragon --help  | -h             Print help
 | `--base-url <url>` | Override the provider base URL (OpenAI-compatible endpoints) |
 | `--api-key <key>` | One-shot key override (not persisted) |
 | `--thinking <level>` | `off\|minimal\|low\|medium\|high\|xhigh` |
-| `--max-tokens <n>` | Output token cap |
+| `--max-tokens <n>` | Output token cap (default `64000`) |
 | `--cwd <dir>` | Working directory for tools |
 | `--confirm` | Confirm each mutating tool call |
 | `--tool-timeout <ms>` | Per-tool executor ceiling (default 180000) |

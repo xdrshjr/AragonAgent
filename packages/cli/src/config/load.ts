@@ -125,7 +125,7 @@ export function loadConfig(flags: CliFlags = {}): CliConfig {
   );
 
   const maxTokens = coerceMaxTokens(
-    pick(flags.maxTokens, env.partial.maxTokens, file.maxTokens),
+    pick(flags.maxTokens, env.partial.maxTokens, file.maxTokens, DEFAULT_CONFIG.maxTokens),
   );
 
   // `clampTheme` is also where the v0.3.0 `dark` name is migrated to `cool`,

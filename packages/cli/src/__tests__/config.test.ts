@@ -69,6 +69,7 @@ describe('config precedence: defaults < env < flags', () => {
     const cfg = loadConfig({ cwd: CWD });
     expect(cfg.provider).toBe('anthropic');
     expect(cfg.model).toBe('claude-sonnet-4-5-20250929');
+    expect(cfg.maxTokens).toBe(64_000);
   });
 
   it('env overrides defaults', () => {
@@ -81,6 +82,17 @@ describe('config precedence: defaults < env < flags', () => {
     process.env.ARGON_MODEL = 'env-model';
     const cfg = loadConfig({ cwd: CWD, model: 'flag-model' });
     expect(cfg.model).toBe('flag-model');
+  });
+
+  it('resolves maximum-token settings with flags taking precedence', () => {
+    updatePersistedConfig({ maxTokens: 4_096 });
+    process.env.ARGON_MAX_TOKENS = '8192';
+    const flags = {
+      cwd: CWD,
+      maxTokens: '16384',
+    };
+
+    expect(loadConfig(flags).maxTokens).toBe(16_384);
   });
 });
 
