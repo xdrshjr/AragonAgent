@@ -1,7 +1,7 @@
 /**
  * Shared tmpdir fixture for the CLI skill suites.
  *
- * `paths.ts` reads `envPaths('argon-agent')` at module load, so the user root
+ * `paths.ts` reads `envPaths('aragon-agent')` at module load, so the user root
  * cannot be redirected with an env var after the fact. Suites that need to
  * exercise the real user root therefore mock `../paths.js`; suites that only
  * need directories on disk use these helpers directly.
@@ -14,7 +14,7 @@ import type { SkillsConfig, SkillsRuntimeOptions } from '../../config/schema.js'
 import { DEFAULT_SKILLS_CONFIG, DEFAULT_SKILLS_RUNTIME } from '../../config/schema.js';
 import type { ApprovalGate } from '../service.js';
 
-export function makeTmpDir(prefix = 'argon-skills-'): string {
+export function makeTmpDir(prefix = 'aragon-skills-'): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 

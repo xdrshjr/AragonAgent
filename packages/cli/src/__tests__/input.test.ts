@@ -1,6 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { recognize } from '../input/keymap.js';
-import { applyEdit, moveVertical, slashSuggestions, fileTokenAt } from '../ui/PromptInput.js';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  applyEdit,
+  draftLimitRefusal,
+  fileTokenAt,
+  moveVertical,
+  overflowChip,
+  slashSuggestions,
+} from '../ui/PromptInput.js';
+import type { InputSegment } from '../ui/editor-reducer.js';
+import { makePasteRecord, type PasteRecord } from '../ui/paste-tokens.js';
+import { PASTE_MAX_BLOCKS } from '../input/limits.js';
+import { pickGlyphs } from '../ui/glyphs.js';
 
 describe('recognize (keymap)', () => {
   it('maps Ctrl combos to editing intents', () => {
@@ -110,5 +124,122 @@ describe('autocomplete suggestion computation', () => {
     expect(slashSuggestions('/skill:', withSkills)?.map((s) => s.label)).toEqual([
       '/skill:my-skill',
     ]);
+  });
+});
+
+/**
+ * The paste branch (tui-paste-handling section 5.4, T-28 of the design's list).
+ *
+ * ITS POSITION IN THE HANDLER IS THE ASSERTION. It has to sit AFTER every key
+ * branch, so a paste can never be shadowed by a key test, and BEFORE the
+ * `isControlSeq` guard, because a framed string starts with NUL and that guard
+ * inspects only `input.charCodeAt(0)` — it would drop the whole paste.
+ */
+describe('the paste branch in PromptInput.useInput (section 5.4)', () => {
+  const SOURCE = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '..', 'ui', 'PromptInput.tsx'),
+    'utf-8',
+  );
+
+  it('sits before the isControlSeq guard', () => {
+    const paste = SOURCE.indexOf('if (hasPasteFrame(input))');
+    const control = SOURCE.indexOf('!isControlSeq(input)');
+    expect(paste).toBeGreaterThan(-1);
+    expect(control).toBeGreaterThan(-1);
+    expect(paste).toBeLessThan(control);
+  });
+
+  it('sits after every key branch', () => {
+    const paste = SOURCE.indexOf('if (hasPasteFrame(input))');
+    for (const branch of ['if (key.return)', 'if (key.backspace || key.delete)', 'if (key.ctrl)']) {
+      expect(SOURCE.indexOf(branch), branch).toBeLessThan(paste);
+    }
+  });
+
+  it('dispatches at most once, and nothing at all when a limit refuses (I-6 / AC-9)', () => {
+    const start = SOURCE.indexOf('if (hasPasteFrame(input))');
+    const body = SOURCE.slice(start, SOURCE.indexOf('// Printable input', start));
+    expect(body.split('dispatch(').length - 1).toBe(1);
+    // The refusal path returns BEFORE the dispatch, so the draft is untouched.
+    expect(body.indexOf('if (refusal)')).toBeLessThan(body.indexOf('dispatch('));
+    expect(body).toContain('onNotice');
+  });
+});
+
+describe('draftLimitRefusal (section 5.3 / P1-4)', () => {
+  const paste = (text: string, id: number): InputSegment => ({ kind: 'paste', text, id });
+  const empty = { pastes: new Map<number, PasteRecord>() };
+
+  it('allows an ordinary paste', () => {
+    expect(draftLimitRefusal([paste('hello', 1)], empty)).toBeNull();
+    expect(draftLimitRefusal([{ kind: 'text', text: 'typed' }], empty)).toBeNull();
+  });
+
+  it('refuses the block past the ceiling, naming the limit', () => {
+    const live = new Map<number, PasteRecord>();
+    for (let i = 0; i < PASTE_MAX_BLOCKS; i += 1) live.set(i, makePasteRecord(i, 'x'));
+    const refusal = draftLimitRefusal([paste('one more', 99)], { pastes: live });
+    expect(refusal).toContain(String(PASTE_MAX_BLOCKS));
+    expect(refusal).toContain('Nothing was inserted');
+  });
+
+  it('refuses a paste that would push the draft past the byte ceiling', () => {
+    const live = new Map<number, PasteRecord>([[1, makePasteRecord(1, 'x'.repeat(8 * 1024 * 1024))]]);
+    const refusal = draftLimitRefusal([paste('y'.repeat(1024), 2)], { pastes: live });
+    expect(refusal).toContain('MB');
+    expect(refusal).toContain('Nothing was inserted');
+  });
+});
+
+describe('applyEdit — kill ranges are token-atomic (G5 / D-8)', () => {
+  const buffer = 'a [Pasted text #1 +9 lines] b';
+
+  it('Ctrl+W cannot leave half a token behind', () => {
+    // A half-deleted label stops matching, so its payload is released and the
+    // user sends the REMAINS OF THE LABEL instead of the nine lines. The label
+    // contains spaces, so a word jump lands INSIDE it — which is exactly the
+    // case `expandRangeOverTokens` exists for.
+    const out = applyEdit(buffer, buffer.indexOf(']') + 1, 'deleteWordBack');
+    expect(out.buffer).not.toContain('Pasted text');
+    expect(out.buffer).toBe('a  b');
+    expect(out.cursor).toBe(2);
+  });
+
+  it('Ctrl+U from inside the token removes the whole thing', () => {
+    const out = applyEdit(buffer, buffer.indexOf(']'), 'killToStart');
+    expect(out.buffer).toBe(' b');
+  });
+
+  it('Ctrl+K from before the token removes the whole thing', () => {
+    const out = applyEdit(buffer, 3, 'killToEnd');
+    expect(out.buffer).toBe('a ');
+  });
+
+  it('leaves a token-free buffer exactly as it was', () => {
+    expect(applyEdit('foo bar', 7, 'deleteWordBack')).toEqual({ buffer: 'foo ', cursor: 4 });
+  });
+});
+
+describe('overflowChip (section 5.5)', () => {
+  const glyphs = pickGlyphs({ colorLevel: 3, unicode: false });
+
+  it('is absent when the whole draft is on screen', () => {
+    expect(overflowChip(0, 0, glyphs)).toBeNull();
+  });
+
+  it('names both directions and keeps a FIXED cell width', () => {
+    const both = overflowChip(3, 7, glyphs)!;
+    expect(both.text).toContain('3');
+    expect(both.text).toContain('7');
+    const one = overflowChip(0, 7, glyphs)!;
+    expect(one.cells).toBe(both.cells);
+  });
+
+  it('caps the number so a long draft cannot widen the cell', () => {
+    expect(overflowChip(0, 5000, glyphs)!.text).toContain('999+');
+  });
+
+  it('draws from glyphs, so a legacy console gets ASCII', () => {
+    expect(overflowChip(3, 7, glyphs)!.text).not.toMatch(/[^\x00-\x7f]/);
   });
 });

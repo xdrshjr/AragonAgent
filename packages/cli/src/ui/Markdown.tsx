@@ -7,24 +7,28 @@
  * *italic* / `code` / ~~strike~~. Anything else renders as plain text. Still
  * intentionally small — not a CommonMark implementation.
  *
- * The grammar lives in `markdown-blocks.ts`; this file only renders.
+ * The grammar lives in `markdown-blocks.ts`; this file only renders. That was
+ * true of the file header long before it was true of the file
+ * (tui-render-performance R2): the block grammar used to run here, in the render
+ * body, on every frame. Both expensive halves are now memoised on the input
+ * string — `parseMarkdownCached` for the AST, `highlightCached` for the ANSI —
+ * while theme and glyphs stay render-time, so `/theme` still takes effect
+ * immediately (K-5).
  */
 
 import React from 'react';
 import { Box, Text } from 'ink';
-import { highlight } from 'cli-highlight';
 import type { Theme } from './theme.js';
 import type { TermCapabilities } from './capabilities.js';
 import { pickGlyphs, type Glyphs } from './glyphs.js';
 import { railBorderProps } from './layout/Gutter.js';
+import { highlightCached, parseMarkdownCached } from './render-cache.js';
 import {
   formatTable,
   isRule,
-  isTableDivider,
   parseHeading,
   parseInline,
-  parseTableRow,
-  tableAlignments,
+  type MdBlock,
 } from './markdown-blocks.js';
 
 interface MarkdownProps {
@@ -33,71 +37,46 @@ interface MarkdownProps {
   caps: TermCapabilities;
 }
 
-const FENCE = /^```(\w*)\s*$/;
 /** Width of the `---` rule. Fixed so it cannot force a wrap on narrow frames. */
 const RULE_WIDTH = 24;
 
 export function Markdown({ text, theme, caps }: MarkdownProps): React.ReactElement {
   const glyphs = pickGlyphs(caps);
-  const lines = text.split('\n');
-  const blocks: React.ReactElement[] = [];
+  const blocks = parseMarkdownCached(text);
 
-  let i = 0;
-  let key = 0;
-  while (i < lines.length) {
-    const line = lines[i] ?? '';
-    const fence = FENCE.exec(line.trim());
-    if (fence) {
-      const lang = fence[1] || '';
-      const codeLines: string[] = [];
-      i += 1;
-      while (i < lines.length && !FENCE.test((lines[i] ?? '').trim())) {
-        codeLines.push(lines[i] ?? '');
-        i += 1;
-      }
-      i += 1; // skip closing fence
-      blocks.push(
-        <CodeBlock
-          key={`b${key++}`}
-          code={codeLines.join('\n')}
-          lang={lang}
-          theme={theme}
-          glyphs={glyphs}
-        />,
+  return (
+    <Box flexDirection="column">
+      {blocks.map((block, i) => renderBlock(block, i, theme, glyphs))}
+    </Box>
+  );
+}
+
+function renderBlock(
+  block: MdBlock,
+  key: number,
+  theme: Theme,
+  glyphs: Glyphs,
+): React.ReactElement {
+  switch (block.kind) {
+    case 'code':
+      return (
+        <CodeBlock key={`b${key}`} code={block.code} lang={block.lang} theme={theme} glyphs={glyphs} />
       );
-      continue;
-    }
-
-    // A pipe row followed by a divider row starts a table; consume the run.
-    const headerCells = parseTableRow(line);
-    if (headerCells && i + 1 < lines.length && isTableDivider(lines[i + 1] ?? '')) {
-      const align = tableAlignments(lines[i + 1] ?? '');
-      const rows: string[][] = [headerCells];
-      i += 2;
-      while (i < lines.length) {
-        const cells = parseTableRow(lines[i] ?? '');
-        if (!cells) break;
-        rows.push(cells);
-        i += 1;
-      }
-      const formatted = formatTable(rows, align);
-      blocks.push(
-        <Box key={`b${key++}`} flexDirection="column">
+    case 'table': {
+      const formatted = formatTable(block.rows, block.align);
+      return (
+        <Box key={`b${key}`} flexDirection="column">
           {formatted.map((row, r) => (
             <Text key={r} wrap="truncate" bold={r === 0} color={r === 0 ? theme.accent : undefined}>
               {row}
             </Text>
           ))}
-        </Box>,
+        </Box>
       );
-      continue;
     }
-
-    blocks.push(<InlineLine key={`b${key++}`} line={line} theme={theme} glyphs={glyphs} />);
-    i += 1;
+    default:
+      return <InlineLine key={`b${key}`} line={block.text} theme={theme} glyphs={glyphs} />;
   }
-
-  return <Box flexDirection="column">{blocks}</Box>;
 }
 
 /**
@@ -117,12 +96,7 @@ function CodeBlock({
   theme: Theme;
   glyphs: Glyphs;
 }): React.ReactElement {
-  let rendered = code;
-  try {
-    rendered = highlight(code, { language: lang || undefined, ignoreIllegals: true });
-  } catch {
-    rendered = code;
-  }
+  const rendered = highlightCached(code, lang);
   return (
     <Box
       flexDirection="column"

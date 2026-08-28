@@ -32,7 +32,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
-import type { SkillManifestSource } from '@argon-agent/core/skills';
+import type { SkillManifestSource } from '@aragon-agent/core/skills';
 import { extractZip, ARCHIVE_MAX_DOWNLOAD_BYTES } from './archive.js';
 import { isDirectory } from './paths.js';
 
@@ -477,7 +477,7 @@ async function httpGet(url: string, deps: FetchDeps): Promise<Response> {
       response = await doFetch(current, {
         redirect: 'manual',
         signal: controller.signal,
-        headers: { 'User-Agent': deps.userAgent ?? 'argon-agent-cli' },
+        headers: { 'User-Agent': deps.userAgent ?? 'aragon-agent-cli' },
       });
     } finally {
       clearTimeout(timer);

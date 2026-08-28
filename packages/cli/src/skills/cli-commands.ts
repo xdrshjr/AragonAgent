@@ -28,8 +28,8 @@ import {
 import { loadConfig, type CliFlags } from '../config/load.js';
 import { updatePersistedConfig } from '../config/store.js';
 import type { SkillsConfig } from '../config/schema.js';
-import { rankCatalogRecords, type SkillRecord, type SkillScope } from '@argon-agent/core';
-import { classifyBundledFile, resolveDeclaredTool } from '@argon-agent/core/skills';
+import { rankCatalogRecords, type SkillRecord, type SkillScope } from '@aragon-agent/core';
+import { classifyBundledFile, resolveDeclaredTool } from '@aragon-agent/core/skills';
 
 export interface SkillsCliOptions {
   scope?: string;

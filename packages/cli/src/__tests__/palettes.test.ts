@@ -55,6 +55,48 @@ describe('WARM readability (A-7)', () => {
   });
 });
 
+describe('selection highlight readability (tui-selection-and-scroll-follow §4.4.4)', () => {
+  it('pins every palette at WCAG AA against ITS OWN background', () => {
+    // ═══ AGAINST `selectionBg`, NOT `DARK_SURFACE` ═══
+    //
+    // The highlight strips the row's inner SGR and repaints the run in these two
+    // colours, so the surface a selected glyph actually sits on is the selection
+    // background. Measuring against the terminal's own background would pass a
+    // pair that is unreadable in the only place it is ever used — and a selection
+    // the user cannot read is a selection they cannot trust, on the one gesture
+    // whose entire promise is "what you see is what you get".
+    for (const [name, palette] of [
+      ['WARM', WARM],
+      ['COOL', COOL],
+      ['LIGHT', LIGHT],
+    ] as const) {
+      const ratio = contrastRatio(palette.selectionFg, palette.selectionBg);
+      expect(
+        ratio,
+        `${name}: ${palette.selectionFg} on ${palette.selectionBg} -> ${ratio.toFixed(2)}:1`,
+      ).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it('keeps the highlight distinguishable from the surrounding surface', () => {
+    // A selection background that matched the terminal's own would highlight
+    // nothing at all.
+    expect(contrastRatio(WARM.selectionBg, DARK_SURFACE)).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(COOL.selectionBg, DARK_SURFACE)).toBeGreaterThanOrEqual(3);
+  });
+
+  it('declares both halves as hex in every palette', () => {
+    // `highlight.ts` tests for a hex shape and falls back to reverse video
+    // otherwise, so a colour NAME here would silently disable the theme colours
+    // on every truecolor terminal.
+    for (const name of THEME_NAMES) {
+      const p = resolvePalette(name);
+      expect(p.selectionBg, `${name}.selectionBg`).toMatch(/^#[0-9a-f]{6}$/i);
+      expect(p.selectionFg, `${name}.selectionFg`).toMatch(/^#[0-9a-f]{6}$/i);
+    }
+  });
+});
+
 describe('resolvePalette', () => {
   it('maps auto and warm onto WARM (auto never guesses light)', () => {
     // Terminals cannot report their background reliably, and guessing wrong

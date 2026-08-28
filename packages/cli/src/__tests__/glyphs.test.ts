@@ -162,21 +162,97 @@ function walk(dir: string, out: string[] = []): string[] {
  */
 const EXEMPT_FILES = new Set([
   'ui/glyphs.ts', // the two paired tables themselves
-  'agent/headless.ts', // explicit non-goal: `argon -p` does no capability probe
+  'agent/headless.ts', // explicit non-goal: `aragon -p` does no capability probe
 ]);
 /** `Logo.tsx`'s wordmark art, already gated behind `caps.unicode`. */
 const EXEMPT_RANGES: Record<string, [number, number][]> = { 'ui/Logo.tsx': [[13, 20]] };
+
+/**
+ * Which source files the scan covers.
+ *
+ * A NAMED FUNCTION RATHER THAN AN INLINE EXPRESSION so AC-52 can assert on it
+ * DIRECTLY. "The suite passes" is not evidence that a tree is scanned — a
+ * scanner that silently stops scanning is worse than no scanner, and that is
+ * exactly the failure a new directory produces.
+ *
+ * `team/` is in scope from the team-subagents feature onward (I-6 / P1-1 /
+ * R-20). It is a NEW tree, so without this word nothing scanned it at all
+ * and AC-13 would assert a property no test checks — the vacuous-guard
+ * failure mode the scanner's own self-test below exists to prevent, one
+ * level up at the directory rather than the line.
+ * `todo/` joins for exactly the reason `team/` did (C-4 / I-8): it is a NEW
+ * tree, so without this word nothing scanned it at all and the "no
+ * hardcoded non-ASCII" claim would be VACUOUS for the newest code in the
+ * package — a guard rail that silently stops guarding.
+ * `fast/` joins on the same terms (C-4 / AC-27), and ships in the same
+ * commit as the tree for the reason above.
+ * `update/` is the fourth, and ships in the same commit as the tree for the
+ * fourth time (cli-auto-update C-2 / R-11 / AC-18). Without this word the
+ * newest tree in the package is scanned by nothing at all, and the "no
+ * hardcoded non-ASCII" claim goes VACUOUS exactly where a background feature
+ * renders into a legacy console the author never sees.
+ * `boot/` is the FIFTH, and `launcher.ts` joins `cli.tsx` as the second
+ * top-level entry file, both in the same commit as the tree they cover
+ * (cli-auto-update-hardening C-19 / AC-52). This package has now paid for this
+ * class of edit five times; `boot/rollback.ts` writes a line to the user's
+ * terminal, so an unscanned `boot/` is the same hole in the same place.
+ * `exec/`, `diagnostics/` AND `session/` are the SIXTH, SEVENTH and EIGHTH,
+ * and they ship in the same commit as the trees they cover
+ * (cli-integration-surface R-3 / P1-7 / AC-25). `session/` is the one worth
+ * pausing on: it was ALREADY outside this predicate before that feature existed,
+ * so naming only `exec/` — as the first draft of that design did — would have
+ * left two of three new trees unscanned. This is not a case of extending a guard
+ * to new code; it is a case of the guard already having a hole that the feature
+ * widens.
+ */
+export function inScope(rel: string): boolean {
+  return (
+    rel.startsWith('ui/') ||
+    // `compaction` is the NINTH tree, and it ships in the same commit as the code
+    // it covers (context-auto-compaction C-7). This regex is a hardcoded
+    // directory list, so a new tree is INVISIBLE to the scanner until it is named
+    // here — and a scanner that silently stops scanning is worse than no scanner.
+    // Adding the tree and adding the word are the same change; `fast` recorded
+    // this trap one feature earlier and paid for it.
+    // `input` is the TENTH tree, and it ships in the same commit as the code it
+    // covers (tui-paste-handling D-16). It has NEVER been in this list, so
+    // nothing scanned it at all -- and this feature puts user-visible decisions
+    // there (the paste markers, the framing, every refusal string). A scanner
+    // that silently stops scanning is worse than no scanner, and this package
+    // has now paid for that exact edit ten times.
+    // `proc` is the ELEVENTH tree, and it ships in the same commit as the code it
+    // covers (background-service-supervision R-8 / AC-34). Every word above was
+    // added late, after the tree it names had already shipped unscanned; this one
+    // is not, and the reason is the sentence this list has now carried ten times:
+    // a scanner that silently stops scanning is worse than no scanner. `proc/`
+    // writes strings that reach a model AND strings that reach a legacy console
+    // (`[background] service s1 started`), so an unscanned tree is the same hole
+    // in the same place.
+    /^(agent|boot|commands|compaction|config|diagnostics|exec|fast|input|proc|session|team|todo|tools|update)\//.test(
+      rel,
+    ) ||
+    rel === 'cli.tsx' ||
+    rel === 'launcher.ts'
+  );
+}
+
+describe('inScope (the hardcoded directory list)', () => {
+  it('AC-34: proc/ is scanned - same commit as the tree (R-8)', () => {
+    // A scanner that silently stops scanning is worse than no scanner, and this
+    // package has now paid for that edit eleven times. `proc/` writes strings
+    // that reach a MODEL and strings that reach a legacy console, so an
+    // unscanned tree is the same hole in the same place.
+    expect(inScope('proc/limits.ts')).toBe(true);
+    expect(inScope('proc/supervisor.ts')).toBe(true);
+  });
+});
 
 function scan(): string[] {
   const hits: string[] = [];
   for (const file of walk(SRC)) {
     const rel = relative(SRC, file).replace(/\\/g, '/');
     if (rel.startsWith('__tests__/')) continue;
-    const inScope =
-      rel.startsWith('ui/') ||
-      /^(agent|commands|config|tools)\//.test(rel) ||
-      rel === 'cli.tsx';
-    if (!inScope || EXEMPT_FILES.has(rel)) continue;
+    if (!inScope(rel) || EXEMPT_FILES.has(rel)) continue;
     const ranges = EXEMPT_RANGES[rel] ?? [];
     stripComments(readFileSync(file, 'utf8'))
       .split('\n')
@@ -199,6 +275,41 @@ describe('A-1: no hardcoded non-ASCII outside glyphs.ts', () => {
     // mojibake for the prompt caret, every list bullet and all four overlay
     // titles regardless. Scanning `src/ui/**` alone would still let 20 through.
     expect(scan()).toEqual([]);
+  });
+
+  it('AC-52: the scan actually COVERS boot/ and launcher.ts', () => {
+    // ASSERTED ON THE PREDICATE, not implied by the suite passing. The whole
+    // failure mode this guards is a new tree that nothing looks at: `scan()`
+    // returns `[]` for an unscanned directory exactly as it does for a clean
+    // one, so a green suite is not evidence either way (C-19).
+    expect(inScope('boot/guard.ts')).toBe(true);
+    expect(inScope('boot/rollback.ts')).toBe(true);
+    expect(inScope('launcher.ts')).toBe(true);
+    // And the predicate is still narrow: a top-level file that is not an entry
+    // point stays out, or the exemption list stops meaning anything.
+    expect(inScope('index.ts')).toBe(false);
+  });
+
+  it('AC-10: the scan COVERS input/', () => {
+    // Asserted on the PREDICATE for the reason AC-52 states above: `scan()`
+    // returns `[]` for an unscanned directory exactly as it does for a clean
+    // one, so a green suite is not evidence either way (D-16).
+    expect(inScope('input/paste-parse.ts')).toBe(true);
+    expect(inScope('input/stdin-filter.ts')).toBe(true);
+    expect(inScope('input/limits.ts')).toBe(true);
+  });
+
+  it('AC-25: the scan COVERS exec/, session/ and diagnostics/', () => {
+    // Asserted on the PREDICATE for the reason AC-52 states one line up, and
+    // all three are named rather than one representative: `session/` was
+    // outside the predicate BEFORE this feature, so a mitigation that named
+    // only the newest tree would have left it and `diagnostics/` unscanned
+    // while the suite stayed green (cli-integration-surface P1-7).
+    expect(inScope('exec/runner.ts')).toBe(true);
+    expect(inScope('exec/events.ts')).toBe(true);
+    expect(inScope('session/store.ts')).toBe(true);
+    expect(inScope('session/persist.ts')).toBe(true);
+    expect(inScope('diagnostics/doctor.ts')).toBe(true);
   });
 
   it('leaves no component hardcoding a Unicode box style', () => {

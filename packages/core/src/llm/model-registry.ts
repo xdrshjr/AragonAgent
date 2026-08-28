@@ -9,6 +9,7 @@
 
 import type { ModelInfo } from './types.js';
 import type { ProviderRegistry } from './providers/index.js';
+import { DEFAULT_MAX_OUTPUT_TOKENS, learnModelCeiling } from './output-limits.js';
 
 // ---------------------------------------------------------------------------
 // Discovery cache entry
@@ -84,6 +85,25 @@ export class ModelRegistry {
 
     try {
       const models = await provider.listModels(apiKey, baseUrl);
+      // Discovery outranks the static table (§4.1.2). The adapters that can
+      // report a REAL ceiling already learn it themselves; this feeds anything
+      // reached through the registry, including third-party providers.
+      //
+      // A ceiling that is EXACTLY the product default is skipped, because that
+      // is precisely what `listModels` returns when it has nothing to report —
+      // neither the Anthropic nor the OpenAI models endpoint carries an output
+      // ceiling, so both fall back to it (see the notes in their adapters).
+      // Learning it here at `'discovery'` rank would launder that placeholder
+      // into an assertion that outranks the static table, and would collapse the
+      // distinction `staticCeilingFor`'s `undefined` return exists to keep:
+      // "unknown" would become "capped at 64000", silently clamping an explicit
+      // larger request the user is entitled to make against a proxy. Skipping it
+      // costs nothing — AUTO tops out at the default anyway, and a genuinely
+      // over-large request is repaired by `output-limit-recovery.ts`.
+      for (const model of models) {
+        if (model.maxOutputTokens === DEFAULT_MAX_OUTPUT_TOKENS) continue;
+        learnModelCeiling(providerId, model.id, model.maxOutputTokens, 'discovery');
+      }
       this.discoveryCache.set(cacheKey, { models, timestamp: Date.now() });
       return models;
     } catch {
@@ -119,7 +139,10 @@ export class ModelRegistry {
       name: modelId,
       provider: providerId,
       contextWindow: 128_000,
-      maxOutputTokens: 16_384,
+      // The PRODUCT DEFAULT, not a private guess. An unknown model that claims a
+      // ceiling nothing else agrees with is how one part of the system clamps
+      // output the rest of it never asked for.
+      maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
       supportsThinking: false,
       supportsTools: true,
       supportsImages: false,
@@ -143,11 +166,27 @@ export class ModelRegistry {
     this.builtinModels.set('google', GOOGLE_MODELS);
     this.builtinModels.set('xai', XAI_MODELS);
     this.builtinModels.set('groq', GROQ_MODELS);
+
+    // Seed the shared ceiling cache at the LOWEST rank, so discovery and
+    // recovery both override it. Without this the catalog's per-model knowledge
+    // is never consulted when a request body is built — the table is read by the
+    // model picker and by nothing else.
+    for (const models of this.builtinModels.values()) {
+      for (const model of models) {
+        learnModelCeiling(model.provider, model.id, model.maxOutputTokens, 'catalog');
+      }
+    }
   }
 }
 
 // ---------------------------------------------------------------------------
 // Builtin model lists
+//
+// `maxOutputTokens` here MUST agree with `CEILING_TABLE` in `output-limits.ts`.
+// The two are consulted by different code paths — this one by the model picker,
+// that one when a request body is built — and a disagreement shows up as
+// "the picker says 64000 but my answers stop at 8192", which is unattributable
+// from a transcript.
 // ---------------------------------------------------------------------------
 
 const ANTHROPIC_MODELS: ModelInfo[] = [
@@ -156,7 +195,7 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
     name: 'Claude Sonnet 4.5',
     provider: 'anthropic',
     contextWindow: 200_000,
-    maxOutputTokens: 8192,
+    maxOutputTokens: 64_000,
     supportsThinking: true,
     supportsTools: true,
     supportsImages: true,
@@ -167,7 +206,7 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
     name: 'Claude Opus 4.6',
     provider: 'anthropic',
     contextWindow: 200_000,
-    maxOutputTokens: 32_000,
+    maxOutputTokens: 64_000,
     supportsThinking: true,
     supportsTools: true,
     supportsImages: true,
@@ -178,7 +217,7 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
     name: 'Claude Haiku 4.5',
     provider: 'anthropic',
     contextWindow: 200_000,
-    maxOutputTokens: 8192,
+    maxOutputTokens: 64_000,
     supportsThinking: true,
     supportsTools: true,
     supportsImages: true,

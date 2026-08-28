@@ -19,7 +19,7 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 import { Unzip, UnzipInflate } from 'fflate';
-import { checkStagedPath } from '@argon-agent/core/skills';
+import { checkStagedPath } from '@aragon-agent/core/skills';
 
 /** Cap on the COMPRESSED download. The 20 MB below is the inflated total. */
 export const ARCHIVE_MAX_DOWNLOAD_BYTES = 5 * 1024 * 1024;

@@ -1,5 +1,5 @@
 /**
- * `.argon-skill.json` — the install manifest (spec §10.2 / D15).
+ * `.aragon-skill.json` — the install manifest (spec §10.2 / D15).
  *
  * Records provenance (where this skill came from) and a sha256 per file. That
  * pays for three things at once: `/skills info` can answer "where did this come
@@ -11,9 +11,9 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import type { SkillManifest, SkillManifestFile, SkillManifestSource } from '@argon-agent/core/skills';
+import type { SkillManifest, SkillManifestFile, SkillManifestSource } from '@aragon-agent/core/skills';
 
-export const MANIFEST_FILENAME = '.argon-skill.json';
+export const MANIFEST_FILENAME = '.aragon-skill.json';
 export const MANIFEST_SCHEMA = 1;
 
 export function sha256File(path: string): string {

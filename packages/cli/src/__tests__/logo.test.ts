@@ -16,7 +16,7 @@ describe('LOGO_ART', () => {
     for (const line of LOGO_ART) {
       expect(stringWidth(line)).toBe(LOGO_ART_WIDTH);
     }
-    expect(LOGO_ART_WIDTH).toBe(44);
+    expect(LOGO_ART_WIDTH).toBe(52);
   });
 });
 
@@ -60,6 +60,15 @@ describe('pickOpenerVariant', () => {
   it('drops the opener entirely below the banner column floor', () => {
     expect(pickOpenerVariant(20, 47, RICH)).toBe('none');
     expect(pickOpenerVariant(0, 10, RICH)).toBe('none');
+  });
+
+  it('keeps four columns of headroom above the art width (rename C2)', () => {
+    // Pins the safety margin as an invariant. The art renders with
+    // `wrap="truncate"`, so a threshold equal to the art width would let a
+    // single upstream column shear the right edge off the `N`; degrading to
+    // `banner` in that band is the intended behaviour, not a near-miss.
+    expect(pickOpenerVariant(20, LOGO_ART_WIDTH + 3, RICH)).toBe('banner');
+    expect(pickOpenerVariant(20, LOGO_ART_WIDTH + 4, RICH)).toBe('art');
   });
 
   it('is judged against VIEWPORT rows, not terminal rows', () => {

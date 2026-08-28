@@ -1,5 +1,5 @@
 /**
- * Skills submodule barrel — reachable as `@argon-agent/core/skills`.
+ * Skills submodule barrel — reachable as `@aragon-agent/core/skills`.
  *
  * The root barrel (`src/index.ts`) re-exports the documented public face; this
  * subpath additionally exposes the internals the CLI needs (staged-install

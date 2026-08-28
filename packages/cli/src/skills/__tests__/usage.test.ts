@@ -53,7 +53,7 @@ function makeService(config: Partial<SkillsConfig> = {}) {
 }
 
 beforeEach(() => {
-  tmp.root = makeTmpDir('argon-usage-');
+  tmp.root = makeTmpDir('aragon-usage-');
   mkdirSync(join(tmp.root, 'data', 'skills'), { recursive: true });
   mkdirSync(join(tmp.root, 'cwd'), { recursive: true });
   usage.resetUsageForTests();

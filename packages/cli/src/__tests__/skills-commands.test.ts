@@ -5,8 +5,8 @@ import { makeSkillsCommand, registerSkillCommands } from '../commands/skills.js'
 import { slashSuggestions } from '../ui/PromptInput.js';
 import type { CommandContext } from '../commands/registry.js';
 import type { SkillService } from '../skills/service.js';
-import type { SkillRecord } from '@argon-agent/core';
-import { normalizeFrontmatter } from '@argon-agent/core/skills';
+import type { SkillRecord } from '@aragon-agent/core';
+import { normalizeFrontmatter } from '@aragon-agent/core/skills';
 
 function record(input: {
   name: string;
@@ -45,6 +45,9 @@ function record(input: {
     shadowed: [],
     manifest: null,
     writable: input.writable ?? true,
+    // `manifest: null` above is what makes `'unverified'` the only consistent
+    // value: there is nothing to verify SKILL.md against (W3).
+    integrity: 'unverified',
   };
 }
 

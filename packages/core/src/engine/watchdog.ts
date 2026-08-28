@@ -10,6 +10,7 @@
 export class IdleWatchdog {
   private timerId: ReturnType<typeof setTimeout> | null = null;
   private running = false;
+  private paused = false;
 
   constructor(
     private timeoutMs: number,
@@ -18,7 +19,7 @@ export class IdleWatchdog {
 
   /** Reset the idle timer.  Must be called on every Agent event. */
   kick(): void {
-    if (!this.running) return;
+    if (!this.running || this.paused) return;
     this.clearTimer();
     this.timerId = setTimeout(() => {
       this.onTimeout();
@@ -31,9 +32,33 @@ export class IdleWatchdog {
     this.kick();
   }
 
-  /** Stop the watchdog and cancel any pending timer. */
+  /**
+   * Suspend the idle timer — e.g. while a tool blocks on a human answer.
+   * Idempotent.  A paused watchdog swallows `kick()`, so an event arriving
+   * mid-wait cannot silently re-arm it.
+   */
+  pause(): void {
+    this.paused = true;
+    this.clearTimer();
+  }
+
+  /** Resume and restart the idle window from now.  Idempotent. */
+  resume(): void {
+    this.paused = false;
+    this.kick();
+  }
+
+  /**
+   * Stop the watchdog and cancel any pending timer.
+   *
+   * Clearing `paused` here is load-bearing: a run aborted while paused would
+   * otherwise leave the watchdog deaf for the NEXT run — `start()` calls
+   * `kick()`, and `kick()` returns early while paused — and nothing anywhere
+   * would report it.
+   */
   stop(): void {
     this.running = false;
+    this.paused = false;
     this.clearTimer();
   }
 

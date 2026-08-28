@@ -25,7 +25,7 @@ import {
   type SkillValidationIssue,
   type ToolPolicyDecision,
   type ToolPolicyVerdict,
-} from '@argon-agent/core';
+} from '@aragon-agent/core';
 import {
   SKILL_FILES_MAX,
   SKILL_MD_MAX_BYTES,
@@ -38,12 +38,12 @@ import {
   renderDenyEscalation,
   renderDenyEscalationNotice,
   validateSkillFrontmatter,
-} from '@argon-agent/core/skills';
+} from '@aragon-agent/core/skills';
 import type { NoticeLevel } from '../agent/reducer.js';
 import type { SkillsConfig, SkillsRuntimeOptions, SkillsToolPolicyMode } from '../config/schema.js';
 import { SKILL_TOOL_FLOOR, type ConfirmRequest } from '../tools/index.js';
 import { currentPlatform } from './node-host.js';
-import { readManifest, sha256Buffer, sha256File } from './manifest.js';
+import { MANIFEST_FILENAME, readManifest, sha256Buffer, sha256File } from './manifest.js';
 import {
   isDirectory,
   normalizeTrustPath,
@@ -91,7 +91,12 @@ export interface SkillServiceDeps {
 }
 
 const ENTRY_FILE = 'SKILL.md';
-const MANIFEST_FILE = '.argon-skill.json';
+/**
+ * Re-exported from `manifest.ts` rather than spelled out again. The two copies
+ * of this literal were already a drift hazard; the rename made it concrete by
+ * requiring both to change together (spec §6.3).
+ */
+const MANIFEST_FILE = MANIFEST_FILENAME;
 const BUNDLED_FILE_DEPTH = 3;
 
 /** v1 left backups inside the skills root; skip them so they cannot resurrect (P1-6). */
@@ -799,7 +804,7 @@ export class SkillService {
    */
   trustForSession(dir: string): void {
     this.pendingTrust = this.pendingTrust.filter((d) => d !== dir);
-    const root: SkillRoot = { dir, scope: 'project', writable: dir.includes('.argon') };
+    const root: SkillRoot = { dir, scope: 'project', writable: dir.includes('.aragon') };
     const errors: string[] = [];
     for (const record of this.scanRoot(root, errors)) this.registry.add(record);
     for (const name of this.config.disabled) this.registry.setDisabled(name, true);

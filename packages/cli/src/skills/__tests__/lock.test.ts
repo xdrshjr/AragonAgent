@@ -31,7 +31,7 @@ function readLockFile(): { pid: number; host: string; startedAt: number; uuid: s
 }
 
 beforeEach(() => {
-  tmp.root = makeTmpDir('argon-lock-');
+  tmp.root = makeTmpDir('aragon-lock-');
 });
 afterEach(() => cleanup(tmp.root));
 

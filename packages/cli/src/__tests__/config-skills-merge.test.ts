@@ -9,24 +9,22 @@
  * nothing anywhere connecting the two.
  */
 
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// `store.ts` calls `envPaths()` ONCE at module load, so the directory has to
-// exist before the dynamic import below — a per-test `beforeEach` assignment
-// would be captured as the empty string and every test would then share (and
+// `app-paths.ts` resolves the user root ONCE at module load, so the directory
+// has to exist before the dynamic import below — a per-test `beforeEach`
+// assignment would be captured too late and every test would then share (and
 // pollute) one real config file.
-const dir = mkdtempSync(join(tmpdir(), 'argon-cfg-'));
+const dir = mkdtempSync(join(tmpdir(), 'aragon-cfg-'));
+process.env.ARAGON_HOME = dir;
 const configPath = (): string => join(dir, 'config.json');
 
-vi.mock('env-paths', () => ({
-  default: () => ({ config: dir, data: join(dir, 'data'), cache: '', log: '', temp: '' }),
-}));
-
 const { loadPersistedConfig, updatePersistedConfig } = await import('../config/store.js');
-const { DEFAULT_SKILLS_CONFIG, clampSkillsConfig } = await import('../config/schema.js');
+const { DEFAULT_LOG_CONFIG, DEFAULT_SKILLS_CONFIG, clampLogConfig, clampSkillsConfig } =
+  await import('../config/schema.js');
 
 beforeEach(() => {
   if (existsSync(configPath())) rmSync(configPath());
@@ -209,5 +207,62 @@ describe('skills.toolPolicy (§12.1 / D-G8)', () => {
     expect(merged.toolPolicy).toBe('warn');
     expect(merged.trustedProjectDirs).toEqual(['/a']);
     expect(clampSkillsConfig(merged)).toEqual(merged);
+  });
+});
+
+/**
+ * The same failure one section over. `log` is the THIRD nested section, and it
+ * carries `redactSecrets` — so a shallow merge here would not merely reset a
+ * preference, it would silently flip secret redaction back on or off under a
+ * user who set it deliberately.
+ */
+describe('log config survives a partial patch (R-3)', () => {
+  it('keeps every other log field when only the level is written', () => {
+    updatePersistedConfig({
+      log: { ...DEFAULT_LOG_CONFIG, maxFiles: 3, redactSecrets: false, previewChars: 64 },
+    });
+
+    updatePersistedConfig({ log: { level: 'debug' } as typeof DEFAULT_LOG_CONFIG });
+
+    const log = loadPersistedConfig().log;
+    expect(log.level).toBe('debug');
+    expect(log.maxFiles).toBe(3);
+    expect(log.redactSecrets).toBe(false);
+    expect(log.previewChars).toBe(64);
+  });
+
+  it('does not disturb the skills section', () => {
+    updatePersistedConfig({
+      skills: { ...DEFAULT_SKILLS_CONFIG, trustedProjectDirs: ['/work/repo'] },
+    });
+    updatePersistedConfig({ log: { level: 'trace' } as typeof DEFAULT_LOG_CONFIG });
+    expect(loadPersistedConfig().skills.trustedProjectDirs).toEqual(['/work/repo']);
+  });
+
+  it('clamps bad values ON WRITE, not only on read', () => {
+    // Hardening only the read path leaves a bad value on disk that reverts on
+    // every launch — the "my setting won't stick" failure.
+    updatePersistedConfig({
+      log: { maxFileBytes: 1, maxFiles: 9999, previewChars: -5 } as unknown as typeof DEFAULT_LOG_CONFIG,
+    });
+    const raw = JSON.parse(readFileSync(configPath(), 'utf-8'));
+    expect(raw.log.maxFileBytes).toBe(64 * 1024);
+    expect(raw.log.maxFiles).toBe(200);
+    expect(raw.log.previewChars).toBe(0);
+  });
+
+  it('accepts a config file written before the log section existed', () => {
+    writeFileSync(configPath(), JSON.stringify({ version: 1, model: 'old' }), 'utf-8');
+    const config = loadPersistedConfig();
+    expect(config.model).toBe('old');
+    expect(config.log).toEqual(DEFAULT_LOG_CONFIG);
+  });
+
+  it('discards a relative log dir rather than resolving it per cwd', () => {
+    // A relative path would silently mean a different directory for every
+    // working directory the CLI is launched from, while debug-level files carry
+    // prompt text.
+    expect(clampLogConfig({ dir: 'logs' }).dir).toBe('');
+    expect(clampLogConfig({ dir: '' }).dir).toBe('');
   });
 });

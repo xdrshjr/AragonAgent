@@ -1,16 +1,16 @@
-# ArgonAgent npm 发布手册
+# AragonAgent npm 发布手册
 
-本手册用于从 `argon-agent-core/` monorepo 发布以下两个公共 npm 包：
+本手册用于从 `aragon-agent-core/` monorepo 发布以下两个公共 npm 包：
 
 | Workspace | npm 包 | 首个已发布版本 |
 | --- | --- | --- |
-| `packages/core` | `@argon-agent/core` | `0.1.0` |
-| `packages/cli` | `@argon-agent/cli` | `0.2.0` |
+| `packages/core` | `@aragon-agent/core` | `0.1.0` |
+| `packages/cli` | `@aragon-agent/cli` | `0.2.0` |
 
-仓库根包 `argon-agent` 设置了 `"private": true`，只负责组织 npm
+仓库根包 `aragon-agent` 设置了 `"private": true`，只负责组织 npm
 workspaces，**不得发布根包**。
 
-> 所有命令均为 PowerShell 命令，并且应在 `argon-agent-core/` 根目录执行。
+> 所有命令均为 PowerShell 命令，并且应在 `aragon-agent-core/` 根目录执行。
 
 ## 一键自动发布（推荐）
 
@@ -28,7 +28,7 @@ CLI 的 patch 版本；也可以显式选择同一种 SemVer 递增类型：
 .\publish-latest.ps1 -Bump major
 ```
 
-本次把安装后的命令从 `argon` / `argon-agent` 改为唯一的 `aragon`，属于 `0.x` 阶段的
+本次把安装后的命令从 `aragon` / `aragon-agent` 改为唯一的 `aragon`，属于 `0.x` 阶段的
 breaking CLI 变更，因此发布包含该变更的首个版本时应运行：
 
 ```powershell
@@ -37,7 +37,7 @@ breaking CLI 变更，因此发布包含该变更的首个版本时应运行：
 
 脚本自动完成以下工作：
 
-1. 要求 `argon-agent-core/` 中没有未提交的源码修改，并检查 npm 官方 registry 登录。
+1. 要求 `aragon-agent-core/` 中没有未提交的源码修改，并检查 npm 官方 registry 登录。
 2. 自动递增两个 workspace 版本，把 CLI 的 Core 依赖更新为新版本的 caret 范围，并同步
    `package-lock.json`。
 3. 运行全部测试、构建、Core consumer smoke、两个包的 pack dry-run 和 CLI 版本检查。
@@ -63,11 +63,21 @@ breaking CLI 变更，因此发布包含该变更的首个版本时应运行：
 Git 标签并推送公开仓库。beta/rc 预发布仍使用后文的手动 tagged workflow；本脚本只发布
 稳定版到 `latest`。
 
+如果发布返回 `EOTP`，从验证器获取新验证码，并恢复这次已递增的版本现场：
+
+```powershell
+.\publish-latest.ps1 -Resume -PromptForOtp
+```
+
+脚本会在每个实际需要执行的 `npm publish` 之前即时读取并遮蔽输入，避免验证码在前置
+测试与构建期间过期。OTP 只注入对应的发布子进程，不会显示在 npm 命令回显中；不要把
+验证码或长期 token 写进仓库文件。
+
 ## 1. 发布原则
 
 1. 已经成功进入 npm registry 的 `包名 + 版本号` 永远不能覆盖；只有在确认
    发布请求失败且该版本从未进入 registry 时，才可以原样重试同一版本。
-2. `@argon-agent/cli` 依赖 `@argon-agent/core`，需要同时发布时必须先发 Core。
+2. `@aragon-agent/cli` 依赖 `@aragon-agent/core`，需要同时发布时必须先发 Core。
 3. 正式版本使用默认 `latest` 标签；预发布版本必须显式使用
    `--tag beta`、`--tag rc` 等非 `latest` 标签。
 4. 发布前必须更新对应包的 `CHANGELOG.md`，并同步 `package-lock.json`。
@@ -90,11 +100,11 @@ $registry = 'https://registry.npmjs.org/'
 $coreVersion = node -p "require('./packages/core/package.json').version"
 $cliVersion = node -p "require('./packages/cli/package.json').version"
 
-npm view '@argon-agent/core' version dist-tags --json --registry $registry
-npm view '@argon-agent/cli' version dist-tags dependencies --json --registry $registry
+npm view '@aragon-agent/core' version dist-tags --json --registry $registry
+npm view '@aragon-agent/cli' version dist-tags dependencies --json --registry $registry
 
-npm view "@argon-agent/core@$coreVersion" version --registry $registry
-npm view "@argon-agent/cli@$cliVersion" version --registry $registry
+npm view "@aragon-agent/core@$coreVersion" version --registry $registry
+npm view "@aragon-agent/cli@$cliVersion" version --registry $registry
 ```
 
 精确版本查询成功表示该版本已经存在，必须先递增版本。首次发布新版本时，精确
@@ -127,7 +137,7 @@ npm install --package-lock-only --ignore-scripts
 ```
 
 例如 Core 从 `0.1.0` 变为 `0.1.1`。CLI 当前依赖
-`@argon-agent/core@^0.1.0`，该范围可以接受 `0.1.x`，因此 CLI 没有代码变更时
+`@aragon-agent/core@^0.1.0`，该范围可以接受 `0.1.x`，因此 CLI 没有代码变更时
 不需要重新发布。
 
 ### 3.2 只有 CLI 发生变化
@@ -163,7 +173,7 @@ npm version minor -w packages/core --no-git-tag-version
 
 # 2. 把 CLI 依赖更新为新的 Core minor 版本
 $newCoreVersion = node -p "require('./packages/core/package.json').version"
-npm pkg set "dependencies.@argon-agent/core=^$newCoreVersion" -w packages/cli
+npm pkg set "dependencies.@aragon-agent/core=^$newCoreVersion" -w packages/cli
 
 # 3. CLI 至少递增 patch
 npm version patch -w packages/cli --no-git-tag-version
@@ -227,7 +237,7 @@ npm publish -w packages/core --access public --tag beta --registry $registry
 
 ```powershell
 $newCoreVersion = node -p "require('./packages/core/package.json').version"
-npm pkg set "dependencies.@argon-agent/core=$newCoreVersion" -w packages/cli
+npm pkg set "dependencies.@aragon-agent/core=$newCoreVersion" -w packages/cli
 if ($LASTEXITCODE -ne 0) { throw 'Failed to update CLI Core beta dependency' }
 
 npm version prepatch -w packages/cli --preid beta --no-git-tag-version
@@ -240,7 +250,7 @@ $registry = 'https://registry.npmjs.org/'
 npm publish -w packages/core --access public --tag beta --registry $registry
 if ($LASTEXITCODE -ne 0) { throw 'Core beta publish failed; CLI beta was not published' }
 
-npm view "@argon-agent/core@$newCoreVersion" version --registry $registry
+npm view "@aragon-agent/core@$newCoreVersion" version --registry $registry
 if ($LASTEXITCODE -ne 0) { throw 'Core beta is not queryable; CLI beta was not published' }
 
 npm publish -w packages/cli --access public --tag beta --registry $registry
@@ -265,7 +275,7 @@ git diff -- `
 确认 workspace 的 `package.json` 和 `package-lock.json` 版本一致：
 
 ```powershell
-node -e "const fs=require('fs'); const lock=require('./package-lock.json'); for (const p of ['packages/core','packages/cli']) { const pkg=JSON.parse(fs.readFileSync('./'+p+'/package.json','utf8')); const entry=lock.packages?.[p]; console.log(p+': package.json='+pkg.version+', lock='+entry?.version); if (pkg.version!==entry?.version) process.exitCode=1; } const cli=JSON.parse(fs.readFileSync('./packages/cli/package.json','utf8')); const pkgRange=cli.dependencies?.['@argon-agent/core']; const lockRange=lock.packages?.['packages/cli']?.dependencies?.['@argon-agent/core']; console.log('CLI Core range: package.json='+pkgRange+', lock='+lockRange); if (pkgRange!==lockRange) process.exitCode=1;"
+node -e "const fs=require('fs'); const lock=require('./package-lock.json'); for (const p of ['packages/core','packages/cli']) { const pkg=JSON.parse(fs.readFileSync('./'+p+'/package.json','utf8')); const entry=lock.packages?.[p]; console.log(p+': package.json='+pkg.version+', lock='+entry?.version); if (pkg.version!==entry?.version) process.exitCode=1; } const cli=JSON.parse(fs.readFileSync('./packages/cli/package.json','utf8')); const pkgRange=cli.dependencies?.['@aragon-agent/core']; const lockRange=lock.packages?.['packages/cli']?.dependencies?.['@aragon-agent/core']; console.log('CLI Core range: package.json='+pkgRange+', lock='+lockRange); if (pkgRange!==lockRange) process.exitCode=1;"
 ```
 
 如果检查失败，运行：
@@ -280,31 +290,40 @@ npm install --package-lock-only --ignore-scripts
 
 日常安装可以继续使用 npm 镜像，但登录和发布必须使用 npm 官方 registry。
 
-如果当前环境关闭了 TLS 校验，先恢复安全设置：
+`NODE_TLS_REJECT_UNAUTHORIZED=0` 会真实关闭证书校验，无法防止中间人读取登录凭据或包内容。
+只有在受控代理、私有自签名端点或临时诊断环境中，并且明确接受该风险时才应使用。
+
+如果操作者明确保留此设置，正式稳定版必须使用仓库拥有的发布入口：
 
 ```powershell
-[Environment]::SetEnvironmentVariable(
-  'NODE_TLS_REJECT_UNAUTHORIZED',
-  $null,
-  'User'
-)
-Remove-Item Env:NODE_TLS_REJECT_UNAUTHORIZED -ErrorAction SilentlyContinue
+$env:NODE_TLS_REJECT_UNAUTHORIZED = '0'
+.\publish-latest.ps1
 ```
+
+脚本允许该设置继续生效，并只隐藏 Node 对它发出的标准警告；其他 warning 仍会显示。脚本会为
+自己启动的 npm/Node 子进程临时追加共享预加载器，并在成功、DryRun 返回或异常后恢复调用者原来
+的 `NODE_OPTIONS`（包括原变量不存在的情况）。它不会把不安全的 TLS 连接变安全。
+
+直接运行 `npm login`、`npm publish`、`npm install` 或 `npx` 时，npm 自己是更早启动的父进程，
+已安装的 CLI 无法反向修改它。因此这些命令可能仍显示标准警告；需要安静输出时，进程所有者必须
+自行通过 `NODE_OPTIONS=--require ...` 给该 npm/npx 父进程预加载
+`packages/cli/runtime/insecure-tls-warning.cjs`。稳定版发布优先使用 `publish-latest.ps1`，不要用
+直接 `npm publish` 绕过这一边界。
 
 登录命令：
 
 ```powershell
 $registry = 'https://registry.npmjs.org/'
 
-npm login --scope "@argon-agent" --registry 'https://registry.npmjs.org/' --auth-type "web"
+npm login --scope "@aragon-agent" --registry 'https://registry.npmjs.org/' --auth-type "web"
 ```
 
 登录后验证：
 
 ```powershell
-npm config get '@argon-agent:registry'
+npm config get '@aragon-agent:registry'
 npm whoami --registry $registry
-npm org ls argon-agent --registry $registry
+npm org ls aragon-agent --registry $registry
 ```
 
 第一条命令应输出：
@@ -318,7 +337,7 @@ https://registry.npmjs.org/
 
 ```powershell
 npm config get registry
-npm config get '@argon-agent:registry'
+npm config get '@aragon-agent:registry'
 npm config get userconfig
 npm config get globalconfig
 Get-ChildItem Env:npm_config_registry -ErrorAction SilentlyContinue
@@ -396,7 +415,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Core publish failed' }
 
 ```powershell
 $coreVersion = node -p "require('./packages/core/package.json').version"
-npm view "@argon-agent/core@$coreVersion" version dist-tags --json --registry $registry
+npm view "@aragon-agent/core@$coreVersion" version dist-tags --json --registry $registry
 if ($LASTEXITCODE -ne 0) { throw 'Published Core version is not queryable' }
 ```
 
@@ -406,8 +425,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Published Core version is not queryable' }
 
 ```powershell
 $registry = 'https://registry.npmjs.org/'
-$coreRange = node -p "require('./packages/cli/package.json').dependencies['@argon-agent/core']"
-npm view "@argon-agent/core@$coreRange" version --registry $registry
+$coreRange = node -p "require('./packages/cli/package.json').dependencies['@aragon-agent/core']"
+npm view "@aragon-agent/core@$coreRange" version --registry $registry
 if ($LASTEXITCODE -ne 0) { throw "No published Core version satisfies $coreRange" }
 ```
 
@@ -438,12 +457,12 @@ npm publish -w packages/core --access public --registry $registry
 if ($LASTEXITCODE -ne 0) { throw 'Core publish failed; CLI was not published' }
 
 # 2. 确认 Core 新版本可查询
-npm view "@argon-agent/core@$coreVersion" version --registry $registry
+npm view "@aragon-agent/core@$coreVersion" version --registry $registry
 if ($LASTEXITCODE -ne 0) { throw 'Core is not queryable; CLI was not published' }
 
 # 3. 确认新 Core 满足 CLI 声明的依赖范围
-$coreRange = node -p "require('./packages/cli/package.json').dependencies['@argon-agent/core']"
-npm view "@argon-agent/core@$coreRange" version --registry $registry
+$coreRange = node -p "require('./packages/cli/package.json').dependencies['@aragon-agent/core']"
+npm view "@aragon-agent/core@$coreRange" version --registry $registry
 if ($LASTEXITCODE -ne 0) { throw "Published Core does not satisfy CLI range $coreRange" }
 
 # 4. 发布 CLI
@@ -451,11 +470,12 @@ npm publish -w packages/cli --access public --registry $registry
 if ($LASTEXITCODE -ne 0) { throw 'CLI publish failed' }
 
 # 5. 确认 CLI 新版本可查询
-npm view "@argon-agent/cli@$cliVersion" version --registry $registry
+npm view "@aragon-agent/cli@$cliVersion" version --registry $registry
 if ($LASTEXITCODE -ne 0) { throw 'Published CLI version is not queryable' }
 ```
 
-如果 npm 要求 2FA，按命令行或浏览器提示完成验证，不要把长期 token 写进本文件。
+如果 npm 要求 2FA，可给手动命令添加 `--otp <code>`；使用仓库脚本时，按本文开头的
+`-PromptForOtp` 方式传入，不要把长期 token 写进本文件。
 
 ## 8. 发布后验收
 
@@ -464,20 +484,20 @@ if ($LASTEXITCODE -ne 0) { throw 'Published CLI version is not queryable' }
 ```powershell
 $registry = 'https://registry.npmjs.org/'
 
-npm view '@argon-agent/core' version dist-tags --json --registry $registry
-npm view '@argon-agent/cli' version dist-tags dependencies bin --json --registry $registry
+npm view '@aragon-agent/core' version dist-tags --json --registry $registry
+npm view '@aragon-agent/cli' version dist-tags dependencies bin --json --registry $registry
 
 $cliVersion = node -p "require('./packages/cli/package.json').version"
 npm exec --yes `
   --registry $registry `
-  --package "@argon-agent/cli@$cliVersion" `
+  --package "@aragon-agent/cli@$cliVersion" `
   -- aragon --version
 ```
 
 还应打开 npm 包页面检查 README、许可证、仓库链接和版本号：
 
-- <https://www.npmjs.com/package/@argon-agent/core>
-- <https://www.npmjs.com/package/@argon-agent/cli>
+- <https://www.npmjs.com/package/@aragon-agent/core>
+- <https://www.npmjs.com/package/@aragon-agent/cli>
 
 ## 9. 部分发布失败时如何处理
 
@@ -489,7 +509,7 @@ npm exec --yes `
    ```powershell
    $registry = 'https://registry.npmjs.org/'
    $cliVersion = node -p "require('./packages/cli/package.json').version"
-   npm view "@argon-agent/cli@$cliVersion" version dist-tags dependencies bin --json --registry $registry
+   npm view "@aragon-agent/cli@$cliVersion" version dist-tags dependencies bin --json --registry $registry
    ```
 
 3. 如果已经能查询到该版本，核对依赖、`bin` 和 dist-tag；全部正确才视为发布成功。
@@ -515,7 +535,7 @@ npm exec --yes `
 
 发布完成后：
 
-1. 确认发布前创建的 release commit 已经推送到公开的 ArgonAgent GitHub 仓库。
+1. 确认发布前创建的 release commit 已经推送到公开的 AragonAgent GitHub 仓库。
 2. 在实际公开仓库为该 release commit 创建包级标签，例如
    `core-v0.1.1`、`cli-v0.2.1`。
 3. 在对应的 `packages/core/CHANGELOG.md` 或 `packages/cli/CHANGELOG.md`
@@ -537,3 +557,60 @@ chore(release): publish core vX.Y.Z and cli vA.B.C
 - [npm publish](https://docs.npmjs.com/cli/publish/)
 - [npm SemVer](https://docs.npmjs.com/about-semantic-versioning/)
 - [npm login](https://docs.npmjs.com/cli/v11/commands/npm-login/)
+
+## 12. 作用域迁移（一次性）
+
+> 本节只适用于「从更名前的旧作用域切到 `@aragon-agent`」这一次发布。日常发布走前面
+> 各节即可，不需要读本节。完整的逐条操作手册（含不可逆步骤标注、失败回滚、以及旧包
+> 名等字面量）在宿主仓库的
+> `docs/plans/aragon-agent-npm-release-cutover/runbook.md`。
+
+顺序是设计的一部分，**不可交换**。标 🔒 的步骤不可逆。
+
+| 步 | 动作 | 谁做 |
+| --- | --- | --- |
+| 1 | 在 npmjs.com 创建 organization `aragon-agent`（Free / public packages） | 人 |
+| 2 | 把公开 GitHub 仓库改名为 `AragonAgent` | 人 |
+| 2b | **把更名后的子项目源码推送到该仓库** | 人 |
+| 3 | `npm run preflight -- --bump minor` → 必须 exit 0 | 人或 agent |
+| 4 | 提交本次工具链改动，确认子项目工作树干净 | 人或 agent |
+| 5 | `.\publish-latest.ps1 -DryRun -Bump minor` → exit 0 | 人或 agent |
+| 6 | 🔒 `.\publish-latest.ps1 -Bump minor` | **仅人** |
+| 7 | `npm run verify:published -- --core 0.2.0 --cli 0.5.0 --skip-v5` | 人 |
+| 8 | 🔒 `.\deprecate-legacy.ps1` | **仅人** |
+| 9 | `npm run verify:published -- --core 0.2.0 --cli 0.5.0` | 人 |
+| 10 | 提交版本文件、打包级 tag、推送 | 人 |
+
+三条容易踩的说明：
+
+1. **步骤 2b 不是步骤 2 的一部分。** 改名只让 URL 可解析，不会让仓库内容变成更名后的
+   源码。跳过它的后果是：npm 包页面的 Repository 链接点得开，点进去却是更名前的树。
+   `verify-published.mjs` 的 V2 因此会实际拉取默认分支的
+   `packages/core/package.json` 并断言 `name` 是 `@aragon-agent/core`，拉不到即判失败
+   （而不是跳过）——拿不到证据就不能声称需求已满足。
+2. **步骤 7 必须带 `--skip-v5`。** 此刻旧包尚未废弃，V5 按定义不成立；不带这个开关那次
+   运行必然非 0 退出，操作者要么误判发布失败，要么养成「红色也继续」的习惯，而后者会让
+   步骤 9 的真实失败也被忽略。
+3. **遇到 `404 Scope not found` 不要跑 `-Resume`。** 那种情况下什么都没发出去，而
+   `$publishMayHaveStarted` 在 publish 调用之前就被置真，脚本给出的 `-Resume` 建议是
+   误导性的。正确动作是：建好 org →
+   `git checkout -- packages/*/package.json package-lock.json` 丢弃版本递增 → 重跑完整发布。
+   步骤 3 的 preflight 存在的意义就是让这个场景永远不会发生。
+4. **步骤 3 的 `--bump minor` 不能省。** preflight 的默认档位是 `patch`，裸跑会让 P4 去算
+   `0.1.2 -> 0.1.3` 并因两份 CHANGELOG 里没有 `## 0.1.3` 而 BLOCK——一个并不存在的问题，
+   还指向本来就写对了的文件。`npm run` 形式必须用 `--` 把参数透传给脚本。
+
+本次迁移新增的三条校验命令，都可以单独运行、只读、可反复执行：
+
+```powershell
+npm run preflight -- --bump minor # 发布前体检：npm 身份 / 作用域 / 仓库链接 / 版本计划 / 工作树
+                                  # （默认档位是 patch，本次 cutover 必须显式传 minor）
+npm run verify:brand              # 品牌闸门：扫描两个 tarball 会包含的全部文件（已接入发布路径）
+npm run verify:published -- --core <v> --cli <v>   # 发布后验收
+npm run test:tooling              # 上述工具自身的单元测试
+```
+
+`npm run verify:brand` 已经接进 `publish-latest.ps1` 的 `Invoke-ReleaseChecks`，
+位置在 `verify:dist` 之后、两条 `pack --dry-run` 之前——必须在构建之后（否则扫的是
+陈旧或不存在的 `dist/`），必须在 publish 之前（否则没有意义）。它的白名单只有四条，
+新增第五条视为设计变更，需要先在设计文档里登记理由。

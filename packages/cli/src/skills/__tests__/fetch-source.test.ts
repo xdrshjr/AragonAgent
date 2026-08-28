@@ -192,6 +192,11 @@ describe('AC-15 — a hostile source never reaches a subprocess', () => {
               'utf-8',
             );
           }
+          // `runProcess` is declared to resolve with `RunProcessResult`; this
+          // stub asserted on `args` and returned nothing, which typechecks only
+          // while the test tree is unchecked (W3). No caller here reads
+          // `stdout`, so the empty string is the honest stand-in.
+          return { stdout: '' };
         },
       }).catch(() => undefined);
 

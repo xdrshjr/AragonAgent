@@ -25,7 +25,7 @@ const { runSkillsCommand } = await import('../cli-commands.js');
 const { cleanup, makeTmpDir } = await import('./helpers.js');
 
 beforeEach(() => {
-  tmp.root = makeTmpDir('argon-usage-surface-');
+  tmp.root = makeTmpDir('aragon-usage-surface-');
   mkdirSync(join(tmp.root, 'data'), { recursive: true });
   usage.resetUsageForTests();
 });

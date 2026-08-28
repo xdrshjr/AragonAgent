@@ -21,6 +21,7 @@ import { MessageQueueManager } from './steering.js';
 import { IdleWatchdog } from './watchdog.js';
 import { runAgentLoop } from './agent-loop.js';
 import type { CodeActSandbox, ModelRef } from './agent-loop.js';
+import type { ContextManager } from './context-manager.js';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -51,6 +52,17 @@ export interface AgentConfig {
   /** Maximum output tokens per LLM call. `undefined` = use provider default. */
   maxTokens?: number;
 
+  /**
+   * Optional context manager (context-auto-compaction §4.1).
+   *
+   * `undefined` means the engine NEVER compacts and every code path is
+   * byte-identical to a pre-feature build. THERE IS NO SETTER, deliberately: a
+   * host implementation reads its own config live through closures (the idiom
+   * `FastWiring` already uses), so the object handed in here can stay stable for
+   * the `Agent`'s whole lifetime while the policy behind it changes mid-session.
+   */
+  contextManager?: ContextManager;
+
   /** Timeout configuration. */
   timeouts?: {
     /** Single LLM call timeout (ms). Default: 300_000 (5 min). */
@@ -61,6 +73,27 @@ export interface AgentConfig {
     toolTimeout?: number;
     /** Code execution timeout (ms). Default: 30_000 (30 s). */
     codeTimeout?: number;
+    /**
+     * Ceiling on ONE `ContextManager.compact()` call (ms). Default: 120_000.
+     *
+     * EXPOSED ONLY SO AC-10a IS TESTABLE IN UNDER TWO MINUTES. It is not a host
+     * policy knob — the whole point of the ceiling is that it does not depend on
+     * the host being correct, and `compaction_start` pauses the idle watchdog, so
+     * across the call this is the only clock running (P1-3 / R-13).
+     */
+    compactionHardTimeout?: number;
+    /**
+     * Per-tool ceilings keyed by tool name, overriding `toolTimeout`.
+     *
+     * READ THIS BEFORE RELYING ON IT: `ToolExecutor` expresses a timeout by
+     * calling `controller.abort(...)` on the context signal and then continuing
+     * to `await` the tool's promise — there is no `Promise.race`. A tool that
+     * never observes `context.signal` is therefore never timed out, and any
+     * number set here is inert for it. Tools that must honour a ceiling have to
+     * subscribe to `context.signal` explicitly (see `bash-tool.ts` in the CLI
+     * package for the house pattern).
+     */
+    toolTimeoutOverrides?: Record<string, number>;
   };
 }
 
@@ -107,6 +140,7 @@ export class Agent {
   private readonly providerRegistry: ProviderRegistry;
   private readonly getApiKeyFn: (providerId: string) => string | undefined;
   private readonly sandbox?: CodeActSandbox;
+  private readonly contextManager?: ContextManager;
 
   // --- LLM generation parameters ---
   private maxTokens: number | undefined;
@@ -116,6 +150,7 @@ export class Agent {
   private readonly idleTimeout: number;
   private readonly toolTimeout: number;
   private readonly codeTimeout: number;
+  private readonly compactionHardTimeout: number | undefined;
 
   // --- Runtime state ---
   private abortController: AbortController | null = null;
@@ -130,6 +165,7 @@ export class Agent {
     this.providerRegistry = config.providerRegistry;
     this.getApiKeyFn = config.getApiKey;
     this.sandbox = config.sandbox;
+    this.contextManager = config.contextManager;
     this.maxTokens = config.maxTokens;
 
     // Timeouts
@@ -137,6 +173,7 @@ export class Agent {
     this.idleTimeout = config.timeouts?.idleTimeout ?? DEFAULT_IDLE_TIMEOUT;
     this.toolTimeout = config.timeouts?.toolTimeout ?? DEFAULT_TOOL_TIMEOUT;
     this.codeTimeout = config.timeouts?.codeTimeout ?? DEFAULT_CODE_TIMEOUT;
+    this.compactionHardTimeout = config.timeouts?.compactionHardTimeout;
 
     // Register initial tools
     this.syncToolRegistry(config.tools);
@@ -144,6 +181,9 @@ export class Agent {
     // Tool executor
     this.toolExecutor = new ToolExecutor(this.toolRegistry, {
       defaultTimeout: this.toolTimeout,
+      ...(config.timeouts?.toolTimeoutOverrides
+        ? { timeoutOverrides: config.timeouts.toolTimeoutOverrides }
+        : {}),
     });
 
     // Watchdog — on timeout, abort the agent
@@ -296,6 +336,25 @@ export class Agent {
   }
 
   // =========================================================================
+  // Idle watchdog control
+  //
+  // Public because only the HOST knows that a tool is blocked on a human. The
+  // engine sees an ordinary long-running tool call and would abort the run
+  // after `idleTimeout` — which is right for a wedged network call and wrong
+  // for a person reading a plan. Always pair these in a `try/finally`.
+  // =========================================================================
+
+  /** Suspend the idle watchdog (e.g. while a tool waits on a human). Idempotent. */
+  pauseIdleWatchdog(): void {
+    this.watchdog.pause();
+  }
+
+  /** Resume the idle watchdog and restart its window from now. Idempotent. */
+  resumeIdleWatchdog(): void {
+    this.watchdog.resume();
+  }
+
+  // =========================================================================
   // Internal
   // =========================================================================
 
@@ -304,6 +363,11 @@ export class Agent {
    * Listener errors are caught and logged to prevent crashing the loop.
    */
   private emit(event: AgentEvent): void {
+    // BEFORE THE LISTENERS. A listener that throws is caught below, but the
+    // policy still has to have been applied — otherwise a bad subscriber leaves
+    // the watchdog armed across a 30-second backoff and the run is aborted for
+    // being "idle" while it is provably waiting on purpose.
+    this.applyWatchdogPolicy(event);
     for (const listener of this.listeners) {
       try {
         listener(event);
@@ -312,6 +376,52 @@ export class Agent {
       }
     }
     this.watchdog.kick();
+  }
+
+  /**
+   * Suspend the idle watchdog across a wait the ENGINE ITSELF scheduled, and
+   * resume it when work moves again.
+   *
+   * TWO PAIRS, ONE POLICY (context-auto-compaction §3.3). Retry backoff was the
+   * first (llm-api-retry-backoff §4.6); context compaction is the second, and it
+   * is the reason this method lost the `Retry` in its name. Both are cases where
+   * the run is provably waiting on purpose and the watchdog cannot tell that
+   * apart from a wedged network call.
+   *
+   * `compaction_end` IS EMITTED FROM A `finally` IN `runCompaction`, on every
+   * exit path including a throw, precisely so this `resume()` is unconditional.
+   * A compaction whose `end` never arrived would leave the watchdog paused for
+   * the rest of the run, with nothing anywhere reporting it (P1-3 / R-13).
+   *
+   * Both halves are idempotent, and `runLoopWithLifecycle`'s `finally` calls
+   * `watchdog.stop()`, which clears `paused` — that is what bounds an abort
+   * landing mid-wait.
+   *
+   * `withRetry` waits up to `maxDelayMs` between attempts and emits nothing while
+   * it does. That is indistinguishable from a wedged network call to the
+   * watchdog, which is right for a wedged call and wrong for a wait the engine
+   * itself scheduled. `pause()` swallows the subsequent `kick()` by design and
+   * `resume()` restarts the window from now; both are idempotent.
+   *
+   * A `retry_scheduled` never followed by a `retry_attempt` — an abort during the
+   * wait — leaves the watchdog deaf, and that is bounded rather than leaked:
+   * `runLoopWithLifecycle`'s `finally` calls `watchdog.stop()`, and `stop()`
+   * clears `paused` for exactly this reason. DO NOT "simplify" that line out of
+   * `stop()`.
+   */
+  private applyWatchdogPolicy(event: AgentEvent): void {
+    if (event.type === 'compaction_start') {
+      this.watchdog.pause();
+      return;
+    }
+    if (event.type === 'compaction_end') {
+      this.watchdog.resume();
+      return;
+    }
+    if (event.type !== 'message_update') return;
+    const t = event.streamEvent.type;
+    if (t === 'retry_scheduled') this.watchdog.pause();
+    else if (t === 'retry_attempt') this.watchdog.resume();
   }
 
   /**
@@ -364,11 +474,19 @@ export class Agent {
         systemPrompt: this.systemPrompt,
         thinkingLevel: this.thinkingLevel,
         maxTokens: this.maxTokens,
+        // SPREAD, never `contextManager: this.contextManager`. With no manager the
+        // loop context has no such key, so `if (!ctx.contextManager)` tests a field
+        // that is genuinely absent rather than a property holding `undefined` —
+        // which is what makes the byte-identity claim in AC-1 provable.
+        ...(this.contextManager ? { contextManager: this.contextManager } : {}),
         signal: this.abortController.signal,
         timeouts: {
           llmCallTimeout: this.llmCallTimeout,
           toolTimeout: this.toolTimeout,
           codeTimeout: this.codeTimeout,
+          ...(this.compactionHardTimeout !== undefined
+            ? { compactionHardTimeout: this.compactionHardTimeout }
+            : {}),
         },
       });
     } catch (err) {

@@ -1,7 +1,7 @@
 /**
  * SKILL.md frontmatter parser — a deliberately STRICT SUBSET of YAML (D9).
  *
- * Why not depend on `yaml`: `@argon-agent/core` ships zero required runtime
+ * Why not depend on `yaml`: `@aragon-agent/core` ships zero required runtime
  * dependencies (only `ajv` / `isolated-vm` as optional), and real SKILL.md
  * frontmatter only ever uses scalars, quoted strings, inline arrays and block
  * arrays. Unknown keys are preserved verbatim in `data` so a future Anthropic

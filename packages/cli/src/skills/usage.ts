@@ -21,7 +21,7 @@
 
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { SkillUsageMap, SkillUsageStat } from '@argon-agent/core/skills';
+import type { SkillUsageMap, SkillUsageStat } from '@aragon-agent/core/skills';
 import { getUserDataDir } from './paths.js';
 
 export const USAGE_FILENAME = 'skill-usage.json';

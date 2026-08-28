@@ -1,16 +1,16 @@
 /**
- * Smoke test for the extracted @argon-agent/core package (AC7).
+ * Smoke test for the extracted @aragon-agent/core package (AC7).
  *
  * Verifies that:
- *  - the `ArgonAgent` alias is exported and is the same class as `Agent`;
+ *  - the `AragonAgent` alias is exported and is the same class as `Agent`;
  *  - the key barrel symbols are present (guards against shim/barrel drift);
- *  - an ArgonAgent can be constructed with a dummy tool and exposes it via state.
+ *  - an AragonAgent can be constructed with a dummy tool and exposes it via state.
  */
 
 import { describe, it, expect } from 'vitest';
 import {
   Agent,
-  ArgonAgent,
+  AragonAgent,
   getProviderRegistry,
   initProviders,
   streamLLM,
@@ -25,10 +25,10 @@ import {
   THINKING_BUDGET,
 } from '../index.js';
 
-describe('@argon-agent/core smoke', () => {
-  it('exports ArgonAgent as an alias of Agent', () => {
-    expect(typeof ArgonAgent).toBe('function');
-    expect(ArgonAgent).toBe(Agent);
+describe('@aragon-agent/core smoke', () => {
+  it('exports AragonAgent as an alias of Agent', () => {
+    expect(typeof AragonAgent).toBe('function');
+    expect(AragonAgent).toBe(Agent);
   });
 
   it('exposes the expected barrel symbols', () => {
@@ -50,10 +50,15 @@ describe('@argon-agent/core smoke', () => {
     expect(THINKING_BUDGET).toBeDefined();
   });
 
-  it('constructs an ArgonAgent with a dummy tool', () => {
+  it('constructs an AragonAgent with a dummy tool', () => {
     initProviders();
 
-    const dummyTool = defineTool({
+    // THE GENERIC IS EXPLICIT, and it has to be: annotating `execute`'s `params`
+    // made `defineTool` infer `AgentTool<{ text: string }>`, which is not
+    // assignable to `AgentConfig.tools`'s `AgentTool<Record<string, unknown>>[]`
+    // — a tool that accepts fewer payloads than the registry may hand it. The
+    // fixture is what was wrong; `AgentConfig` is not (W3 / D-15).
+    const dummyTool = defineTool<Record<string, unknown>>({
       name: 'echo',
       label: 'Echo',
       description: 'Echoes its input back.',
@@ -62,12 +67,12 @@ describe('@argon-agent/core smoke', () => {
         properties: { text: { type: 'string' } },
         required: ['text'],
       },
-      async execute(_id, params: { text: string }) {
-        return textResult(params.text);
+      async execute(_id, params) {
+        return textResult(String(params.text ?? ''));
       },
     });
 
-    const agent = new ArgonAgent({
+    const agent = new AragonAgent({
       systemPrompt: 'You are a test agent.',
       model: { providerId: 'anthropic', modelId: 'test-model' },
       tools: [dummyTool],

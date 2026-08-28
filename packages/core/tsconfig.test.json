@@ -1,0 +1,19 @@
+{
+  // Typecheck the TEST tree (todo-plan-followthrough §3.8 / W3). The CLI package
+  // carries the same file with a `.tsx` include; see the long note there for why
+  // the `exclude` key is load-bearing and why `types` is `["node"]`.
+  //
+  // NOTE the include list has no `.tsx`: this package has no React.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
+}

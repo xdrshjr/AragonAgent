@@ -18,11 +18,14 @@ export interface RuleBlock {
   kind: 'rule';
 }
 
+/** Column alignment carried by a table's `|---|:--:|` divider row. */
+export type Align = 'left' | 'right' | 'center';
+
 export interface TableBlock {
   kind: 'table';
   /** Already column-aligned; render as plain monospace rows. */
   rows: string[][];
-  align: ('left' | 'right' | 'center')[];
+  align: Align[];
 }
 
 const HEADING_RE = /^(#{1,6})\s+(.*)$/;
@@ -93,6 +96,77 @@ export function formatTable(rows: string[][], align: TableBlock['align']): strin
       .join('  ')
       .trimEnd(),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Block grammar (tui-render-performance L2 / R2)
+//
+// This used to live inside `Markdown.tsx`, which meant the whole document was
+// re-split, re-regexed and re-allocated into one React element per line on EVERY
+// render — for every markdown entry mounted, thirty times a second. The file
+// header there already claimed "the grammar lives in markdown-blocks.ts"; now it
+// does, and `parseMarkdownCached` memoises the result keyed on the text.
+// ---------------------------------------------------------------------------
+
+/**
+ * One parsed top-level block.
+ *
+ * `line` is deliberately UNPARSED: heading / rule / quote / bullet detection is
+ * a handful of regexes over one short string and is done at render time, where
+ * the theme and the glyph set live. Caching a themed element instead would make
+ * `/theme` a no-op until the cache evicted (K-5).
+ */
+export type MdBlock =
+  | { kind: 'code'; code: string; lang: string }
+  | { kind: 'table'; rows: string[][]; align: Align[] }
+  | { kind: 'line'; text: string };
+
+/** A fence line: ```` ```lang ```` or a bare ```` ``` ````. */
+const FENCE_RE = /^```(\w*)\s*$/;
+
+/** Split a document into fenced code, pipe tables, and everything else. */
+export function parseMarkdownBlocks(text: string): MdBlock[] {
+  const lines = text.split('\n');
+  const blocks: MdBlock[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i] ?? '';
+    const fence = FENCE_RE.exec(line.trim());
+    if (fence) {
+      const lang = fence[1] || '';
+      const codeLines: string[] = [];
+      i += 1;
+      while (i < lines.length && !FENCE_RE.test((lines[i] ?? '').trim())) {
+        codeLines.push(lines[i] ?? '');
+        i += 1;
+      }
+      i += 1; // skip the closing fence
+      blocks.push({ kind: 'code', code: codeLines.join('\n'), lang });
+      continue;
+    }
+
+    // A pipe row followed by a divider row starts a table; consume the run.
+    const headerCells = parseTableRow(line);
+    if (headerCells && i + 1 < lines.length && isTableDivider(lines[i + 1] ?? '')) {
+      const align = tableAlignments(lines[i + 1] ?? '');
+      const rows: string[][] = [headerCells];
+      i += 2;
+      while (i < lines.length) {
+        const cells = parseTableRow(lines[i] ?? '');
+        if (!cells) break;
+        rows.push(cells);
+        i += 1;
+      }
+      blocks.push({ kind: 'table', rows, align });
+      continue;
+    }
+
+    blocks.push({ kind: 'line', text: line });
+    i += 1;
+  }
+
+  return blocks;
 }
 
 // ---------------------------------------------------------------------------

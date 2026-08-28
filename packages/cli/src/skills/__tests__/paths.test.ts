@@ -13,10 +13,10 @@ import {
   resolveSkillRoots,
 } from '../paths.js';
 
-const ORIGINAL_ENV = process.env.ARGON_SKILLS_PATH;
+const ORIGINAL_ENV = process.env.ARAGON_SKILLS_PATH;
 afterEach(() => {
-  if (ORIGINAL_ENV === undefined) delete process.env.ARGON_SKILLS_PATH;
-  else process.env.ARGON_SKILLS_PATH = ORIGINAL_ENV;
+  if (ORIGINAL_ENV === undefined) delete process.env.ARAGON_SKILLS_PATH;
+  else process.env.ARAGON_SKILLS_PATH = ORIGINAL_ENV;
 });
 
 describe('skill root resolution (§6.1)', () => {
@@ -27,30 +27,30 @@ describe('skill root resolution (§6.1)', () => {
     expect(roots[0]!.scope).toBe('bundled');
   });
 
-  it('marks .argon/skills writable and .claude/skills read-only (D8)', () => {
+  it('marks .aragon/skills writable and .claude/skills read-only (D8)', () => {
     const project = resolveProjectSkillDirs('/work');
     expect(project).toHaveLength(2);
-    expect(project[0]!.dir.endsWith(`.argon${sep}skills`)).toBe(true);
+    expect(project[0]!.dir.endsWith(`.aragon${sep}skills`)).toBe(true);
     expect(project[0]!.writable).toBe(true);
     expect(project[1]!.dir.endsWith(`.claude${sep}skills`)).toBe(true);
     expect(project[1]!.writable).toBe(false);
   });
 
   it('bundled and env roots are never writable', () => {
-    process.env.ARGON_SKILLS_PATH = '/a';
+    process.env.ARAGON_SKILLS_PATH = '/a';
     const roots = resolveSkillRoots('/work');
     expect(roots.find((r) => r.scope === 'bundled')!.writable).toBe(false);
     expect(roots.find((r) => r.scope === 'env')!.writable).toBe(false);
   });
 
-  it('splits ARGON_SKILLS_PATH on the platform delimiter and resolves each entry', () => {
+  it('splits ARAGON_SKILLS_PATH on the platform delimiter and resolves each entry', () => {
     const dirs = resolveEnvSkillDirs(['/a', '/b'].join(delimiter));
     expect(dirs).toHaveLength(2);
     expect(dirs.every((d) => d.scope === 'env')).toBe(true);
     expect(dirs.every((d) => isAbsolute(d.dir))).toBe(true);
   });
 
-  it('treats an empty or whitespace ARGON_SKILLS_PATH as unset', () => {
+  it('treats an empty or whitespace ARAGON_SKILLS_PATH as unset', () => {
     expect(resolveEnvSkillDirs(undefined)).toEqual([]);
     expect(resolveEnvSkillDirs('   ')).toEqual([]);
     expect(resolveEnvSkillDirs(`${delimiter}${delimiter}`)).toEqual([]);

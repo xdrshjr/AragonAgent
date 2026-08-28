@@ -1,9 +1,9 @@
 {
-  "name": "@argon-agent/core",
-  "version": "0.1.2",
-  "description": "ArgonAgent core engine — LLM provider adapters, streaming, tool registry/execution, steering, idle watchdog, and an optional isolated-vm sandbox.",
+  "name": "@aragon-agent/core",
+  "version": "0.2.17",
+  "description": "AragonAgent core engine — LLM provider adapters, streaming, tool registry/execution, steering, idle watchdog, and an optional isolated-vm sandbox.",
   "license": "MIT",
-  "author": "ArgonAgent contributors",
+  "author": "AragonAgent contributors",
   "keywords": [
     "agent",
     "ai-agent",
@@ -18,16 +18,16 @@
     "typescript",
     "isolated-vm",
     "codeact",
-    "argonagent"
+    "aragonagent"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xdrshjr/ArgonAgent.git",
+    "url": "git+https://github.com/xdrshjr/AragonAgent.git",
     "directory": "packages/core"
   },
-  "homepage": "https://github.com/xdrshjr/ArgonAgent#readme",
+  "homepage": "https://github.com/xdrshjr/AragonAgent#readme",
   "bugs": {
-    "url": "https://github.com/xdrshjr/ArgonAgent/issues"
+    "url": "https://github.com/xdrshjr/AragonAgent/issues"
   },
   "type": "module",
   "sideEffects": false,
@@ -96,7 +96,8 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test": "vitest run",
     "verify:dist": "npm run build && node examples/consumer-smoke/run.mjs",
     "prepublishOnly": "node scripts/check-publishable.mjs && npm run build"

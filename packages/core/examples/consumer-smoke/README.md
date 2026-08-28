@@ -3,19 +3,19 @@
 This directory holds `run.mjs`, the **reuse-verification** smoke (deliverable D1
 + D2). It answers the one question `examples/minimal.ts` (compile-only) cannot:
 
-> Can another project that does `npm install @argon-agent/core` actually **run**
+> Can another project that does `npm install @aragon-agent/core` actually **run**
 > the engine from the built `dist/`?
 
 ## How it works
 
 `run.mjs` is plain Node ESM (`.mjs`). It imports the package **by its own name**
-(`@argon-agent/core`) using Node's *package self-referencing* feature, so Node
+(`@aragon-agent/core`) using Node's *package self-referencing* feature, so Node
 resolves the import through `package.json#exports` → `./dist/index.js` — the
 exact `(exports map + NodeNext + .js extension)` path an external consumer hits,
 **without** the package ever being placed in `node_modules`.
 
 It then injects a **stub `LLMProvider`** (a fixed, offline `StreamEvent` stream)
-through the public DI seam (`ProviderRegistry`), constructs an `ArgonAgent`, and
+through the public DI seam (`ProviderRegistry`), constructs an `AragonAgent`, and
 runs one `prompt()` turn end-to-end. The assertions require **success-only
 signals** (`turn_end` + an assistant message carrying the stub text), not just
 `agent_start` / `agent_end` — because the engine swallows loop errors and always
@@ -62,12 +62,12 @@ the package and install the tarball into a throwaway project:
 ```bash
 # from packages/core/
 npm run build
-npm pack                      # produces argon-agent-core-<version>.tgz
+npm pack                      # produces aragon-agent-core-<version>.tgz
 
 # in a fresh temp directory:
 npm init -y
-npm i /absolute/path/to/argon-agent-core-<version>.tgz
-node --input-type=module -e "import('@argon-agent/core').then(m => console.log('OK', typeof m.ArgonAgent))"
+npm i /absolute/path/to/aragon-agent-core-<version>.tgz
+node --input-type=module -e "import('@aragon-agent/core').then(m => console.log('OK', typeof m.AragonAgent))"
 # expect: OK function
 ```
 

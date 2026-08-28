@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { AgentEvent } from '@argon-agent/core';
+import type { AgentEvent } from '@aragon-agent/core';
 import {
   buildToolPreview,
   initialViewState,
@@ -181,5 +181,147 @@ describe('stored preview cap (P1-3)', () => {
     const preview = buildToolPreview({ content: [{ type: 'text', text }] });
     expect(preview.split('\n').length).toBeGreaterThan(8);
     expect(preview).toContain('line 30');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// agent-activity-presentation — thinking timing, the patch side channel, and
+// the preview/patch exclusion (D-19 / AC-14a)
+// ---------------------------------------------------------------------------
+
+describe('thinking timing (§3.1.2)', () => {
+  const thoughtThenAnswer: AgentEvent[] = [
+    { type: 'agent_start' },
+    { type: 'turn_start' },
+    { type: 'message_update', streamEvent: { type: 'thinking_start' } },
+    { type: 'message_update', streamEvent: { type: 'thinking_delta', delta: 'hmm' } },
+    { type: 'message_update', streamEvent: { type: 'text_delta', delta: 'answer' } },
+  ];
+
+  it('starts the clock on thinkingStart and seals it at the FIRST text delta', () => {
+    const state = run(thoughtThenAnswer);
+    const entry = assistantEntries(state)[0]!;
+    expect(entry.thinkingStartedAt).toBeTypeOf('number');
+    expect(entry.thinkingMs).toBeTypeOf('number');
+    expect(entry.thinkingMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('does not let the sealed duration climb with the answer', () => {
+    let state = run(thoughtThenAnswer);
+    const sealed = assistantEntries(state)[0]!.thinkingMs;
+    state = fold(state, [{ type: 'textDelta', delta: ' and more' }]);
+    expect(assistantEntries(state)[0]!.thinkingMs).toBe(sealed);
+  });
+
+  it('seals at turn end for a turn that thought and then only called a tool', () => {
+    const state = run([
+      { type: 'agent_start' },
+      { type: 'turn_start' },
+      { type: 'message_update', streamEvent: { type: 'thinking_start' } },
+      { type: 'message_update', streamEvent: { type: 'thinking_delta', delta: 'plan' } },
+      {
+        type: 'turn_end',
+        message: { role: 'assistant', content: [] },
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    ]);
+    expect(assistantEntries(state)[0]!.thinkingMs).toBeTypeOf('number');
+  });
+
+  it('clears both fields on a stream restart — the reasoning was discarded', () => {
+    let state = run(thoughtThenAnswer);
+    state = fold(state, [{ type: 'streamRestart', discardedToolCallIds: [] }]);
+    const entry = assistantEntries(state)[0]!;
+    expect(entry.thinkingStartedAt).toBeUndefined();
+    expect(entry.thinkingMs).toBeUndefined();
+  });
+
+  it('leaves a turn that never thought with no clock at all', () => {
+    const state = run([
+      { type: 'agent_start' },
+      { type: 'turn_start' },
+      { type: 'message_update', streamEvent: { type: 'text_delta', delta: 'straight to it' } },
+    ]);
+    expect(assistantEntries(state)[0]!.thinkingMs).toBeUndefined();
+  });
+});
+
+describe('the patch side channel (§3.3.7 / AC-14a)', () => {
+  const patch = {
+    path: 'a.ts',
+    kind: 'update' as const,
+    added: 1,
+    removed: 1,
+    hunks: [],
+    truncated: false,
+    lineCount: 2,
+  };
+
+  const execEnd: AgentEvent = {
+    type: 'tool_execution_end',
+    toolCallId: 't1',
+    toolName: 'edit_file',
+    result: { content: [{ type: 'text', text: 'Applied edit to a.ts:\n- old\n+ new\n  ctx' }] },
+    isError: false,
+    duration: 3,
+  };
+
+  it('produces byte-identical actions when no source is supplied', () => {
+    // Every existing test, and headless mode, take this path.
+    expect(reduceEvent(execEnd)).toEqual([
+      {
+        type: 'toolExecEnd',
+        toolCallId: 't1',
+        isError: false,
+        duration: 3,
+        preview: 'Applied edit to a.ts:\n- old\n+ new\n  ctx',
+      },
+    ]);
+  });
+
+  it('attaches the patch and TRUNCATES the preview to one line (D-19)', () => {
+    const actions = reduceEvent(execEnd, undefined, { take: () => patch });
+    expect(actions).toEqual([
+      {
+        type: 'toolExecEnd',
+        toolCallId: 't1',
+        isError: false,
+        duration: 3,
+        preview: 'Applied edit to a.ts:',
+        patch,
+      },
+    ]);
+  });
+
+  it('consumes the patch exactly once, and writes it onto the entry', () => {
+    let taken = 0;
+    const source = {
+      take: (): typeof patch | undefined => (taken++ === 0 ? patch : undefined),
+    };
+    let state = viewReducer(initialViewState(), {
+      type: 'toolCallStart',
+      toolCallId: 't1',
+      toolName: 'edit_file',
+    });
+    state = fold(state, reduceEvent(execEnd, undefined, source));
+    const entry = state.entries[0]!;
+    expect(entry.kind).toBe('tool');
+    expect(entry.kind === 'tool' && entry.patch).toBe(patch);
+    expect(taken).toBe(1);
+  });
+
+  it('never holds both a patch and a multi-line preview (AC-14a)', () => {
+    const state = fold(
+      viewReducer(initialViewState(), {
+        type: 'toolCallStart',
+        toolCallId: 't1',
+        toolName: 'edit_file',
+      }),
+      reduceEvent(execEnd, undefined, { take: () => patch }),
+    );
+    for (const entry of state.entries) {
+      if (entry.kind !== 'tool' || !entry.patch) continue;
+      expect(entry.preview?.includes('\n')).toBe(false);
+    }
   });
 });

@@ -93,7 +93,7 @@ describe('pickOpenerVariant + SessionOpener agree', () => {
   it('drops to `none` when the terminal is too narrow even for the banner', () => {
     expect(pickOpenerVariant(40, 47, RICH)).toBe('none');
     const { lastFrame, unmount } = open({ variant: 'none' });
-    expect(stripAnsi(lastFrame() ?? '')).not.toContain('ArgonAgent');
+    expect(stripAnsi(lastFrame() ?? '')).not.toContain('AragonAgent');
     unmount();
   });
 });

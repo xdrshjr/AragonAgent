@@ -34,6 +34,21 @@ export interface ToolExecutorOptions {
 
   /** Maximum size (in bytes) of combined text output before truncation. Defaults to 100_000 (100 KB). */
   maxOutputSize?: number;
+
+  /**
+   * How long, after an abort is signalled, a tool has to settle before its
+   * promise is ABANDONED and an error result is returned in its place.
+   * Defaults to 5000.
+   *
+   * THE INVARIANT BEING PROTECTED IS "AN ABORT IS ALWAYS ANSWERABLE", AND AN
+   * INVARIANT THAT DEPENDS ON EVERY TOOL AUTHOR REMEMBERING IS NOT AN
+   * INVARIANT. Step 5 below used to be a bare `await tool.execute(...)`: the
+   * signal was delivered, the tool was free to ignore it, and the loop waited
+   * forever — so the host's "press Esc to stop" did nothing at all in exactly
+   * the situation where a user most needs it. Racing here makes the guarantee a
+   * property of the executor rather than of the toolset it happens to be given.
+   */
+  abortGraceMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -46,6 +61,15 @@ const TRUNCATION_SUFFIX = '\n... [truncated]';
 
 /** Sentinel symbol used to identify timeout aborts vs external aborts. */
 const TIMEOUT_REASON = Symbol('tool-timeout');
+
+/** Grace after an abort before a tool's promise is abandoned. */
+const DEFAULT_ABORT_GRACE_MS = 5_000;
+
+/**
+ * The race's losing branch. A unique object rather than a string or `null`, so
+ * it can never collide with something a tool legitimately resolves with.
+ */
+const ABANDON = Symbol('tool-abandoned');
 
 // ---------------------------------------------------------------------------
 // ToolExecutor
@@ -60,6 +84,7 @@ export class ToolExecutor {
   private readonly defaultTimeout: number;
   private readonly timeoutOverrides: Record<string, number>;
   private readonly maxOutputSize: number;
+  private readonly abortGraceMs: number;
 
   constructor(
     private readonly registry: ToolRegistry,
@@ -68,6 +93,7 @@ export class ToolExecutor {
     this.defaultTimeout = options.defaultTimeout ?? DEFAULT_TIMEOUT_MS;
     this.timeoutOverrides = options.timeoutOverrides ?? {};
     this.maxOutputSize = options.maxOutputSize ?? DEFAULT_MAX_OUTPUT_SIZE;
+    this.abortGraceMs = options.abortGraceMs ?? DEFAULT_ABORT_GRACE_MS;
   }
 
   /**
@@ -158,15 +184,73 @@ export class ToolExecutor {
       signal.addEventListener('abort', externalAbortHandler, { once: true });
     }
 
-    // 5. Execute the tool.
+    // 5. Execute the tool, RACED AGAINST THE ABORT (+ grace).
+    //
+    // The race is the whole of the hardening: `tool.execute` may never settle —
+    // a child process whose grandchild holds the stdout pipe open is the shipped
+    // example — and without a second branch the loop waits on it forever while
+    // the user's abort has already been delivered and acted on.
+    //
+    // CLEANED UP IN A `finally`, NOT LEFT TO `{ once: true }`. The listener is
+    // one-shot, but the GRACE TIMER it arms is not: a tool that wins the race
+    // after an abort would leave a timer to fire `abortGraceMs` later, harmless
+    // today only because it is `unref`'d — a property of the timer rather than
+    // of the design. `agent-loop.ts`'s compaction race is the in-repo precedent
+    // and does exactly this.
     let result: ToolResult;
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    let onAbandonAbort: (() => void) | undefined;
     try {
       const context: ToolExecutionContext = {
         signal: controller.signal,
         onProgress,
       };
 
-      result = await tool.execute(toolCallId, validatedParams, context);
+      const abandoned = new Promise<typeof ABANDON>((resolveAbandon) => {
+        const arm = (): void => {
+          // WRITTEN ON THE CONTEXT OBJECT THE TOOL ALREADY HOLDS, before its own
+          // abort listener runs, so a tool can tell "the ceiling killed me" from
+          // "the user pressed Esc" and say so in its result.
+          context.abortCause =
+            controller.signal.reason === TIMEOUT_REASON ? 'timeout' : 'external';
+          graceTimer = setTimeout(() => resolveAbandon(ABANDON), this.abortGraceMs);
+          graceTimer.unref?.();
+        };
+        if (controller.signal.aborted) {
+          arm();
+          return;
+        }
+        onAbandonAbort = arm;
+        controller.signal.addEventListener('abort', arm, { once: true });
+      });
+
+      const outcome = await Promise.race([
+        // Mapped to a VALUE on both settlements, so a rejecting tool does not
+        // reject the race itself and skip the `finally` below; the throw is
+        // re-thrown one line later into the existing catch, unchanged.
+        tool.execute(toolCallId, validatedParams, context).then(
+          (r) => r,
+          (e: unknown) => ({ __thrown: e }) as const,
+        ),
+        abandoned,
+      ]);
+
+      if (outcome === ABANDON) {
+        // The orphan is DISCARDED. Its rejection is already absorbed by the
+        // `.then(onFulfilled, onRejected)` above rather than by a later
+        // `.catch()`, which is why that mapping is written as a two-argument
+        // `then` and not as `await`: a rejection arriving after we stopped
+        // listening would otherwise be an `unhandledRejection`, and in a host
+        // that routes those to a fatal handler a successfully-abandoned tool
+        // would become a process exit.
+        result = errorResult(
+          `Tool "${toolName}" did not stop within ${this.abortGraceMs}ms of abort; abandoned.`,
+        );
+      } else if (typeof outcome === 'object' && outcome !== null && '__thrown' in outcome) {
+        throw (outcome as { __thrown: unknown }).__thrown;
+      } else {
+        result = outcome;
+      }
     } catch (err) {
       if (isAbortError(err) || controller.signal.aborted) {
         const isTimeout = controller.signal.reason === TIMEOUT_REASON;
@@ -181,6 +265,10 @@ export class ToolExecutor {
       }
     } finally {
       clearTimeout(timeoutId);
+      if (graceTimer) clearTimeout(graceTimer);
+      if (onAbandonAbort) {
+        controller.signal.removeEventListener('abort', onAbandonAbort);
+      }
       if (signal) {
         signal.removeEventListener('abort', externalAbortHandler);
       }

@@ -1,11 +1,11 @@
 /**
- * @argon-agent/core — minimal, type-checked usage example.
+ * @aragon-agent/core — minimal, type-checked usage example.
  *
  * This file is NOT shipped in the published tarball (it lives outside the
  * `files` whitelist) and it never touches the network. Its sole purpose is to
  * be a compile-checked reference for third-party consumers: it imports the
  * package exactly the way a downstream project would — by the published package
- * name `@argon-agent/core` (not a relative `src/` path) — so a clean
+ * name `@aragon-agent/core` (not a relative `src/` path) — so a clean
  * `tsc --noEmit` proves the public API surface, the `exports` map, and the
  * `typesVersions` map all resolve correctly.
  *
@@ -17,7 +17,7 @@
  */
 
 import {
-  ArgonAgent,
+  AragonAgent,
   defineTool,
   textResult,
   getProviderRegistry,
@@ -25,7 +25,7 @@ import {
   type AgentConfig,
   type AgentTool,
   type ModelRef,
-} from '@argon-agent/core';
+} from '@aragon-agent/core';
 
 // 1. Define a dummy tool with the `defineTool` helper. Tools handed to the
 //    agent use the default `Record<string, unknown>` param shape (so they are
@@ -72,7 +72,7 @@ const config: AgentConfig = {
   getApiKey: (providerId) => apiKeys[providerId],
 };
 
-const agent = new ArgonAgent(config);
+const agent = new AragonAgent(config);
 
 // 6. Subscribe to lifecycle events. The full transcript is available on the
 //    terminal `agent_end` event.

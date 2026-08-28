@@ -15,7 +15,7 @@ import {
   errorResult,
   textResult,
   type AgentTool,
-} from '@argon-agent/core';
+} from '@aragon-agent/core';
 import type { ToolDeps } from './fs-tools.js';
 
 const MAX_GREP_MATCHES = 500;

@@ -46,7 +46,7 @@ describe('renderTranscriptText', () => {
   it('leads with a one-line session summary', () => {
     const out = renderTranscriptText([user('u1')], OPTS);
     const first = out.split('\n')[0] ?? '';
-    expect(first).toContain('argon');
+    expect(first).toContain('aragon');
     expect(first).toContain('anthropic:claude-sonnet-4-6');
     expect(first).toContain('1 turn');
     expect(first).toContain('$0.08');

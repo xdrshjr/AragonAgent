@@ -40,6 +40,15 @@ export interface Glyphs {
   gaugeEmpty: string;
   keyOn: string;
   keyOff: string;
+  /**
+   * Checkbox pair for a multi-select question (`allowMultiple`).
+   *
+   * Distinct from `keyOn` / `keyOff`, which are radios: a user looking at a list
+   * has to be able to tell "pick one" from "pick several" without reading the
+   * footer, and that distinction is exactly what the two shapes carry.
+   */
+  boxChecked: string;
+  boxEmpty: string;
   wordmark: string;
 
   // --- Punctuation and arrows (collected from the 16 offending files). ---
@@ -71,8 +80,67 @@ export interface Glyphs {
   railBranch: string;
   railEnd: string;
 
+  /**
+   * Scroll-position indicator on the viewport's right edge (mouse-wheel §4.8).
+   *
+   * These are byte-for-byte identical to `railVertical` / `gaugeFull` in both
+   * tiers, and that is DELIBERATE (P2-2). This file's header mandates "add a
+   * field here instead" of a new exception, and semantic field names are what
+   * make the ASCII tier reviewable at a glance. Reusing `gaugeFull` would
+   * couple the scroll thumb to the context-window gauge, so that restyling one
+   * silently restyles the other — do not "deduplicate" them.
+   */
+  scrollTrack: string;
+  scrollThumb: string;
+
   /** Redaction dot for `maskSecret` in the settings screen (§4.1 tier B). */
   maskDot: string;
+
+  /**
+   * Team mode (team-subagents §6.1). The rail marker for a dispatch card and
+   * the prefix on the panel's incoming-message preview.
+   *
+   * They live HERE rather than in `TeamPanel` / `TeamCard` for the reason this
+   * file's header gives: a literal in a component bypasses `pickGlyphs` entirely
+   * and shows mojibake on a legacy console, whatever the capability probe said.
+   */
+  teamAgent: string;
+  teamMail: string;
+
+  /**
+   * Todo planning (todo-plan-execution §6.1). One marker per item state, plus
+   * the rail marker for the transcript card via `tool.todo_write`.
+   *
+   * THE ASCII TIER USES BRACKETED FORMS FOR THE TWO SETTLED STATES, because a
+   * bare single letter cannot distinguish "done" from "failed" on a monochrome
+   * terminal. The panel pads the marker cell to 3 columns, which is what makes
+   * the mixed widths line up without a per-tier branch.
+   */
+  todoPending: string;
+  todoActive: string;
+  todoDone: string;
+
+  /**
+   * API retry (llm-api-retry-backoff §6.5). The rail marker on the retry card.
+   *
+   * HERE RATHER THAN IN `RetryCard`, for the reason this file's header gives: a
+   * literal in a component bypasses `pickGlyphs` entirely and shows mojibake on a
+   * legacy console whatever the capability probe said. `glyphs.test.ts`'s static
+   * scan fails the build if either spelling appears anywhere else.
+   */
+  retry: string;
+
+  /**
+   * Context compaction (context-auto-compaction §6.3). The rail marker on the
+   * compaction card.
+   *
+   * HERE RATHER THAN IN `CompactionCard`, for the reason this file's header
+   * gives: a literal in a component bypasses `pickGlyphs` entirely and shows
+   * mojibake on a legacy console whatever the capability probe said.
+   * `glyphs.test.ts`'s static scan fails the build if either spelling appears
+   * anywhere else — and `src/compaction/**` is inside that scan's scope too.
+   */
+  compaction: string;
 
   /**
    * Ink `borderStyle` name for every boxed region (composer, completion popup,
@@ -107,6 +175,8 @@ const UNICODE_GLYPHS: Glyphs = {
   gaugeEmpty: '░',
   keyOn: '●',
   keyOff: '○',
+  boxChecked: '☑',
+  boxEmpty: '☐',
   wordmark: '◇',
 
   ellipsis: '…',
@@ -128,8 +198,21 @@ const UNICODE_GLYPHS: Glyphs = {
   railBranch: '├',
   railEnd: '╰',
 
+  scrollTrack: '│',
+  scrollThumb: '█',
+
   maskDot: '•',
   boxStyle: 'round',
+
+  teamAgent: '◆',
+  teamMail: '✉',
+
+  todoPending: '○',
+  todoActive: '▸',
+  todoDone: '✔',
+
+  retry: '↻',
+  compaction: '⤓',
 
   tool: {
     read_file: '▤',
@@ -139,6 +222,10 @@ const UNICODE_GLYPHS: Glyphs = {
     glob: '⌕',
     grep: '⌕',
     list_dir: '▤',
+    ask_user: '?',
+    submit_plan: '◈',
+    task: '◆',
+    todo_write: '☰',
   },
   toolDefault: '•',
 };
@@ -160,6 +247,8 @@ const ASCII_GLYPHS: Glyphs = {
   gaugeEmpty: '-',
   keyOn: '*',
   keyOff: 'o',
+  boxChecked: '[x]',
+  boxEmpty: '[ ]',
   wordmark: '<>',
 
   ellipsis: '...',
@@ -181,8 +270,21 @@ const ASCII_GLYPHS: Glyphs = {
   railBranch: '|',
   railEnd: '\\',
 
+  scrollTrack: '|',
+  scrollThumb: '#',
+
   maskDot: '*',
   boxStyle: 'classic',
+
+  teamAgent: '*',
+  teamMail: '@',
+
+  todoPending: '[ ]',
+  todoActive: '>',
+  todoDone: '[x]',
+
+  retry: '[r]',
+  compaction: '[c]',
 
   tool: {
     read_file: '=',
@@ -192,6 +294,10 @@ const ASCII_GLYPHS: Glyphs = {
     glob: '/',
     grep: '/',
     list_dir: '=',
+    ask_user: '?',
+    submit_plan: '#',
+    task: '*',
+    todo_write: '=',
   },
   toolDefault: '*',
 };

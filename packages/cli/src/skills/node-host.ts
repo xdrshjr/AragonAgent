@@ -1,7 +1,7 @@
 /**
  * The Node implementation of core's `SkillHost` port (spec §11.3 / D1).
  *
- * This file is the ONLY reason `@argon-agent/core` can stay free of `node:*`:
+ * This file is the ONLY reason `@aragon-agent/core` can stay free of `node:*`:
  * every filesystem touch the skills engine needs arrives through here.
  *
  * ERROR CONTRACT (§10.1): these methods deliberately let fs exceptions escape.
@@ -14,7 +14,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
 import process from 'node:process';
-import type { SkillHost, SkillPlatform } from '@argon-agent/core';
+import type { SkillHost, SkillPlatform } from '@aragon-agent/core';
 
 /**
  * Which shell family the `bash` tool will actually use here (D-G14).

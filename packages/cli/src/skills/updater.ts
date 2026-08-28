@@ -35,7 +35,7 @@ import {
   parseFrontmatter,
   validateStagedSkill,
   type SkillManifestSource,
-} from '@argon-agent/core/skills';
+} from '@aragon-agent/core/skills';
 import {
   checkUrlAllowed,
   fetchSource,
@@ -248,7 +248,7 @@ export async function updateSkill(
     // weaker validator here would be a hole that only opens on the update route.
     const fetched = await fetchSource(resolved.spec, stagingDir, {
       allowedHosts: config.allowedHosts,
-      userAgent: `argon-agent-cli/${opts.installer}`,
+      userAgent: `aragon-agent-cli/${opts.installer}`,
       ...(opts.fetchDeps ?? {}),
     });
 
@@ -313,7 +313,7 @@ export async function updateSkill(
     // NOT wrapped in `withRootLock`: step 8 already acquired the lock for this
     // root, and `acquireRootLock` is NOT reentrant — a second acquire would sit
     // out the full `LOCK_MAX_WAIT_MS` waiting for a lock this very call stack
-    // holds, then fail every update with a spurious "another argon process is
+    // holds, then fail every update with a spurious "another aragon process is
     // installing skills".
     //
     // `installedAt` is carried forward; `updatedAt` / `previousVersion` record

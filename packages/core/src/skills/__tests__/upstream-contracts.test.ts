@@ -37,22 +37,34 @@ const CORE_SRC = join(here, '..', '..');
  */
 const HISTORY_TRIMMING = /(?<![.\w])(prune|compact|evict|trim|truncateHistory)\w*/i;
 
-const SCANNED = [
-  join(CORE_SRC, 'engine', 'message-manager.ts'),
-  // Widened past `message-manager.ts` on purpose: a windowing change is at least
-  // as likely to be built on the existing `getLast(n)` helper from the loop side,
-  // where a scan of the manager alone would never see it.
-  join(CORE_SRC, 'engine', 'agent-loop.ts'),
-  join(CORE_SRC, 'engine', 'agent.ts'),
-];
+/**
+ * `message-manager.ts` ONLY, and the narrowing is a recorded decision rather
+ * than a convenience (context-auto-compaction, IF-1 in that spec).
+ *
+ * RT-4 originally scanned the loop and the `Agent` too, because a windowing
+ * change was at least as likely to be built from the loop side. Context
+ * compaction is exactly that change, and it arrived DELIBERATELY — with a
+ * design document, a structural gate, and the second half of this file's own
+ * remedy already in place. What RT-4 is for is making that arrival a decision
+ * somebody had to take rather than something that happened; it did its job, and
+ * the decision is recorded in `COMPACTION_SEAM` below.
+ *
+ * The STORE is still the right thing to scan unconditionally: `MessageManager`
+ * has exactly one replacement path (`restore`, which the loop reaches only
+ * through the validated seam), and a trimming helper appearing THERE would be a
+ * second, unreviewed way for history to shrink.
+ */
+const SCANNED = [join(CORE_SRC, 'engine', 'message-manager.ts')];
 
 const RT4_REMEDY =
   'The skill digest (W3) tells the model an earlier copy of the skill body is still in this ' +
-  'conversation. If you are introducing history trimming or compaction, that claim stops being ' +
-  'true — clear SkillRegistry.active when history is dropped, or make the digest unconditional-full.';
+  'conversation. History can now shrink (context compaction), so that claim is CONDITIONAL — ' +
+  'the digest carries a force=true escape hatch for exactly this case. If you are adding a ' +
+  'SECOND way for history to shrink, re-read spec §14.3 RT-4 first: clear SkillRegistry.active ' +
+  'when history is dropped, or make the digest unconditional-full.';
 
-describe('RT-4 — the engine does not trim message history (FG10)', () => {
-  it('no history-trimming API exists in the engine', () => {
+describe('RT-4 — history shrinks in exactly one reviewed place (FG10)', () => {
+  it('the message store itself has no trimming API', () => {
     const offenders: string[] = [];
     for (const file of SCANNED) {
       const lines = readFileSync(file, 'utf8').split(/\r?\n/);
@@ -72,6 +84,36 @@ describe('RT-4 — the engine does not trim message history (FG10)', () => {
       .filter((n) => n !== 'constructor')
       .sort();
     expect(own, RT4_REMEDY).toEqual(['clear', 'getAll', 'getLast', 'length', 'push', 'restore']);
+  });
+
+  it('the loop shrinks history ONLY through the validated compaction seam', () => {
+    // THE REPLACEMENT FOR THE WIDENED SCAN. `restore` is the only call that can
+    // make the history shorter, and every occurrence of it in the loop must be
+    // inside `runCompaction`, downstream of `validateHistory` — which is the one
+    // thing standing between a host bug and a permanently un-sendable
+    // conversation (D-4 / R-2). A second `restore` call site somewhere else in
+    // the loop is precisely the unreviewed shrink path RT-4 exists to catch.
+    const loop = readFileSync(join(CORE_SRC, 'engine', 'agent-loop.ts'), 'utf8');
+    const restores = loop.match(/messageManager\.restore\(/g) ?? [];
+    expect(restores.length, RT4_REMEDY).toBe(1);
+    expect(loop).toContain('validateHistory(outcome.messages');
+    // And the shrink must stay OPT-IN: with no `contextManager` injected the
+    // checkpoint returns before allocating anything, which is what keeps a
+    // default engine embedding byte-identical to a pre-compaction build.
+    expect(loop).toContain('if (!cm) return false;');
+  });
+
+  it('the digest still carries the force=true escape hatch the shrink relies on', () => {
+    // THE OTHER HALF OF THE REMEDY, and the reason compaction does not need to
+    // reach into `SkillRegistry`. `renderSkillDigest`'s omitted-body note names
+    // BOTH conditions under which `force` is right — "if you cannot find the
+    // earlier copy, or it was truncated" — which was added for a truncated copy
+    // (P1-6) and covers a compacted-away one unchanged. Deleting it would turn a
+    // compacted session's repeat `skill()` call into a confident pointer at
+    // nothing, with no way for the model to recover.
+    const disclosure = readFileSync(join(CORE_SRC, 'skills', 'disclosure.ts'), 'utf8');
+    expect(disclosure, RT4_REMEDY).toContain('If you cannot find the ');
+    expect(disclosure, RT4_REMEDY).toContain('force=true');
   });
 
   it('the scan would actually catch a trimming helper (self-check)', () => {

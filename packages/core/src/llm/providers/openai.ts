@@ -26,6 +26,14 @@ import type {
 } from '../types.js';
 import type { LLMProvider, LLMRequest } from '../provider.js';
 import { LLMError, classifyHttpError, wrapFetchError } from '../provider.js';
+import {
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  estimatePromptTokens,
+  normalizeModelId,
+  resolveOutputTokens,
+  staticCeilingFor,
+} from '../output-limits.js';
+import { getLearnedTokenField, sendWithOutputLimitRecovery } from '../output-limit-recovery.js';
 import { parseSSEStream } from '../stream-utils.js';
 import { consumeStream } from '../stream-utils.js';
 
@@ -34,7 +42,9 @@ import { consumeStream } from '../stream-utils.js';
 // ---------------------------------------------------------------------------
 
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
-const DEFAULT_MAX_TOKENS = 64_000;
+
+/** Reasoning-family models reject `max_tokens` in favour of `max_completion_tokens`. */
+const REASONING_MODEL_PATTERN = /^(o1|o3|o4|gpt-5)/;
 
 // Model ID patterns to filter out non-chat models
 const NON_CHAT_PATTERNS = [
@@ -56,6 +66,22 @@ const NON_CHAT_PATTERNS = [
 
 function isChatModel(id: string): boolean {
   return !NON_CHAT_PATTERNS.some((pat) => pat.test(id));
+}
+
+/**
+ * Which parameter name carries the cap for this model.
+ *
+ * A HEURISTIC, and only the first guess: a proxy fronting an o-series model
+ * under a `gpt-` alias disagrees with it. `unsupported_field` recovery renames
+ * the parameter after one round trip and memoizes the answer, which is why the
+ * learned dialect is consulted first.
+ */
+export function openAiTokenField(modelId: string): 'max_tokens' | 'max_completion_tokens' {
+  const learned = getLearnedTokenField('openai', modelId);
+  if (learned) return learned;
+  return REASONING_MODEL_PATTERN.test(normalizeModelId(modelId))
+    ? 'max_completion_tokens'
+    : 'max_tokens';
 }
 
 // ---------------------------------------------------------------------------
@@ -90,24 +116,39 @@ export class OpenAIProvider implements LLMProvider {
     const body = buildRequestBody(request);
 
     let response: Response;
+    let errorBody = '';
     try {
-      response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${request.apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: request.signal,
+      const attempt = await sendWithOutputLimitRecovery({
+        providerId: this.id,
+        modelId: request.model,
+        body,
+        tokenField: openAiTokenField(request.model),
+        send: (payload) =>
+          fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${request.apiKey}`,
+            },
+            body: JSON.stringify(payload),
+            signal: request.signal,
+          }),
       });
+      response = attempt.response;
+      errorBody = attempt.bodyText;
     } catch (err) {
       yield { type: 'error', error: wrapFetchError(err, this.id) };
       return;
     }
 
     if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      yield { type: 'error', error: classifyHttpError(response.status, text, this.id) };
+      // `errorBody` is the ALREADY-CONSUMED body; re-reading it would throw.
+      // `response.headers` carries `Retry-After` / `x-ratelimit-reset-after` out
+      // on `LLMError.retryAfterMs` so a 429 waits as long as the server asked.
+      yield {
+        type: 'error',
+        error: classifyHttpError(response.status, errorBody, this.id, response.headers),
+      };
       return;
     }
 
@@ -126,12 +167,32 @@ export class OpenAIProvider implements LLMProvider {
     // Accumulate tool calls by index
     const toolAccumulators = new Map<number, ToolCallAccumulator>();
 
+    /**
+     * Whether this stream reached a terminal frame (§4.5a). Unlike Anthropic's
+     * `message_stop`, neither of OpenAI's terminal signals `return`s, so the
+     * absence of a return cannot stand in for the flag.
+     *
+     * TWO SIGNALS, NOT ONE, and the second is not optional. The `[DONE]`
+     * sentinel is the documented terminator, but it is a convention of OpenAI's
+     * own server rather than a property of the wire format: several
+     * OpenAI-compatible endpoints (the ones `--base-url` exists for) close the
+     * connection after the last chunk without sending it. Keying truncation on
+     * `[DONE]` alone would make every request against such a server a retryable
+     * error, i.e. ten retries and then a failure, for a stream that completed
+     * perfectly. A `finish_reason` on any choice is the model's own statement
+     * that it stopped, and a stream cut mid-answer carries neither.
+     */
+    let sawTerminal = false;
+
     try {
       for await (const sse of parseSSEStream(response.body, request.signal)) {
         const raw = sse.data.trim();
 
         // [DONE] sentinel
-        if (raw === '[DONE]') break;
+        if (raw === '[DONE]') {
+          sawTerminal = true;
+          break;
+        }
 
         let data: Record<string, unknown>;
         try {
@@ -206,8 +267,29 @@ export class OpenAIProvider implements LLMProvider {
 
         // Finish reason handling
         if (finishReason) {
+          sawTerminal = true;
           stopReason = mapFinishReason(finishReason);
         }
+      }
+
+      // ---- The terminal-sentinel contract (§4.5a) -------------------------
+      //
+      // An abort is NOT a truncation: `parseSSEStream` `break`s on
+      // `signal.aborted`, which lands on exactly this path, and turning that into
+      // a retryable `network_error` would re-create the trap `isRetryableError`
+      // check 1 exists to close (constraint 1 / R-17). The signal is therefore
+      // tested FIRST and that path keeps yielding `done`.
+      if (!sawTerminal && !request.signal?.aborted) {
+        yield {
+          type: 'error',
+          error: new LLMError(
+            `${this.id} stream truncated before a terminal chunk`,
+            this.id,
+            'network_error',
+            true,
+          ),
+        };
+        return;
       }
 
       // Flush text block
@@ -272,6 +354,10 @@ export class OpenAIProvider implements LLMProvider {
       if (!res.ok) return [];
 
       const data = await res.json() as { data?: Array<Record<string, unknown>> };
+      // The OpenAI models endpoint does NOT report an output ceiling, so this
+      // maps through the static table and deliberately does NOT call
+      // `learnModelCeiling` — claiming knowledge we do not have would outrank
+      // the (correct) table entry for every small model.
       return (data.data || [])
         .filter((m) => isChatModel(String(m.id || '')))
         .map((m) => ({
@@ -279,7 +365,7 @@ export class OpenAIProvider implements LLMProvider {
           name: String(m.id || ''),
           provider: this.id,
           contextWindow: 128_000,
-          maxOutputTokens: DEFAULT_MAX_TOKENS,
+          maxOutputTokens: staticCeilingFor(this.id, String(m.id || '')) ?? DEFAULT_MAX_OUTPUT_TOKENS,
           supportsThinking: false,
           supportsTools: true,
           supportsImages: /gpt-4|o1|o3/i.test(String(m.id)),
@@ -305,9 +391,26 @@ function buildRequestBody(request: LLMRequest): Record<string, unknown> {
     stream_options: { include_usage: true },
   };
 
-  body.max_tokens = request.maxTokens ?? DEFAULT_MAX_TOKENS;
+  const tokenField = openAiTokenField(request.model);
 
-  if (request.temperature !== undefined) {
+  // The prompt estimate is only ever consumed when the caller told us the
+  // context window, so it is computed only then — walking every message on a
+  // hot path that cannot use the result would be pure waste.
+  const contextWindow = request.modelLimits?.contextWindow;
+  const resolution = resolveOutputTokens({
+    providerId: 'openai',
+    modelId: request.model,
+    ...(request.maxTokens !== undefined ? { requested: request.maxTokens } : {}),
+    ...(request.modelLimits ? { modelLimits: request.modelLimits } : {}),
+    ...(contextWindow !== undefined
+      ? { estimatedPromptTokens: estimatePromptTokens(request.messages, request.systemPrompt) }
+      : {}),
+  });
+  body[tokenField] = resolution.value;
+
+  // The reasoning family rejects `temperature` alongside `max_tokens`; sending
+  // it would just buy a second 400 on a different key.
+  if (request.temperature !== undefined && tokenField === 'max_tokens') {
     body.temperature = request.temperature;
   }
 

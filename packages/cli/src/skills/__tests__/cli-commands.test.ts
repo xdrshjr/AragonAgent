@@ -10,8 +10,8 @@
 import { describe, expect, it } from 'vitest';
 import { checkDeclaredTools, checkScriptPlatform, describeResult } from '../cli-commands.js';
 import { currentPlatform } from '../node-host.js';
-import { normalizeFrontmatter } from '@argon-agent/core/skills';
-import type { SkillRecord } from '@argon-agent/core';
+import { normalizeFrontmatter } from '@aragon-agent/core/skills';
+import type { SkillRecord } from '@aragon-agent/core';
 import type { UpdateResult } from '../updater.js';
 
 const updated: UpdateResult = {

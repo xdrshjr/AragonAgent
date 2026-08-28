@@ -1,6 +1,6 @@
 ---
 name: skill-creator
-description: Author a new ArgonAgent skill. Use when the user asks to save a procedure as a skill, or when you notice you have re-derived the same multi-step process twice in a session.
+description: Author a new AragonAgent skill. Use when the user asks to save a procedure as a skill, or when you notice you have re-derived the same multi-step process twice in a session.
 version: 1.1.0
 license: MIT
 activation: auto

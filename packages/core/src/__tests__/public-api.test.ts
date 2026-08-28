@@ -28,6 +28,36 @@ const EXPECTED = [
   'LLMError',
   'classifyHttpError',
   'wrapFetchError',
+  // llm/output-limits — the output-token authority
+  'DEFAULT_MAX_OUTPUT_TOKENS',
+  'MIN_MAX_OUTPUT_TOKENS',
+  'SAFE_FALLBACK_MAX_OUTPUT_TOKENS',
+  'ABSOLUTE_MAX_OUTPUT_TOKENS',
+  'THINKING_HEADROOM_TOKENS',
+  'CONTEXT_SAFETY_MARGIN_TOKENS',
+  'resolveOutputTokens',
+  'staticCeilingFor',
+  'learnModelCeiling',
+  'getLearnedCeiling',
+  'clearLearnedCeilings',
+  'estimatePromptTokens',
+  // Promoted from module-private for the CLI's compaction digest budget
+  // (context-auto-compaction P2-3).
+  'CHARS_PER_TOKEN',
+  // llm/output-limit-recovery
+  'classifyOutputLimitFailure',
+  'sendWithOutputLimitRecovery',
+  'learnTokenField',
+  'getLearnedTokenField',
+  'clearLearnedTokenFields',
+  // llm/retry — the retry & backoff authority. `normalizePolicy` / `decide` are
+  // deliberately absent: they are module-internal implementation of `withRetry`.
+  'RETRY_LIMITS',
+  'DEFAULT_RETRY_POLICY',
+  'isRetryableError',
+  'computeBackoffDelay',
+  'parseRetryAfterMs',
+  'withRetry',
   // llm/stream-utils
   'parseSSEStream',
   'consumeStream',
@@ -65,6 +95,12 @@ const EXPECTED = [
   'MessageManager',
   'MessageQueueManager',
   'IdleWatchdog',
+  // engine/compaction — the mechanism half of context-auto-compaction. The
+  // policy half lives in the host (D-2), so only these three are public.
+  'findSafeCutIndices',
+  'planCompaction',
+  'relieveTail',
+  'validateHistory',
   // skills
   'SkillRegistry',
   'parseFrontmatter',
@@ -94,16 +130,16 @@ const EXPECTED = [
   'SKILL_FIND_MAX_BYTES',
   'SKILL_NAME_PATTERN',
   // brand alias
-  'ArgonAgent',
+  'AragonAgent',
 ];
 
-describe('@argon-agent/core public API contract', () => {
+describe('@aragon-agent/core public API contract', () => {
   it('runtime export surface is frozen (keep API.md in sync)', () => {
     expect(Object.keys(api).sort()).toEqual([...EXPECTED].sort());
   });
 
-  it('expects exactly 58 runtime exports with no duplicates', () => {
-    expect(EXPECTED.length).toBe(58);
+  it('expects exactly 86 runtime exports with no duplicates', () => {
+    expect(EXPECTED.length).toBe(86);
     expect(new Set(EXPECTED).size).toBe(EXPECTED.length);
   });
 });

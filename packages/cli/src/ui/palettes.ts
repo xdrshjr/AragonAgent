@@ -34,6 +34,22 @@ export interface Palette {
   idleBorder: string;
   hintFg: string;
   logoShadow: string;
+  /**
+   * Drag-selection highlight (tui-selection-and-scroll-follow §4.4.4).
+   *
+   * A PAIR, not a background alone: the selected run has its inner SGR stripped
+   * before it is repainted, so whatever foreground the row had is gone by the
+   * time the highlight is applied and a background on its own would leave the
+   * text at the terminal's default colour over an arbitrary hue. The two are
+   * contrast-pinned against EACH OTHER in `palettes.test.ts` — the surface a
+   * selected glyph sits on is `selectionBg`, not `DARK_SURFACE`.
+   *
+   * Below ansi-256 these never reach the terminal at all: `highlight.ts` emits
+   * plain reverse video there, because `getTheme` has degraded them to chalk
+   * colour NAMES by then and a name is not an escape sequence.
+   */
+  selectionBg: string;
+  selectionFg: string;
   gradient: [string, string, string];
   gauge: { track: string; low: string; mid: string; high: string };
   diff: { add: string; remove: string; meta: string; context: string };
@@ -70,6 +86,8 @@ export const WARM: Palette = {
   idleBorder: '#4a423b',
   hintFg: '#9c9086',
   logoShadow: '#4a423b',
+  selectionBg: '#e0b088',
+  selectionFg: '#1c1917',
   gradient: ['#d08c60', '#c9a227', '#b0916a'],
   gauge: { track: '#4a423b', low: '#7fb08a', mid: '#c9a227', high: '#cf6b5c' },
   diff: { add: '#7fb08a', remove: '#cf6b5c', meta: '#d08c60', context: '#a2968a' },
@@ -98,6 +116,8 @@ export const COOL: Palette = {
   idleBorder: '#3b4261',
   hintFg: '#565f89',
   logoShadow: '#3b4261',
+  selectionBg: '#7aa2f7',
+  selectionFg: '#1a1b26',
   gradient: ['#7aa2f7', '#bb9af7', '#7dcfff'],
   gauge: { track: '#3b4261', low: '#9ece6a', mid: '#e0af68', high: '#f7768e' },
   diff: { add: '#9ece6a', remove: '#f7768e', meta: '#7aa2f7', context: '#7a86b8' },
@@ -125,6 +145,8 @@ export const LIGHT: Palette = {
   idleBorder: '#c8cdd6',
   hintFg: '#6b7280',
   logoShadow: '#c8cdd6',
+  selectionBg: '#2959aa',
+  selectionFg: '#ffffff',
   gradient: ['#2959aa', '#8c4bc9', '#0f7490'],
   gauge: { track: '#c8cdd6', low: '#2e7d32', mid: '#b5730f', high: '#c62828' },
   diff: { add: '#2e7d32', remove: '#c62828', meta: '#2959aa', context: '#6b7280' },

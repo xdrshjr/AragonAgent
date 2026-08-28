@@ -104,3 +104,32 @@ export function applyScroll(
   }
   return { offset: clamped };
 }
+
+/**
+ * Upper bound on one folded burst. `repeat` arrives from the wheel router's
+ * coalescing window, and an unbounded fold is a free CPU-burn primitive for a
+ * high-resolution / free-spinning wheel (R-10).
+ */
+const MAX_SCROLL_REPEAT = 100;
+
+/**
+ * Fold `applyScroll` `times` times — one `setState`, one render, however fast
+ * the wheel spins (mouse-wheel-region-routing §5.5).
+ *
+ * Folding rather than multiplying is deliberate: `applyScroll` owns the
+ * downward bottom-snap and the clamp, and reimplementing either here would give
+ * the wheel a different notion of "pinned to the bottom" than the keyboard has.
+ */
+export function applyScrollTimes(
+  state: ScrollState,
+  intent: ScrollIntent,
+  metrics: ViewportMetrics,
+  times: number,
+): ScrollState {
+  const n = Number.isFinite(times)
+    ? Math.min(MAX_SCROLL_REPEAT, Math.max(1, Math.floor(times)))
+    : 1;
+  let next = state;
+  for (let i = 0; i < n; i += 1) next = applyScroll(next, intent, metrics);
+  return next;
+}

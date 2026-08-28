@@ -31,7 +31,9 @@ async function find(
   params: Record<string, unknown>,
 ): Promise<{ text: string; isError: boolean }> {
   const tool = createSkillFindTool({ registry: registryOf(records) });
-  const result = await tool.execute('call-1', params);
+  // `ToolExecutionContext` is a REQUIRED third parameter of `ToolExecuteFn`;
+  // both of its members are optional, so `{}` is the honest empty context (W3).
+  const result = await tool.execute('call-1', params, {});
   return {
     text: result.content.map((c) => (c.type === 'text' ? c.text ?? '' : '')).join(''),
     isError: result.isError ?? false,

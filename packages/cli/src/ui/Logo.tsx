@@ -9,17 +9,17 @@ import type { Theme } from './theme.js';
 import type { TermCapabilities } from './capabilities.js';
 import { gradientLine } from './gradient.js';
 
-/** 6 rows × 44 columns, every row equal width (pinned by logo.test.ts). */
+/** 6 rows × 52 columns, every row equal width (pinned by logo.test.ts). */
 export const LOGO_ART: readonly string[] = [
-  ' █████╗ ██████╗  ██████╗  ██████╗ ███╗   ██╗',
-  '██╔══██╗██╔══██╗██╔════╝ ██╔═══██╗████╗  ██║',
-  '███████║██████╔╝██║  ███╗██║   ██║██╔██╗ ██║',
-  '██╔══██║██╔══██╗██║   ██║██║   ██║██║╚██╗██║',
-  '██║  ██║██║  ██║╚██████╔╝╚██████╔╝██║ ╚████║',
-  '╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝',
+  ' █████╗ ██████╗  █████╗  ██████╗  ██████╗ ███╗   ██╗',
+  '██╔══██╗██╔══██╗██╔══██╗██╔════╝ ██╔═══██╗████╗  ██║',
+  '███████║██████╔╝███████║██║  ███╗██║   ██║██╔██╗ ██║',
+  '██╔══██║██╔══██╗██╔══██║██║   ██║██║   ██║██║╚██╗██║',
+  '██║  ██║██║  ██║██║  ██║╚██████╔╝╚██████╔╝██║ ╚████║',
+  '╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝',
 ];
 
-export const LOGO_ART_WIDTH = 44;
+export const LOGO_ART_WIDTH = 52;
 
 export type HeaderVariant = 'art' | 'banner' | 'bar' | 'mini';
 /** How the one-off opening wordmark renders inside the viewport (§4.2). */
@@ -27,7 +27,13 @@ export type OpenerVariant = 'art' | 'banner' | 'none';
 
 /** Minimum viewport rows / cols each tier needs before it earns its budget. */
 const ART_MIN_VIEWPORT_ROWS = 14;
-const ART_MIN_COLS = 52;
+/**
+ * 4 columns of headroom on purpose: the art renders with `wrap="truncate"`, so
+ * at zero headroom anything upstream claiming a single column silently shears
+ * the right edge off the `N`. Between `LOGO_ART_WIDTH` and this threshold the
+ * opener degrades to `banner`, which is the intended fallback (rename C2).
+ */
+const ART_MIN_COLS = LOGO_ART_WIDTH + 4;
 const BANNER_MIN_COLS = 48;
 const BAR_MIN_COLS = 40;
 
@@ -95,7 +101,7 @@ export interface LogoProps {
 }
 
 export function Logo({ variant, theme, caps }: LogoProps): React.ReactElement | null {
-  const wordmark = `${theme.symbols.wordmark} ArgonAgent`;
+  const wordmark = `${theme.symbols.wordmark} AragonAgent`;
 
   if (variant === 'none') return null;
 

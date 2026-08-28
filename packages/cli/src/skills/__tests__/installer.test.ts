@@ -61,7 +61,7 @@ function installedNames(): string[] {
 }
 
 beforeEach(() => {
-  tmp.root = makeTmpDir('argon-install-');
+  tmp.root = makeTmpDir('aragon-install-');
   mkdirSync(join(tmp.root, 'user'), { recursive: true });
   mkdirSync(join(tmp.root, 'bundled'), { recursive: true });
   mkdirSync(join(tmp.root, 'work'), { recursive: true });

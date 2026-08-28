@@ -3,7 +3,7 @@
  * (which is expressed in USD per 1M tokens). See spec §6.2 status bar.
  */
 
-import type { ModelCost, TokenUsage } from '@argon-agent/core';
+import type { ModelCost, TokenUsage } from '@aragon-agent/core';
 
 /** Compute the USD cost of a single `TokenUsage` given a model's cost table. */
 export function computeCost(usage: TokenUsage, cost?: ModelCost): number {

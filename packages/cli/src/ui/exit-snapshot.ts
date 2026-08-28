@@ -20,6 +20,13 @@ export interface ExitSnapshot {
   provider: string;
   model: string;
   startedAt: number;
+  /**
+   * Entries the retain ring removed (tui-render-performance L1).
+   *
+   * OPTIONAL so every existing caller and test is unchanged; absent means the
+   * replay says nothing, which is correct for a session that dropped nothing.
+   */
+  droppedEntries?: number;
 }
 
 let snapshot: ExitSnapshot | undefined;

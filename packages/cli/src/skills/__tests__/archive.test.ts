@@ -22,7 +22,7 @@ import { cleanup, makeTmpDir } from './helpers.js';
 
 let tmp = '';
 beforeEach(() => {
-  tmp = makeTmpDir('argon-archive-');
+  tmp = makeTmpDir('aragon-archive-');
 });
 afterEach(() => cleanup(tmp));
 

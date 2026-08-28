@@ -63,6 +63,47 @@ export function parseWriteFile(text: string): { bytes: number; path: string } | 
   return { bytes: Number.parseInt(m[1]!, 10), path: m[2]! };
 }
 
+/**
+ * The JSON body an `ask_user` result carries after its one human-readable line.
+ * Only the fields this preview reads are declared.
+ */
+interface AskUserPayload {
+  answers?: { selected?: unknown; custom?: unknown }[];
+  cancelled?: boolean;
+}
+
+/**
+ * Parse the JSON tail of a tool result whose first line is prose.
+ *
+ * FAILS SOFT, ALWAYS. This runs inside a render pass, and the stored preview may
+ * have been truncated at `STORED_PREVIEW_CHARS` or restored from a session file
+ * written by another build. `null` means "fall through to the generic
+ * renderer", never "throw while drawing the transcript".
+ */
+function parseJsonTail(lines: readonly string[]): unknown {
+  const start = lines.findIndex((l) => l.trimStart().startsWith('{'));
+  if (start < 0) return null;
+  try {
+    return JSON.parse(lines.slice(start).join('\n'));
+  } catch {
+    return null;
+  }
+}
+
+/** `3 questions · Postgres · REST` — or `dismissed`. */
+export function summarizeAskUser(lines: readonly string[]): string | null {
+  const parsed = parseJsonTail(lines) as AskUserPayload | null;
+  if (!parsed || !Array.isArray(parsed.answers)) return null;
+  if (parsed.cancelled) return 'dismissed';
+  const count = parsed.answers.length;
+  const picks = parsed.answers
+    .map((a) => (typeof a.custom === 'string' && a.custom.length > 0
+      ? a.custom
+      : Array.isArray(a.selected) ? a.selected.join('/') : ''))
+    .filter((s) => s.length > 0);
+  return [`${count} question${count === 1 ? '' : 's'}`, ...picks].join(' - ');
+}
+
 export interface ListRow {
   kind: 'dir' | 'file';
   name: string;
@@ -90,7 +131,7 @@ export function parseListRow(line: string): ListRow | null {
  */
 interface ToolPreviewProps {
   name: string;
-  lines: string[];
+  lines: readonly string[];
   theme: Theme;
   isError?: boolean;
 }
@@ -108,7 +149,7 @@ function diffColor(cls: DiffClass, theme: Theme): string | undefined {
   }
 }
 
-function renderDiff(lines: string[], theme: Theme): React.ReactElement[] {
+function renderDiff(lines: readonly string[], theme: Theme): React.ReactElement[] {
   return lines.map((line, i) => (
     <Text key={i} color={diffColor(classifyDiffLine(line), theme)}>
       {line.length > 0 ? line : ' '}
@@ -116,7 +157,7 @@ function renderDiff(lines: string[], theme: Theme): React.ReactElement[] {
   ));
 }
 
-function renderWrite(lines: string[], theme: Theme): React.ReactElement[] {
+function renderWrite(lines: readonly string[], theme: Theme): React.ReactElement[] {
   const parsed = parseWriteFile(lines.join('\n'));
   if (!parsed) return renderPlain(lines, theme, false);
   return [
@@ -126,7 +167,7 @@ function renderWrite(lines: string[], theme: Theme): React.ReactElement[] {
   ];
 }
 
-function renderRead(lines: string[], theme: Theme): React.ReactElement[] {
+function renderRead(lines: readonly string[], theme: Theme): React.ReactElement[] {
   // Numbered lines are `%5d  content`; dim the 7-char gutter, keep content plain.
   return lines.map((line, i) => (
     <Text key={i}>
@@ -136,7 +177,7 @@ function renderRead(lines: string[], theme: Theme): React.ReactElement[] {
   ));
 }
 
-function renderBash(lines: string[], theme: Theme): React.ReactElement[] {
+function renderBash(lines: readonly string[], theme: Theme): React.ReactElement[] {
   return lines.map((line, i) => {
     // The truncation marker is compared against the constant the reducer
     // actually writes. These used to be two independently spelled `…` literals;
@@ -154,7 +195,7 @@ function renderBash(lines: string[], theme: Theme): React.ReactElement[] {
   });
 }
 
-function renderList(lines: string[], theme: Theme): React.ReactElement[] {
+function renderList(lines: readonly string[], theme: Theme): React.ReactElement[] {
   return lines.map((line, i) => {
     const row = parseListRow(line);
     if (!row) return <Text key={i}>{line}</Text>;
@@ -174,7 +215,7 @@ function renderList(lines: string[], theme: Theme): React.ReactElement[] {
   });
 }
 
-function renderGlob(lines: string[], theme: Theme): React.ReactElement[] {
+function renderGlob(lines: readonly string[], theme: Theme): React.ReactElement[] {
   // Flat relative paths — dim the directory portion of each path.
   return lines.map((line, i) => {
     const slash = line.lastIndexOf('/');
@@ -188,7 +229,35 @@ function renderGlob(lines: string[], theme: Theme): React.ReactElement[] {
   });
 }
 
-function renderPlain(lines: string[], theme: Theme, error?: boolean): React.ReactElement[] {
+function renderAskUser(lines: readonly string[], theme: Theme): React.ReactElement[] {
+  const summary = summarizeAskUser(lines);
+  // An unparseable preview falls through to the generic renderer rather than
+  // rendering nothing: a truncated result is still information.
+  if (!summary) return renderPlain(lines, theme, false);
+  return [
+    <Text key="q" color={theme.muted}>
+      {summary}
+    </Text>,
+  ];
+}
+
+/**
+ * `Plan approved.` / `Plan rejected. ...` — the verdict is the whole content of
+ * a `submit_plan` result, and it is the first line, so this needs no parsing.
+ */
+function renderSubmitPlan(lines: readonly string[], theme: Theme): React.ReactElement[] {
+  const first = lines.find((l) => l.trim().length > 0) ?? '';
+  const approved = /^Plan approved/.test(first);
+  const rejected = /^Plan rejected/.test(first);
+  if (!approved && !rejected) return renderPlain(lines, theme, false);
+  return [
+    <Text key="v" color={approved ? theme.toolDone : theme.noticeWarn}>
+      {first}
+    </Text>,
+  ];
+}
+
+function renderPlain(lines: readonly string[], theme: Theme, error?: boolean): React.ReactElement[] {
   return lines.map((line, i) => (
     <Text key={i} color={error ? theme.toolError : theme.muted}>
       {line.length > 0 ? line : ' '}
@@ -216,6 +285,12 @@ export function ToolPreview({ name, lines, theme, isError }: ToolPreviewProps): 
       break;
     case 'glob':
       body = renderGlob(lines, theme);
+      break;
+    case 'ask_user':
+      body = renderAskUser(lines, theme);
+      break;
+    case 'submit_plan':
+      body = renderSubmitPlan(lines, theme);
       break;
     default:
       body = renderPlain(lines, theme, isError);

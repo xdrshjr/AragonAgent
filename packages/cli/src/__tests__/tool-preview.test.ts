@@ -5,6 +5,7 @@ import {
   parseWriteFile,
   parseListRow,
 } from '../ui/entries/ToolPreview.js';
+import { renderUnifiedDiff } from '../tools/diff.js';
 
 describe('classifyDiffLine (meta-first ordering — P2-8)', () => {
   it('classifies +/- content lines', () => {
@@ -67,5 +68,36 @@ describe('parseListRow (list_dir vs glob — P2-9)', () => {
 
   it('returns null for a flat glob path (no dir/file annotation)', () => {
     expect(parseListRow('src/components/App.tsx')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// agent-activity-presentation — `renderUnifiedDiff` now emits `@@` headers, and
+// the fallback renderer must still classify them (D-10 / AC-17)
+// ---------------------------------------------------------------------------
+
+describe('the text fallback renders a hunk-headed diff correctly (D-10)', () => {
+  it('classifies every row a real edit_file result now produces', () => {
+    const old = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n');
+    const next = old.replace('line 15', 'CHANGED');
+    const text = `Applied edit to a.ts:\n${renderUnifiedDiff(old, next, { path: 'a.ts' })}`;
+
+    const classes = text.split('\n').map(classifyDiffLine);
+    expect(classes[0]).toBe('context'); // the `Applied edit to` lead-in
+    expect(classes[1]).toBe('meta'); // `--- a.ts`
+    expect(classes[2]).toBe('meta'); // `+++ a.ts`
+    expect(classes[3]).toBe('meta'); // `@@ ... @@`, which is new this round
+    expect(classes).toContain('remove');
+    expect(classes).toContain('add');
+    expect(classes).toContain('context');
+  });
+
+  it('still defaults to TWO context rows, so the model-facing diff did not widen', () => {
+    // `fs-tools.ts` passes no override, and `PATCH_LIMITS.context` is 3. A single
+    // shared constant would add two rows to EVERY model-facing diff (D-20).
+    const old = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n');
+    const next = old.replace('line 15', 'CHANGED');
+    const rows = renderUnifiedDiff(old, next).split('\n');
+    expect(rows.filter((r) => r.startsWith('  '))).toHaveLength(4);
   });
 });

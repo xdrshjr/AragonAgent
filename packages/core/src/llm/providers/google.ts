@@ -28,10 +28,14 @@ import type {
 } from '../types.js';
 import type { LLMProvider, LLMRequest } from '../provider.js';
 import { LLMError, classifyHttpError, wrapFetchError } from '../provider.js';
+import {
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  learnModelCeiling,
+  resolveOutputTokens,
+} from '../output-limits.js';
+import { sendWithOutputLimitRecovery } from '../output-limit-recovery.js';
 import { parseSSEStream } from '../stream-utils.js';
 import { consumeStream } from '../stream-utils.js';
-
-const DEFAULT_MAX_TOKENS = 64_000;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -60,21 +64,36 @@ export class GoogleProvider implements LLMProvider {
     const body = buildRequestBody(request);
 
     let response: Response;
+    let errorBody = '';
     try {
-      response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: request.signal,
+      const attempt = await sendWithOutputLimitRecovery({
+        providerId: this.id,
+        modelId: request.model,
+        body,
+        tokenField: 'generationConfig.maxOutputTokens',
+        send: (payload) =>
+          fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal: request.signal,
+          }),
       });
+      response = attempt.response;
+      errorBody = attempt.bodyText;
     } catch (err) {
       yield { type: 'error', error: wrapFetchError(err, this.id) };
       return;
     }
 
     if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      yield { type: 'error', error: classifyHttpError(response.status, text, this.id) };
+      // `errorBody` is the ALREADY-CONSUMED body; re-reading it would throw.
+      // `response.headers` carries `Retry-After` out on `LLMError.retryAfterMs`
+      // so a 429 waits as long as the server asked rather than only the ladder.
+      yield {
+        type: 'error',
+        error: classifyHttpError(response.status, errorBody, this.id, response.headers),
+      };
       return;
     }
 
@@ -89,6 +108,16 @@ export class GoogleProvider implements LLMProvider {
     const contentBlocks: ContentBlock[] = [];
     let textAccumulator = '';
     let stopReason: StopReason | undefined;
+
+    /**
+     * Whether a terminal chunk arrived (§4.5a). Google's terminator is a
+     * candidate carrying `finishReason`; unlike Anthropic's `message_stop` it
+     * does not `return`, so the flag is what tells a completed stream from a
+     * truncated one. Set AT THE FRAME, never inferred from
+     * `contentBlocks.length` — a model that legitimately produces nothing and
+     * stops is a success, not a truncation (constraint 2).
+     */
+    let sawTerminal = false;
 
     try {
       for await (const sse of parseSSEStream(response.body, request.signal)) {
@@ -118,6 +147,7 @@ export class GoogleProvider implements LLMProvider {
         // Finish reason
         const finishReason = candidate.finishReason as string | undefined;
         if (finishReason) {
+          sawTerminal = true;
           stopReason = mapFinishReason(finishReason);
         }
 
@@ -152,6 +182,25 @@ export class GoogleProvider implements LLMProvider {
             } satisfies ToolCallBlock);
           }
         }
+      }
+
+      // ---- The terminal-sentinel contract (§4.5a) -------------------------
+      //
+      // An abort is NOT a truncation: `parseSSEStream` `break`s on
+      // `signal.aborted` and lands here, and reporting that as a retryable
+      // `network_error` would re-create the trap `isRetryableError` check 1
+      // closes (constraint 1 / R-17). Signal first; that path yields `done`.
+      if (!sawTerminal && !request.signal?.aborted) {
+        yield {
+          type: 'error',
+          error: new LLMError(
+            `${this.id} stream truncated before a terminal chunk`,
+            this.id,
+            'network_error',
+            true,
+          ),
+        };
+        return;
       }
 
       // Flush text
@@ -203,12 +252,19 @@ export class GoogleProvider implements LLMProvider {
         })
         .map((m) => {
           const id = String(m.name || '').replace(/^models\//, '');
+          // Google is the ONE provider of the three that reports a real
+          // per-model output ceiling, so its answer is worth remembering: it
+          // outranks the static table for every later request in this process.
+          const reported = m.outputTokenLimit as number | undefined;
+          if (typeof reported === 'number' && reported > 0) {
+            learnModelCeiling(this.id, id, reported, 'discovery');
+          }
           return {
             id,
             name: String(m.displayName || id),
             provider: this.id,
             contextWindow: (m.inputTokenLimit as number) || 128_000,
-            maxOutputTokens: (m.outputTokenLimit as number) || DEFAULT_MAX_TOKENS,
+            maxOutputTokens: reported || DEFAULT_MAX_OUTPUT_TOKENS,
             supportsThinking: false,
             supportsTools: true,
             supportsImages: true,
@@ -245,8 +301,14 @@ function buildRequestBody(request: LLMRequest): Record<string, unknown> {
   }
 
   // Generation config
+  const resolution = resolveOutputTokens({
+    providerId: 'google',
+    modelId: request.model,
+    ...(request.maxTokens !== undefined ? { requested: request.maxTokens } : {}),
+    ...(request.modelLimits ? { modelLimits: request.modelLimits } : {}),
+  });
   const genConfig: Record<string, unknown> = {
-    maxOutputTokens: request.maxTokens ?? DEFAULT_MAX_TOKENS,
+    maxOutputTokens: resolution.value,
   };
   if (request.temperature !== undefined) {
     genConfig.temperature = request.temperature;

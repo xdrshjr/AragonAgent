@@ -43,6 +43,9 @@ export type {
   ToolCallEndEvent,
   DoneEvent,
   ErrorEvent,
+  RetryScheduledEvent,
+  RetryAttemptEvent,
+  StreamRestartEvent,
 
   // Tools
   ToolDefinition,
@@ -72,6 +75,77 @@ export {
 } from './llm/provider.js';
 
 // ---------------------------------------------------------------------------
+// Output-token limits — the authority for "how many tokens may this model
+// produce". Every adapter resolves through here; nothing else spells 64000.
+// ---------------------------------------------------------------------------
+
+export {
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  MIN_MAX_OUTPUT_TOKENS,
+  SAFE_FALLBACK_MAX_OUTPUT_TOKENS,
+  ABSOLUTE_MAX_OUTPUT_TOKENS,
+  THINKING_HEADROOM_TOKENS,
+  CONTEXT_SAFETY_MARGIN_TOKENS,
+  resolveOutputTokens,
+  staticCeilingFor,
+  learnModelCeiling,
+  getLearnedCeiling,
+  clearLearnedCeilings,
+  estimatePromptTokens,
+  // Promoted from module-private for the compaction digest's budget arithmetic
+  // (context-auto-compaction P2-3): two chars-per-token constants that must agree
+  // and nothing checking that they do is how a budget and an estimate drift.
+  CHARS_PER_TOKEN,
+} from './llm/output-limits.js';
+
+export type {
+  OutputLimitInput,
+  OutputLimitResolution,
+  CeilingSource,
+} from './llm/output-limits.js';
+
+export {
+  classifyOutputLimitFailure,
+  sendWithOutputLimitRecovery,
+  learnTokenField,
+  getLearnedTokenField,
+  clearLearnedTokenFields,
+} from './llm/output-limit-recovery.js';
+
+// ---------------------------------------------------------------------------
+// Retry & exponential backoff — the authority for "a provider call failed, now
+// what". Installed by default on `ProviderRegistry.stream()`; opt out with
+// `initProviders({ retryPolicy: null })` or `setRetryPolicy(null)`.
+//
+// `normalizePolicy` and `decide` are deliberately NOT here: they are the
+// implementation of the two entry points below, nobody outside the module has a
+// reason to call them, and promoting them would add two symbols to the frozen
+// public surface for nothing.
+// ---------------------------------------------------------------------------
+
+export {
+  RETRY_LIMITS,
+  DEFAULT_RETRY_POLICY,
+  isRetryableError,
+  computeBackoffDelay,
+  parseRetryAfterMs,
+  withRetry,
+} from './llm/retry.js';
+
+export type {
+  RetryPolicy,
+  RetryDecision,
+  WithRetryOptions,
+} from './llm/retry.js';
+
+export type {
+  OutputLimitFailure,
+  RecoveryAttempt,
+  RecoveryOptions,
+  TokenField,
+} from './llm/output-limit-recovery.js';
+
+// ---------------------------------------------------------------------------
 // Stream utilities
 // ---------------------------------------------------------------------------
 
@@ -94,6 +168,8 @@ export {
   streamLLM,
   completeLLM,
 } from './llm/providers/index.js';
+
+export type { ProviderRegistryOptions } from './llm/providers/index.js';
 
 // ---------------------------------------------------------------------------
 // Individual providers (for direct use when needed)
@@ -235,6 +311,8 @@ export type {
   ToolExecutionEndEvent,
   CodeExecutionStartEvent,
   CodeExecutionEndEvent,
+  CompactionStartEvent,
+  CompactionEndEvent,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -252,6 +330,43 @@ export { MessageQueueManager } from './engine/steering.js';
 export { IdleWatchdog } from './engine/watchdog.js';
 
 // ---------------------------------------------------------------------------
+// Context compaction (context-auto-compaction §4.1)
+//
+// THREE PURE FUNCTIONS AND FIVE TYPES. The mechanism is here; the policy — the
+// threshold, the summarizer, the prompt, the failure ladder — belongs to the
+// host, because this package has no `ModelInfo` and must not learn one (D-2).
+//
+// `validateHistory` is public for a specific reason: a host that splices while
+// the agent is IDLE cannot reach the loop's own gate, and D-4 declares that gate
+// unbypassable. Exporting it is what makes honouring D-4 on the manual path cost
+// three lines instead of a second implementation.
+// ---------------------------------------------------------------------------
+
+export {
+  findSafeCutIndices,
+  planCompaction,
+  relieveTail,
+  validateHistory,
+} from './engine/compaction.js';
+
+export type {
+  CompactionPlan,
+  HistoryCheck,
+  PlanCompactionOptions,
+  TailReliefOptions,
+  TailReliefResult,
+  ValidateHistoryOptions,
+} from './engine/compaction.js';
+
+export type {
+  ContextManager,
+  CompactionProbe,
+  CompactionContext,
+  CompactionOutcome,
+  CompactionTrigger,
+} from './engine/context-manager.js';
+
+// ---------------------------------------------------------------------------
 // CodeAct Sandbox
 // ---------------------------------------------------------------------------
 
@@ -267,8 +382,8 @@ export type {
 // Import directly from './sandbox/*.js' when needed (lazy loading only).
 
 // ---------------------------------------------------------------------------
-// ArgonAgent — published brand alias of the engine's `Agent` class.
+// AragonAgent — published brand alias of the engine's `Agent` class.
 // The original `Agent` name is preserved above; consumers may use either.
 // ---------------------------------------------------------------------------
 
-export { Agent as ArgonAgent } from './engine/agent.js';
+export { Agent as AragonAgent } from './engine/agent.js';

@@ -3,8 +3,8 @@
  *
  *   bundled  <pkg>/skills          shipped with the npm package, read-only
  *   user     <data>/skills         where `aragon skills install` writes
- *   project  <cwd>/.argon/skills   + <cwd>/.claude/skills (read-only)
- *   env      ARGON_SKILLS_PATH     debugging / CI override, read-only
+ *   project  <cwd>/.aragon/skills   + <cwd>/.claude/skills (read-only)
+ *   env      ARAGON_SKILLS_PATH     debugging / CI override, read-only
  *
  * Same layering the config resolver already uses (defaults › file › env ›
  * flags), so there is no second mental model to learn.
@@ -14,10 +14,8 @@ import { existsSync, realpathSync, statSync } from 'node:fs';
 import { delimiter, dirname, join, resolve, sep } from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-import envPaths from 'env-paths';
-import type { SkillScope } from '@argon-agent/core';
-
-const paths = envPaths('argon-agent');
+import type { SkillScope } from '@aragon-agent/core';
+import { getUserDataDir, getUserSkillsDir } from '../config/app-paths.js';
 
 export interface SkillRoot {
   dir: string;
@@ -26,15 +24,12 @@ export interface SkillRoot {
   writable: boolean;
 }
 
-/** `<data>` — the per-user data root. Parent of `skills/`, and where sidecar state lives. */
-export function getUserDataDir(): string {
-  return paths.data;
-}
-
-/** `<data>/skills` — the default install target. */
-export function getUserSkillsDir(): string {
-  return join(paths.data, 'skills');
-}
+// `<data>` is `~/.aragon-agent` and `<data>/skills` its `skills/` child. Both
+// are defined in `config/app-paths.ts` and only re-exported here: the skill
+// modules (and their test mocks) import them from this path, and two separate
+// definitions of the same directory is the drift this module's header warns
+// about.
+export { getUserDataDir, getUserSkillsDir };
 
 /** `<data>/skills/.staging` — scratch space for in-flight installs (§8.3). */
 export function getStagingDir(): string {
@@ -61,21 +56,21 @@ export function getBundledSkillsDir(): string {
 /**
  * Project roots for a working directory. `.claude/skills` is included for
  * drop-in Claude Code interop (D8) and is marked read-only: `--scope project`
- * always writes to `.argon/skills`, never into another tool's directory.
+ * always writes to `.aragon/skills`, never into another tool's directory.
  */
 export function resolveProjectSkillDirs(
   cwd: string,
-  projectDirs: string[] = ['.argon/skills', '.claude/skills'],
+  projectDirs: string[] = ['.aragon/skills', '.claude/skills'],
 ): SkillRoot[] {
   return projectDirs.map((rel) => ({
     dir: resolve(cwd, rel),
     scope: 'project' as const,
-    writable: rel.replace(/\\/g, '/').startsWith('.argon/'),
+    writable: rel.replace(/\\/g, '/').startsWith('.aragon/'),
   }));
 }
 
-/** Roots listed in `ARGON_SKILLS_PATH`, split on the platform delimiter. */
-export function resolveEnvSkillDirs(value = process.env.ARGON_SKILLS_PATH): SkillRoot[] {
+/** Roots listed in `ARAGON_SKILLS_PATH`, split on the platform delimiter. */
+export function resolveEnvSkillDirs(value = process.env.ARAGON_SKILLS_PATH): SkillRoot[] {
   if (!value || value.trim().length === 0) return [];
   return value
     .split(delimiter)

@@ -11,7 +11,7 @@
  *
  * Usage:
  *   node scripts/stamp-org.mjs <org>
- *   ARGON_REPO_ORG=<org> node scripts/stamp-org.mjs
+ *   ARAGON_REPO_ORG=<org> node scripts/stamp-org.mjs
  *
  * No org argument → error exit (never stamps a bogus / empty value silently).
  */
@@ -25,12 +25,12 @@ const pkgDir = join(here, '..');
 const pkgPath = join(pkgDir, 'package.json');
 const readmePath = join(pkgDir, 'README.md');
 
-const org = (process.argv[2] ?? process.env.ARGON_REPO_ORG ?? '').trim();
+const org = (process.argv[2] ?? process.env.ARAGON_REPO_ORG ?? '').trim();
 
 if (!org) {
   console.error('[stamp-org] ERROR: no org provided.');
   console.error('Usage:  node scripts/stamp-org.mjs <org>');
-  console.error('   or:  ARGON_REPO_ORG=<org> node scripts/stamp-org.mjs');
+  console.error('   or:  ARAGON_REPO_ORG=<org> node scripts/stamp-org.mjs');
   process.exit(1);
 }
 

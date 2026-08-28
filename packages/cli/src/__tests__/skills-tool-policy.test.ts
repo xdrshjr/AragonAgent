@@ -12,8 +12,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SkillRegistry, type AgentTool, type SkillRecord } from '@argon-agent/core';
-import { normalizeFrontmatter } from '@argon-agent/core/skills';
+import { SkillRegistry, type AgentTool, type SkillRecord } from '@aragon-agent/core';
+import { normalizeFrontmatter } from '@aragon-agent/core/skills';
 import { createBuiltinTools, SKILL_TOOL_FLOOR, HOST_TOOL_NAMES } from '../tools/index.js';
 import { SkillService } from '../skills/service.js';
 import { DEFAULT_SKILLS_CONFIG, type SkillsConfig } from '../config/schema.js';
@@ -23,7 +23,7 @@ import type { NoticeLevel } from '../agent/reducer.js';
 let dir: string;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'argon-policy-'));
+  dir = mkdtempSync(join(tmpdir(), 'aragon-policy-'));
 });
 
 afterEach(() => {

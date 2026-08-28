@@ -44,7 +44,7 @@ if (offenders.length > 0) {
   }
   console.error('');
   console.error('Run:  node scripts/stamp-org.mjs <org>');
-  console.error('  or: ARGON_REPO_ORG=<org> node scripts/stamp-org.mjs');
+  console.error('  or: ARAGON_REPO_ORG=<org> node scripts/stamp-org.mjs');
   console.error('to replace <ORG> with the real GitHub org / npm scope before publishing.');
   process.exit(1);
 }

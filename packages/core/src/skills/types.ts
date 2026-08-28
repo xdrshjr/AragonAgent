@@ -113,7 +113,7 @@ export interface SkillRecord {
   invalid: boolean;
   /** Same-name records from lower-precedence roots. */
   shadowed: Array<{ scope: SkillScope; dir: string }>;
-  /** Parsed .argon-skill.json when present. */
+  /** Parsed .aragon-skill.json when present. */
   manifest: SkillManifest | null;
   /** False for `bundled`, `env`, and `.claude/skills` roots. */
   writable: boolean;

@@ -59,6 +59,17 @@ export interface Theme {
   hintFg: Color;
   /** Single-color wordmark fallback below ansi-256. */
   logoShadow: Color;
+  /**
+   * Drag-selection highlight (tui-selection-and-scroll-follow §4.4.4).
+   *
+   * Degraded like every other colour here, which means that below ansi-256 these
+   * are chalk colour NAMES rather than hex triples. `highlight.ts` tests for a
+   * hex shape and falls back to plain reverse video otherwise — the fallback a
+   * terminal that shallow would render anyway, and what the emulator's own
+   * selection looks like.
+   */
+  selectionBg: Color;
+  selectionFg: Color;
 
   // v0.2 additions.
   gradient: string[]; // wordmark hex stops (empty below ansi-256)
@@ -158,6 +169,8 @@ export function getTheme(name: ThemeName, caps: TermCapabilities): Theme {
     idleBorder: d(palette.idleBorder),
     hintFg: d(palette.hintFg),
     logoShadow: d(palette.logoShadow),
+    selectionBg: d(palette.selectionBg),
+    selectionFg: d(palette.selectionFg),
     gradient: level >= 2 ? [...palette.gradient] : [],
     gauge: {
       track: d(palette.gauge.track),

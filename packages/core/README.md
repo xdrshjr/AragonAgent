@@ -1,6 +1,6 @@
-# @argon-agent/core
+# @aragon-agent/core
 
-The publishable **ArgonAgent** engine: a zero-coupling, dependency-injected
+The publishable **AragonAgent** engine: a zero-coupling, dependency-injected
 TypeScript agent runtime.
 
 ## Requirements
@@ -12,12 +12,12 @@ TypeScript agent runtime.
 - **Optional native deps** — `ajv` and `isolated-vm` are `optionalDependencies`:
   the package works without them (a built-in validator fallback is used, and the
   sandbox modules are lazy-loaded). Install `isolated-vm` only if you use the
-  `@argon-agent/core/sandbox/*` CodeAct sandbox.
+  `@aragon-agent/core/sandbox/*` CodeAct sandbox.
 
 ## Install
 
 ```bash
-npm install @argon-agent/core
+npm install @aragon-agent/core
 # optional — only if you use the isolated-vm CodeAct sandbox:
 npm install isolated-vm
 ```
@@ -26,18 +26,18 @@ npm install isolated-vm
 
 - `ajv` — used by the tool param validator when present; a built-in fallback
   validator is used otherwise.
-- `isolated-vm` — used only by the `@argon-agent/core/sandbox/*` modules, which
+- `isolated-vm` — used only by the `@aragon-agent/core/sandbox/*` modules, which
   are lazy-loaded and never imported from the package root (`isolated-vm` is
   incompatible with some embedded V8 runtimes such as Electron's).
 
 ## Usage
 
 ```ts
-import { ArgonAgent, getProviderRegistry, initProviders } from '@argon-agent/core';
+import { AragonAgent, getProviderRegistry, initProviders } from '@aragon-agent/core';
 
 initProviders();
 
-const agent = new ArgonAgent({
+const agent = new AragonAgent({
   systemPrompt: 'You are a coding agent.',
   model: { providerId: 'anthropic', modelId: 'claude-...', baseUrl: '...' },
   tools: [],
@@ -48,7 +48,7 @@ const agent = new ArgonAgent({
 await agent.prompt('Hello');
 ```
 
-`ArgonAgent` is an alias of the engine's `Agent` class.
+`AragonAgent` is an alias of the engine's `Agent` class.
 
 A complete, type-checked version of this snippet (a dummy tool + provider setup
 + agent construction) lives in [`examples/minimal.ts`](./examples/minimal.ts).
@@ -59,12 +59,12 @@ tarball.
 
 | Import path                      | Contents                                  |
 | -------------------------------- | ----------------------------------------- |
-| `@argon-agent/core`              | Full barrel (engine, LLM, tools, types).  |
-| `@argon-agent/core/llm/types`    | LLM message / streaming / model types.    |
-| `@argon-agent/core/llm/providers`| Provider registry + `streamLLM`/`completeLLM`. |
-| `@argon-agent/core/tools/types`  | Tool system types.                        |
-| `@argon-agent/core/tools/helpers`| `textResult` / `errorResult` / `defineTool`. |
-| `@argon-agent/core/sandbox/*`    | Optional isolated-vm CodeAct sandbox.     |
+| `@aragon-agent/core`              | Full barrel (engine, LLM, tools, types).  |
+| `@aragon-agent/core/llm/types`    | LLM message / streaming / model types.    |
+| `@aragon-agent/core/llm/providers`| Provider registry + `streamLLM`/`completeLLM`. |
+| `@aragon-agent/core/tools/types`  | Tool system types.                        |
+| `@aragon-agent/core/tools/helpers`| `textResult` / `errorResult` / `defineTool`. |
+| `@aragon-agent/core/sandbox/*`    | Optional isolated-vm CodeAct sandbox.     |
 
 ## Build
 
@@ -82,12 +82,12 @@ prove the built `dist/` can actually be **run** by an external consumer:
 npm run verify:dist   # build dist/, then run examples/consumer-smoke/run.mjs
 ```
 
-`run.mjs` imports this package **by its own name** (`@argon-agent/core`) via
+`run.mjs` imports this package **by its own name** (`@aragon-agent/core`) via
 Node's *package self-referencing*, so Node resolves it through
 `package.json#exports` → `./dist/index.js` — the same `(exports map + NodeNext +
-.js extension)` path that an external project's `npm install @argon-agent/core`
+.js extension)` path that an external project's `npm install @aragon-agent/core`
 hits, **without** placing the package in `node_modules`. It injects an offline
-stub LLM provider, runs one `ArgonAgent.prompt()` turn end-to-end (zero network),
+stub LLM provider, runs one `AragonAgent.prompt()` turn end-to-end (zero network),
 and asserts the `exports` subpaths all resolve at runtime. Success prints
 `[consumer-smoke] OK`.
 
@@ -119,9 +119,9 @@ Notes:
 
 - **`publishConfig.access` is set to `"public"`**, so no `--access public` flag
   is needed — scoped packages would otherwise default to restricted/private.
-- **The publishing account must own the `@argon-agent` npm scope/org** before
+- **The publishing account must own the `@aragon-agent` npm scope/org** before
   the first publish. Even with `access:"public"`, publishing under a scope you
-  do not own fails with 403/404. Create the `@argon-agent` org on npmjs (or
+  do not own fails with 403/404. Create the `@aragon-agent` org on npmjs (or
   switch to a scope your account owns and rename the package accordingly).
 - **`files` is the load-bearing whitelist.** The repo's `.gitignore` ignores
   `dist/`, but npm's `files: ["dist", "CHANGELOG.md"]` takes precedence and
@@ -129,13 +129,13 @@ Notes:
   published tarball will be empty. `npm pack --dry-run --json` should always
   list `dist/index.js`.
 - Repository metadata points to
-  `https://github.com/xdrshjr/ArgonAgent`.
+  `https://github.com/xdrshjr/AragonAgent`.
 
   If the repository moves, use the helper script or update
   `repository` / `homepage` / `bugs` before publishing:
 
   ```bash
-  node scripts/stamp-org.mjs <org>     # or: ARGON_REPO_ORG=<org> node scripts/stamp-org.mjs
+  node scripts/stamp-org.mjs <org>     # or: ARAGON_REPO_ORG=<org> node scripts/stamp-org.mjs
   node scripts/check-publishable.mjs   # exits non-zero if the placeholder remains in package.json
   ```
 

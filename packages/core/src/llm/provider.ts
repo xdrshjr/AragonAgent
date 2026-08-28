@@ -10,6 +10,18 @@ import type {
   ThinkingLevel,
   ToolDefinition,
 } from './types.js';
+/**
+ * A DELIBERATE MODULE CYCLE, and it is safe for one specific reason:
+ * `retry.ts` imports `LLMError` from here and uses it only INSIDE a function
+ * body, while this module uses `parseRetryAfterMs` only inside
+ * `classifyHttpError`. Neither side touches the other's binding during module
+ * evaluation, so whichever loads first the other's top level completes cleanly.
+ *
+ * A future top-level `LLMError` reference in `retry.ts`, or a top-level
+ * `parseRetryAfterMs` call here, WOULD hit the TDZ and throw at import time.
+ * Keep both usages inside functions.
+ */
+import { parseRetryAfterMs } from './retry.js';
 
 // ---------------------------------------------------------------------------
 // LLMRequest
@@ -40,7 +52,29 @@ export interface LLMRequest {
   // -- Optional generation parameters --
 
   temperature?: number;
+
+  /**
+   * The user's explicit output-token cap. `undefined` means AUTO — the adapter
+   * asks `resolveOutputTokens()` for a per-model value instead.
+   *
+   * An explicit value is still CLAMPED DOWN to the model's real ceiling: this is
+   * an ambition, not a promise, and a value the model cannot accept is an HTTP
+   * 400 that ends the turn.
+   */
   maxTokens?: number;
+
+  /**
+   * What the caller knows about this model's limits, if anything.
+   *
+   * Optional and additive: every existing caller compiles unchanged, and an
+   * absent value simply leaves the resolver with the static table. Supplying
+   * `contextWindow` is what enables the `max_tokens + prompt <= context` guard
+   * on OpenAI.
+   */
+  modelLimits?: {
+    maxOutputTokens?: number;
+    contextWindow?: number;
+  };
 
   /** Anthropic extended thinking level. Ignored by non-Anthropic providers. */
   thinkingLevel?: ThinkingLevel;
@@ -111,6 +145,14 @@ export class LLMError extends Error {
     public readonly retryable: boolean,
     public readonly statusCode?: number,
     public readonly raw?: unknown,
+    /**
+     * The wait the SERVER asked for, in ms (llm-api-retry-backoff §4.4).
+     *
+     * A 7th OPTIONAL POSITIONAL FIELD, so every existing construction site
+     * compiles unchanged. Read structurally by `withRetry` — never through
+     * `instanceof LLMError`, for the reason `isRetryableError` records.
+     */
+    public readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = 'LLMError';
@@ -120,11 +162,19 @@ export class LLMError extends Error {
 /**
  * Classify an HTTP status code into an {@link LLMErrorType} and determine
  * whether the request is retryable.
+ *
+ * `headers` is OPTIONAL and additive: when supplied, a server-stated
+ * `Retry-After` (or a provider rate-limit reset header) rides out on
+ * `LLMError.retryAfterMs`, which is the only channel a retry policy has for
+ * honouring it. Adapters that cannot reach the headers — Anthropic's IN-STREAM
+ * `error` event, which arrives after the connection is already open — simply
+ * omit it and fall back to the plain backoff ladder.
  */
 export function classifyHttpError(
   statusCode: number,
   body: string,
   provider: string,
+  headers?: Headers,
 ): LLMError {
   let errorType: LLMErrorType;
   let retryable: boolean;
@@ -144,6 +194,13 @@ export function classifyHttpError(
     case 403:
       errorType = 'auth_error';
       retryable = false;
+      break;
+    // A REQUEST TIMEOUT IS TRANSIENT, and it used to fall into `default` ->
+    // `unknown` / non-retryable. The abort exclusion that makes `timeout` safe to
+    // retry lives in `isRetryableError` (check 1), not here.
+    case 408:
+      errorType = 'timeout';
+      retryable = true;
       break;
     case 429:
       errorType = 'rate_limit';
@@ -165,6 +222,7 @@ export function classifyHttpError(
 
   // Truncate body for the error message to avoid huge payloads
   const truncated = body.length > 300 ? body.slice(0, 300) + '...' : body;
+  const retryAfterMs = parseRetryAfterMs(headers);
   return new LLMError(
     `${provider} API error ${statusCode}: ${truncated}`,
     provider,
@@ -172,6 +230,7 @@ export function classifyHttpError(
     retryable,
     statusCode,
     body,
+    retryAfterMs,
   );
 }
 

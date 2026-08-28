@@ -42,7 +42,7 @@ const { buildManifest, writeManifest } = await import('../manifest.js');
 const { specFromManifestSource, updateAllSkills, updateSkill } = await import('../updater.js');
 const { cleanup, makeTmpDir, runtimeOptions, skillsConfig, writeSkill } = await import('./helpers.js');
 import type { SkillsConfig } from '../../config/schema.js';
-import type { SkillManifestSource } from '@argon-agent/core/skills';
+import type { SkillManifestSource } from '@aragon-agent/core/skills';
 
 const skillsRoot = (): string => join(tmp.root, 'data', 'skills');
 const upstream = (): string => join(tmp.root, 'upstream');
@@ -113,11 +113,11 @@ function writeUpstream(name: string, opts: { version?: string; body?: string; fi
 }
 
 function readManifestOf(name: string): Record<string, unknown> {
-  return JSON.parse(readFileSync(join(skillsRoot(), name, '.argon-skill.json'), 'utf-8'));
+  return JSON.parse(readFileSync(join(skillsRoot(), name, '.aragon-skill.json'), 'utf-8'));
 }
 
 beforeEach(() => {
-  tmp.root = makeTmpDir('argon-update-');
+  tmp.root = makeTmpDir('aragon-update-');
   mkdirSync(skillsRoot(), { recursive: true });
   mkdirSync(join(tmp.root, 'cwd'), { recursive: true });
 });

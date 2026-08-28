@@ -79,6 +79,23 @@ export interface ToolExecutionContext {
   signal?: AbortSignal;
   /** Optional callback for reporting incremental progress. */
   onProgress?: (update: ToolProgressUpdate) => void;
+  /**
+   * WHY the signal fired, set by `ToolExecutor` on THIS object at abort time,
+   * before the tool's own `abort` listener runs.
+   *
+   * The executor already distinguishes the two — its `TIMEOUT_REASON` symbol is
+   * module-private and carried on `controller.signal.reason` — but a tool cannot
+   * read it, because the symbol is not exported and must not be (the runtime
+   * export surface is frozen by `public-api.test.ts`). Publishing the CAUSE
+   * rather than the symbol keeps that surface unchanged while letting a tool
+   * write an honest footer: a command killed by the 180 s ceiling and one the
+   * user interrupted with Esc want different words, and only one of them should
+   * be advised to retry with a background launch.
+   *
+   * A FIELD ON AN EXISTING INTERFACE, so no new exported name appears. A tool
+   * that ignores it behaves exactly as it does today.
+   */
+  abortCause?: 'timeout' | 'external';
 }
 
 // ---------------------------------------------------------------------------

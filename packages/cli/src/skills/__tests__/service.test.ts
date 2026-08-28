@@ -58,10 +58,10 @@ describe('SkillService.discover (§6.2)', () => {
     const cwd = join(tmp.root, 'work');
     writeSkill(join(tmp.root, 'bundled'), 'shared', { description: 'bundled copy' });
     writeSkill(join(tmp.root, 'user'), 'shared', { description: 'user copy' });
-    writeSkill(join(cwd, '.argon', 'skills'), 'shared', { description: 'project copy' });
+    writeSkill(join(cwd, '.aragon', 'skills'), 'shared', { description: 'project copy' });
     writeSkill(join(tmp.root, 'user'), 'solo');
 
-    const service = makeService(cwd, skillsConfig({ trustedProjectDirs: [join(cwd, '.argon', 'skills')] }));
+    const service = makeService(cwd, skillsConfig({ trustedProjectDirs: [join(cwd, '.aragon', 'skills')] }));
     service.discover();
 
     const shared = service.get('shared')!;
@@ -86,21 +86,21 @@ describe('SkillService.discover (§6.2)', () => {
 
   it('holds untrusted project roots back instead of loading them (D13)', () => {
     const cwd = join(tmp.root, 'work');
-    writeSkill(join(cwd, '.argon', 'skills'), 'sneaky');
+    writeSkill(join(cwd, '.aragon', 'skills'), 'sneaky');
     const service = makeService(cwd);
     const result = service.discover();
     expect(service.get('sneaky')).toBeUndefined();
     expect(result.pendingTrust).toHaveLength(1);
-    expect(result.pendingTrust[0]).toContain('.argon');
+    expect(result.pendingTrust[0]).toContain('.aragon');
   });
 
   it('loads a project root once it is trusted', () => {
     const cwd = join(tmp.root, 'work');
-    writeSkill(join(cwd, '.argon', 'skills'), 'blessed');
+    writeSkill(join(cwd, '.aragon', 'skills'), 'blessed');
     const service = makeService(cwd);
     service.discover();
     expect(service.get('blessed')).toBeUndefined();
-    service.trustDir(join(cwd, '.argon', 'skills'));
+    service.trustDir(join(cwd, '.aragon', 'skills'));
     service.discover();
     expect(service.get('blessed')).toBeDefined();
   });
@@ -161,15 +161,15 @@ describe('SkillService.discover (§6.2)', () => {
   it('a cwd change swaps the project root', () => {
     const cwdA = join(tmp.root, 'a');
     const cwdB = join(tmp.root, 'b');
-    writeSkill(join(cwdA, '.argon', 'skills'), 'only-a');
-    writeSkill(join(cwdB, '.argon', 'skills'), 'only-b');
+    writeSkill(join(cwdA, '.aragon', 'skills'), 'only-a');
+    writeSkill(join(cwdB, '.aragon', 'skills'), 'only-b');
 
     let cwd = cwdA;
     const service = new SkillService({
       host: createNodeSkillHost(),
       getCwd: () => cwd,
       config: skillsConfig({
-        trustedProjectDirs: [join(cwdA, '.argon', 'skills'), join(cwdB, '.argon', 'skills')],
+        trustedProjectDirs: [join(cwdA, '.aragon', 'skills'), join(cwdB, '.aragon', 'skills')],
       }),
       runtime: runtimeOptions(),
       approval: recordingGate({ canPrompt: false, approve: false }),
@@ -271,7 +271,7 @@ describe('SkillService.loadBody (Level 2)', () => {
 
   it('excludes SKILL.md itself and dotfiles from the bundled list', () => {
     const dir = writeSkill(join(tmp.root, 'user'), 'x', { files: { 'reference/a.md': 'a' } });
-    writeFileSync(join(dir, '.argon-skill.json'), '{}', 'utf-8');
+    writeFileSync(join(dir, '.aragon-skill.json'), '{}', 'utf-8');
     const service = makeService(tmp.root);
     service.discover();
     expect(service.loadBody('x').files.map((f) => f.path)).toEqual(['reference/a.md']);

@@ -39,9 +39,9 @@ import {
   type SkillManifestSource,
   type SkillScope,
   type StagedFile,
-} from '@argon-agent/core/skills';
-import { CREATE_MAX_FILE_BYTES, CREATE_MAX_FILES } from '@argon-agent/core/skills';
-import { checkStagedPath } from '@argon-agent/core/skills';
+} from '@aragon-agent/core/skills';
+import { CREATE_MAX_FILE_BYTES, CREATE_MAX_FILES } from '@aragon-agent/core/skills';
+import { checkStagedPath } from '@aragon-agent/core/skills';
 import { fetchSource, resolveSource } from './fetch-source.js';
 import { acquireRootLock } from './lock.js';
 import { buildManifest, writeManifest, MANIFEST_FILENAME } from './manifest.js';
@@ -86,7 +86,7 @@ const APPROVAL_UNAVAILABLE =
 /** Where a scope's writable root lives; `null` when the scope cannot be written. */
 export function writableRootFor(scope: SkillScope, cwd: string): string | null {
   if (scope === 'user') return getUserSkillsDir();
-  // `--scope project` ALWAYS means `.argon/skills`. `.claude/skills` is read-only
+  // `--scope project` ALWAYS means `.aragon/skills`. `.claude/skills` is read-only
   // interop (D8) — writing there would pollute another tool's directory.
   if (scope === 'project') {
     return resolveProjectSkillDirs(cwd).find((r) => r.writable)?.dir ?? null;
@@ -251,7 +251,7 @@ export async function installSkill(
   try {
     const fetched = await fetchSource(resolved.spec, stagingDir, {
       allowedHosts: config.allowedHosts,
-      userAgent: `argon-agent-cli/${opts.installer}`,
+      userAgent: `aragon-agent-cli/${opts.installer}`,
     });
 
     // A local directory is used in place, so copy it into staging before doing

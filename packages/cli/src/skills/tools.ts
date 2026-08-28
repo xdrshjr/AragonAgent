@@ -19,7 +19,7 @@ import {
   errorResult,
   textResult,
   type AgentTool,
-} from '@argon-agent/core';
+} from '@aragon-agent/core';
 import { createSkill, installSkill, type Initiator, type InstallResult } from './installer.js';
 import type { SkillService } from './service.js';
 

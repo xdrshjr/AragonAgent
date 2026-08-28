@@ -24,12 +24,28 @@ function keyRows(times: string): [string, string][] {
     ['Enter', 'Submit (idle) / queue steering (running); re-pins to the newest output'],
     ['Alt+Enter / Shift+Enter', 'Insert newline'],
     ['Esc', 'Abort run / close overlay'],
+    // BOTH KEYS ARE LISTED HERE, and this row is why (shift-tab-mode-toggle-
+    // still-dead-on-windows, review R-7). The hint row above the composer is the
+    // other place the fallback is named, and it has two off-switches - a short
+    // terminal (`showHint`) and `hints: false`. A key that only exists behind
+    // either of them is a key the affected user never learns about, which is the
+    // one-shot notice's failure repeated with a different switch.
+    ['Shift+Tab / Ctrl+P', 'Toggle plan mode (same as /plan)'],
     [`Ctrl+C ${times}2`, 'Exit'],
     ['Ctrl+L', 'Redraw the frame'],
-    ['Ctrl+T', 'Toggle thinking blocks'],
+    ['Ctrl+T', 'Show/hide thinking (off by default)'],
     ['PgUp / PgDn', 'Scroll a page (transcript, or this overlay)'],
     ['Shift+Up / Shift+Down', 'Scroll the transcript a line (full-screen mode)'],
+    ['Wheel', 'Scroll the transcript (or the open overlay)'],
+    ['Shift+Wheel', 'Scroll the transcript a page'],
+    // Drag-select is the one affordance here a user cannot discover by pressing
+    // a key, so it has to be named somewhere they can look it up. The one-shot
+    // startup notice is the other place, and it scrolls away.
+    ['Drag (left button)', 'Select text on screen; releasing copies it'],
     ['Up / Down', 'Prompt history (empty input)'],
+    // Pasting is the one affordance here with no key of its own, so the only
+    // place a user can learn what happened to their 218 lines is this row.
+    ['Paste', 'Inserted as-is up to 6 lines; larger becomes [Pasted text #N] (--no-paste)'],
   ];
 }
 
@@ -37,15 +53,24 @@ const COMMANDS: [string, string][] = [
   ['/help', 'Show this help'],
   ['/model', 'Open the model picker'],
   ['/settings', 'Open the settings screen'],
+  ['/plan [on|off|status]', 'Toggle plan mode (same as Shift+Tab)'],
   ['/theme <name>', 'auto | warm | cool | light'],
   ['/thinking <level>', 'Set thinking level'],
+  ['/max-tokens [n|auto]', 'Output token cap; no argument reports the effective one'],
+  ['/team [on|off|max n]', 'Team subagents: status, switch, fan-out width'],
+  ['/fast [on|off|model|review]', 'Fast model tier: status, switch, model, review cadence'],
+  [
+    '/todo [on|off|panel|follow|clear|continue]',
+    'Todo planning: status, switches, the rail, follow-through',
+  ],
   ['/tools', 'List active tools'],
-  ['/clear', 'Clear the visible transcript'],
+  ['/clear', 'Clear the visible transcript and the todo panel'],
   ['/reset', 'New conversation'],
   ['/cwd [dir]', 'Show or change the tool working directory'],
   ['/save [file]', 'Save the session to JSON'],
   ['/resume [file]', 'Load a saved session'],
-  ['/copy', 'Copy the last answer to the clipboard'],
+  ['/copy', 'Copy the last answer to the clipboard (OSC 52, so it works over ssh)'],
+  ['/mouse [on|off]', 'Release the mouse to your terminal, or take it back'],
   ['/exit', 'Exit'],
 ];
 
@@ -59,6 +84,40 @@ const SKILL_ROWS: [string, string][] = [
   ['/skills usage [--reset]', 'Show or delete the local skill use counters'],
   ['/<skill-name> [args]', 'Run a skill directly ($ARGUMENTS / $1..$9)'],
   ['skill / skill_install', 'Tools the model uses to load and install skills'],
+];
+
+const PLAN_ROWS: [string, string][] = [
+  ['Shift+Tab / /plan', 'Switch between BUILD (do it now) and PLAN (research first)'],
+  // A ROW OF ITS OWN, not a third name on the line above: the reader who needs
+  // this one is the reader whose `Shift+Tab` does nothing, and what they need is
+  // the reason, not another synonym. Listing the key in both places instead just
+  // says it twice and explains it nowhere.
+  ['Ctrl+P', 'The same toggle, for Windows consoles that deliver Shift+Tab as a plain Tab'],
+  ['In PLAN mode', 'write_file, edit_file, bash, skill_install and skill_create are refused'],
+  ['bash', 'Refused in full, including git status - use read_file / glob / grep'],
+  ['ask_user', 'The agent asks 1-5 multiple-choice questions; Enter takes the recommendation'],
+  ['submit_plan', 'The agent submits a plan: a approve, r revise, Esc dismiss'],
+  ['--plan / --no-plan', 'Start a session in a given mode (also ARAGON_PLAN=1)'],
+];
+
+const TEAM_ROWS: [string, string][] = [
+  ['task', 'The tool the agent uses to run 2-5 subagents in parallel'],
+  ['/team', 'Status: on/off, max subagents, and the live roster'],
+  ['/team on | off', 'Switch team mode for this session (and save it)'],
+  ['/team max <n>', 'Fan-out width, 1-10 (5 by default)'],
+  ['--team / --no-team', 'Start a session with team mode on or off (also ARAGON_TEAM=0)'],
+  ['team_send / team_wait', 'How subagents message each other; 6 each, one every 15s'],
+];
+
+const FAST_ROWS: [string, string][] = [
+  ['/fast', 'Status: on/off, the model, the cadence, and this session\'s totals'],
+  ['/fast on | off', 'Switch the tier for this session (and save it)'],
+  ['/fast model <id>', 'Set the fast model; accepts provider:model'],
+  ['/fast same', 'Run the fast tier on the main model'],
+  ['/fast review <n> | off', 'Turns between automatic reviews, or turn them off'],
+  ['/fast delegate on | off', 'Allow model:"fast" on task subagents'],
+  ['--fast / --no-fast', 'Start a session with the tier on or off (also ARAGON_FAST=1)'],
+  ['<fast_review>', 'An automated second opinion from the fast model - advice, not the user'],
 ];
 
 /** Build the overlay's rows. Exported so `app.test.tsx` can count them. */
@@ -82,6 +141,12 @@ export function helpRows(theme: Theme, caps: TermCapabilities): React.ReactEleme
   for (const [k, d] of keyRows(glyphs.times)) rows.push(pair(k, d));
   rows.push(section('Slash commands'));
   for (const [c, d] of COMMANDS) rows.push(pair(c, d));
+  rows.push(section('Plan mode'));
+  for (const [c, d] of PLAN_ROWS) rows.push(pair(c, d));
+  rows.push(section('Team subagents'));
+  for (const [c, d] of TEAM_ROWS) rows.push(pair(c, d));
+  rows.push(section('Fast model tier'));
+  for (const [c, d] of FAST_ROWS) rows.push(pair(c, d));
   rows.push(section('Skills'));
   for (const [c, d] of SKILL_ROWS) rows.push(pair(c, d));
   return rows;

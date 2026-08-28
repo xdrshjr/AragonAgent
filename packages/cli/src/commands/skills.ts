@@ -12,8 +12,8 @@ import {
   type SkillRecord,
   type SkillScope,
   type ToolPolicyDecision,
-} from '@argon-agent/core';
-import { resolveDeclaredTool } from '@argon-agent/core/skills';
+} from '@aragon-agent/core';
+import { resolveDeclaredTool } from '@aragon-agent/core/skills';
 import { installSkill, removeSkill, renderSkillMarkdown } from '../skills/installer.js';
 import { writableRootFor } from '../skills/installer.js';
 import { checkManifest } from '../skills/manifest.js';

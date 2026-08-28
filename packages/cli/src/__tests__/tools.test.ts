@@ -2,8 +2,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentTool, ToolExecutionContext, ToolResult } from '@argon-agent/core';
-import { createBuiltinTools, HOST_TOOL_NAMES, SKILL_TOOL_FLOOR } from '../tools/index.js';
+import type { AgentTool, ToolExecutionContext, ToolResult } from '@aragon-agent/core';
+import {
+  createBuiltinTools,
+  HOST_TOOL_NAMES,
+  PLAN_MODE_BLOCKED_TOOLS,
+  SKILL_TOOL_FLOOR,
+} from '../tools/index.js';
 
 let dir: string;
 let tools: Record<string, AgentTool>;
@@ -14,7 +19,7 @@ function text(result: ToolResult): string {
 }
 
 beforeAll(() => {
-  dir = mkdtempSync(join(tmpdir(), 'argon-tools-'));
+  dir = mkdtempSync(join(tmpdir(), 'aragon-tools-'));
   const list = createBuiltinTools({ getCwd: () => dir });
   tools = Object.fromEntries(list.map((t) => [t.name, t]));
 });
@@ -145,9 +150,23 @@ describe('bash', () => {
 // ---------------------------------------------------------------------------
 
 describe('SKILL_TOOL_FLOOR / HOST_TOOL_NAMES (D-G6 / D-G7 / P1-8)', () => {
-  it('the floor is read-only work plus the two skill lookups, and nothing else', () => {
-    // Anything that CHANGES the world must stay outside the floor, or the
-    // ceiling controls nothing worth controlling.
+  it('the floor is read-only work, the two skill lookups, and the two human-input tools - everything that cannot write to disk', () => {
+    // Anything that writes to DISK must stay outside the floor, or the ceiling
+    // controls nothing worth controlling.
+    //
+    // The wording moved from "read-only work plus the two skill lookups, and
+    // nothing else" when plan mode landed, because `submit_plan` DOES mutate
+    // something: the session mode. It cannot touch the filesystem, which is the
+    // property the ceiling is about, so it belongs in the floor — but leaving
+    // the old sentence in place would have made the prose false while the test
+    // stayed green (P2-5).
+    //
+    // `task` joins the floor for the same shape of reason `submit_plan` did: it
+    // cannot itself touch the filesystem. Every child mutation it leads to
+    // passes through this same wrapper stack ONE LEVEL DOWN, with the child
+    // inheriting `agentMode` through the same closure — so plan mode's
+    // read-only guarantee holds by construction rather than by blocking
+    // delegation, which would forfeit parallel research (D-5 / R-13).
     expect([...SKILL_TOOL_FLOOR]).toEqual([
       'read_file',
       'list_dir',
@@ -155,8 +174,28 @@ describe('SKILL_TOOL_FLOOR / HOST_TOOL_NAMES (D-G6 / D-G7 / P1-8)', () => {
       'grep',
       'skill',
       'skill_find',
+      'ask_user',
+      'submit_plan',
+      'task',
+      // `todo_write` joins the floor rather than the blocked set (D-12): it is a
+      // display, it writes no file and runs no shell, and a skill's
+      // `allowed-tools` omitting it would make the planning UI unreachable
+      // inside that skill's frame.
+      'todo_write',
+      // `bash_output` joins the floor rather than the blocked set (D-12): it
+      // reads a buffer, it cannot write to disk or run a shell, and blocking it
+      // in plan mode would let the agent start a service it then could not read.
+      'bash_output',
     ]);
-    for (const mutating of ['write_file', 'edit_file', 'bash', 'skill_install', 'skill_create']) {
+    for (const mutating of [
+      'write_file',
+      'edit_file',
+      'bash',
+      'skill_install',
+      'skill_create',
+      // `bash_kill` terminates a process, which is a mutation of the world.
+      'bash_kill',
+    ]) {
       expect(SKILL_TOOL_FLOOR).not.toContain(mutating);
     }
   });
@@ -165,19 +204,98 @@ describe('SKILL_TOOL_FLOOR / HOST_TOOL_NAMES (D-G6 / D-G7 / P1-8)', () => {
     // Two lists of tool names is one more than the system can keep honest by
     // itself. Drift here means doctor silently reports a valid declaration as
     // NOT ENFORCEABLE, or misses one that really is broken.
-    const skillTools = ['skill', 'skill_find', 'skill_install', 'skill_create'].map((name) => ({
+    const stub = (name: string): AgentTool => ({
       name,
       label: name,
       description: name,
       parameters: { type: 'object', properties: {} },
       execute: async () => ({ content: [] }),
-    }));
-    const produced = createBuiltinTools({ getCwd: () => dir, skillTools }).map((t) => t.name);
+    });
+    const skillTools = ['skill', 'skill_find', 'skill_install', 'skill_create'].map(stub);
+    const planTools = ['ask_user', 'submit_plan'].map(stub);
+    // THIS INVOCATION IS WHY `task` HAS TO ARRIVE THROUGH A FACTORY OPTION
+    // (D-15 / P0-1). This assertion compares `HOST_TOOL_NAMES` against what the
+    // factory PRODUCES, so appending `task` in `AgentController` after the
+    // factory returned would turn this red with a message about two lists of
+    // names that says nothing about team mode.
+    const teamTools = [stub('task')];
+    // Same argument, one feature later (todo-plan-execution C-2): `todo_write`
+    // reaches the array through a factory option precisely because THIS
+    // assertion compares `HOST_TOOL_NAMES` against what the factory produces.
+    const todoTools = [stub('todo_write')];
+    // Same argument, one feature later again (background-service-supervision
+    // P0-2): `bash_output` / `bash_kill` reach the array through a factory
+    // option precisely because THIS assertion compares `HOST_TOOL_NAMES` against
+    // what the factory produces.
+    const procTools = ['bash_output', 'bash_kill'].map(stub);
+    const produced = createBuiltinTools({
+      getCwd: () => dir,
+      skillTools,
+      planTools,
+      todoTools,
+      procTools,
+      teamTools,
+    }).map((t) => t.name);
     expect([...HOST_TOOL_NAMES].sort()).toEqual(produced.sort());
+  });
+
+  it('team_send / team_wait are deliberately NOT host tool names (P2-5)', () => {
+    // `HOST_TOOL_NAMES` answers "can a skill's `allowed-tools` declaration ever
+    // take effect?". These two are never registered on a lead, so a skill naming
+    // them genuinely IS unenforceable and `skills doctor` reporting it as such
+    // is correct. They reach children through `policyExempt`, which is a
+    // different mechanism answering a different question.
+    expect(HOST_TOOL_NAMES).not.toContain('team_send');
+    expect(HOST_TOOL_NAMES).not.toContain('team_wait');
+  });
+
+  it('policyExempt skips the ceiling wrapper only, and only for the named tools', async () => {
+    const probe: AgentTool = {
+      name: 'team_send',
+      label: 'probe',
+      description: 'probe',
+      parameters: { type: 'object', properties: {} },
+      execute: async () => ({ content: [{ type: 'text', text: 'sent' }] }),
+    };
+    const decision = {
+      mode: 'enforce' as const,
+      // A ceiling that permits NOTHING the child declared: without the
+      // exemption the comm tools would be refused and the channel would dead-end
+      // (§3.11), which is the same dead end `SKILL_TOOL_FLOOR` exists to
+      // prevent one level up.
+      allowed: new Set(['read_file']),
+      sources: [{ name: 's', declared: ['read_file'], granted: ['read_file'] }],
+      sourceNames: ['s'],
+      ignored: [],
+    };
+    const built = Object.fromEntries(
+      createBuiltinTools({
+        getCwd: () => dir,
+        teamTools: [probe],
+        toolPolicy: () => decision,
+        policyExempt: new Set(['team_send']),
+      }).map((t) => [t.name, t]),
+    );
+    expect(text(await built.team_send!.execute('1', {}, ctx))).toContain('sent');
+    // ...and everything else is still under the ceiling.
+    expect((await built.bash!.execute('2', { command: 'echo hi' }, ctx)).isError).toBe(true);
   });
 
   it('every floor entry is a real host tool', () => {
     for (const name of SKILL_TOOL_FLOOR) expect(HOST_TOOL_NAMES).toContain(name);
+  });
+
+  it('I-P6: the floor and the blocked set PARTITION the host tool names', () => {
+    // The two constants live in one file precisely so this can be asserted. A
+    // tool that fell out of both would be silently unreachable in plan mode
+    // while a skill ceiling was active; one that fell into both is a
+    // contradiction nobody would notice from either definition alone.
+    const floor = new Set<string>(SKILL_TOOL_FLOOR);
+    const overlap = [...PLAN_MODE_BLOCKED_TOOLS].filter((n) => floor.has(n));
+    expect(overlap).toEqual([]);
+    expect([...HOST_TOOL_NAMES].sort()).toEqual(
+      [...floor, ...PLAN_MODE_BLOCKED_TOOLS].sort(),
+    );
   });
 });
 

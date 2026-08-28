@@ -14,7 +14,7 @@
 
 import React from 'react';
 import SelectInput from 'ink-select-input';
-import type { ModelRegistry } from '@argon-agent/core';
+import type { ModelRegistry } from '@aragon-agent/core';
 import { ADAPTER_PROVIDERS } from '../../config/schema.js';
 import type { Theme } from '../theme.js';
 import type { TermCapabilities } from '../capabilities.js';

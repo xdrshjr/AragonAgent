@@ -14,11 +14,56 @@ import {
   errorResult,
   textResult,
   type AgentTool,
-} from '@argon-agent/core';
+} from '@aragon-agent/core';
 import { renderUnifiedDiff } from './diff.js';
+import { PATCH_LIMITS, buildPatch, type FilePatch } from './patch.js';
+// TYPE-ONLY, so this module keeps no runtime edge into `proc/`: the field below
+// is a PORT, and which implementation fills it is the controller's business.
+import type { ProcSupervisorPort } from '../proc/types.js';
 
 export interface ToolDeps {
   getCwd: () => string;
+  /**
+   * Hand a structured patch to the UI on the CLI-local side channel
+   * (agent-activity-presentation §3.3.5).
+   *
+   * PRE-BOUND TO ITS OWNER by whoever supplies it, so this module never learns
+   * what an owner is. OPTIONAL, and omitting it leaves both tools byte-identical
+   * to the pre-feature build — including the extra `write_file` stat/read, which
+   * is skipped entirely when there is nobody to record for.
+   */
+  recordChange?: (toolCallId: string, patch: FilePatch) => void;
+  /**
+   * Hand a raw output chunk to the UI on the CLI-local side channel
+   * (agent-activity-presentation-live §3.1).
+   *
+   * PRE-BOUND TO ITS OWNER, exactly like `recordChange` above, so this module
+   * never learns what an owner is. OPTIONAL: omitting it leaves `bash`
+   * byte-identical to the pre-feature build -- not one extra allocation, not one
+   * extra call (AC-31).
+   *
+   * ONLY `bash` CALLS IT (D-32). Every other builtin is bounded local I/O that
+   * settles in milliseconds, so a progress channel for them would be machinery
+   * with no observer. The channel is keyed by tool-call id rather than by tool
+   * name, so a future long-running tool costs one call site.
+   */
+  recordOutput?: (toolCallId: string, chunk: string) => void;
+  /**
+   * The process supervisor, when background launches are on for this session
+   * (background-service-supervision §3.5).
+   *
+   * THE TWO-INTERFACE RULE ABOVE APPLIES VERBATIM, and this package has already
+   * made that mistake twice (`recordChange` in round 1, `recordOutput` in round
+   * 2): adding the field HERE alone type-checks and forwards nothing, so `bash`
+   * never sees a supervisor, every long-running command runs in the foreground
+   * exactly as it does today, and NOTHING ANYWHERE ERRORS. It must be added here
+   * AND forwarded in `tools/index.ts`.
+   *
+   * OPTIONAL: omitting it leaves `bash` byte-identical to the pre-feature build —
+   * no `background` property in its schema, no supervisor call, and the
+   * pre-feature description string (I-2).
+   */
+  procs?: ProcSupervisorPort;
 }
 
 function resolvePath(cwd: string, p: string): string {
@@ -96,13 +141,19 @@ export function makeWriteFile(deps: ToolDeps): AgentTool {
       },
       required: ['path', 'content'],
     },
-    async execute(_id, rawParams) {
+    async execute(id, rawParams) {
       const params = rawParams as { path: string; content: string };
       const target = resolvePath(deps.getCwd(), params.path);
       try {
+        // BEFORE the write, and only when somebody is listening. `readOldSide`
+        // swallows every failure itself, so a presentation feature can never
+        // prevent or delay the operation it presents (D-14 / R-6).
+        const oldSide = deps.recordChange ? await readOldSide(target) : null;
         await fs.mkdir(dirname(target), { recursive: true });
         await fs.writeFile(target, params.content, 'utf-8');
+        if (oldSide) recordFileChange(deps, id, oldSide, params.content, params.path);
         const bytes = Buffer.byteLength(params.content, 'utf-8');
+        // BYTE-IDENTICAL model-facing text: the diff costs zero extra tokens.
         return textResult(`Wrote ${bytes} bytes to ${params.path}`);
       } catch (err) {
         return errorResult(readError(err, params.path));
@@ -136,7 +187,7 @@ export function makeEditFile(deps: ToolDeps): AgentTool {
       },
       required: ['path', 'old_string', 'new_string'],
     },
-    async execute(_id, rawParams) {
+    async execute(id, rawParams) {
       const params = rawParams as {
         path: string;
         old_string: string;
@@ -165,6 +216,10 @@ export function makeEditFile(deps: ToolDeps): AgentTool {
           ? original.split(params.old_string).join(params.new_string)
           : original.replace(params.old_string, () => params.new_string);
         await fs.writeFile(target, updated, 'utf-8');
+        // The same sentence, from the same data: the card's structured patch and
+        // the model's text are built from `original` / `updated` by one algorithm
+        // at two context widths (D-10 / D-20).
+        recordFileChange(deps, id, { text: original }, updated, params.path);
         const diff = renderUnifiedDiff(original, updated, { path: params.path });
         return textResult(`Applied edit to ${params.path}:\n${diff}`);
       } catch (err) {
@@ -219,6 +274,65 @@ export function makeListDir(deps: ToolDeps): AgentTool {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** The old half of a diff, and why it is missing when it is. */
+interface OldSide {
+  text: string | null;
+  degraded?: FilePatch['degraded'];
+}
+
+/**
+ * Best-effort read of the file `write_file` is about to overwrite.
+ *
+ * NEVER THROWS AND NEVER REPORTS AN ERROR TO THE MODEL. Every outcome is a
+ * `FilePatch` the card can render honestly:
+ *
+ *   ENOENT              -> null, no reason      -> a `create` diff
+ *   size > readMaxBytes -> null, `too-large`    -> an `update` we declined to read
+ *   binary sniff fails  -> null, `binary`       -> ditto
+ *   any other throw     -> null, `unreadable`   -> ditto
+ */
+async function readOldSide(target: string): Promise<OldSide> {
+  try {
+    const stat = await fs.stat(target);
+    if (stat.size > PATCH_LIMITS.readMaxBytes) return { text: null, degraded: 'too-large' };
+    const buf = await fs.readFile(target);
+    if (looksBinary(buf)) return { text: null, degraded: 'binary' };
+    return { text: buf.toString('utf-8') };
+  } catch (err) {
+    if ((err as { code?: string }).code === 'ENOENT') return { text: null };
+    return { text: null, degraded: 'unreadable' };
+  }
+}
+
+/**
+ * Build and hand over the patch, if anyone asked for one.
+ *
+ * WRAPPED, because `recordChange` is a caller-supplied closure and a display
+ * callback must not be able to fail a write that has already happened.
+ * `buildPatch` itself is total.
+ */
+function recordFileChange(
+  deps: ToolDeps,
+  toolCallId: string,
+  oldSide: OldSide,
+  newText: string,
+  path: string,
+): void {
+  if (!deps.recordChange) return;
+  try {
+    deps.recordChange(
+      toolCallId,
+      buildPatch(oldSide.text, newText, {
+        path,
+        context: PATCH_LIMITS.context,
+        ...(oldSide.degraded ? { degraded: oldSide.degraded } : {}),
+      }),
+    );
+  } catch {
+    // Presentation only. The file is already on disk.
+  }
+}
 
 function countOccurrences(haystack: string, needle: string): number {
   if (needle.length === 0) return 0;

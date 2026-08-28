@@ -1,13 +1,13 @@
 /**
- * @argon-agent/core — consumer-smoke (D1 + D2).
+ * @aragon-agent/core — consumer-smoke (D1 + D2).
  *
  * Proves the BUILT ARTIFACT (`dist/`) can be run by an external consumer the way
- * `npm install @argon-agent/core` would resolve it — without ever placing the
+ * `npm install @aragon-agent/core` would resolve it — without ever placing the
  * package in `node_modules`.
  *
  * Mechanism: Node "package self-referencing". Code inside a package may import
  * the package by its own `name`; Node resolves that through the package's
- * `exports` map. So `import('@argon-agent/core')` from this file resolves to
+ * `exports` map. So `import('@aragon-agent/core')` from this file resolves to
  * `exports["."]` → `./dist/index.js`, exercising the same
  * (exports map + NodeNext + `.js` extension + end-to-end run) main link an
  * external consumer hits after `npm install`.
@@ -37,7 +37,7 @@ import assert from 'node:assert/strict';
 // ---------------------------------------------------------------------------
 
 import {
-  ArgonAgent,
+  AragonAgent,
   Agent,
   defineTool,
   textResult,
@@ -46,7 +46,7 @@ import {
   setProviderRegistry,
   initProviders,
   THINKING_BUDGET,
-} from '@argon-agent/core';
+} from '@aragon-agent/core';
 
 // Hard timeout guard (R2): if the agent loop fails to converge, fail fast with a
 // non-zero exit instead of hanging the scheduler / CI.
@@ -107,7 +107,7 @@ async function main() {
   // -------------------------------------------------------------------------
   const registry = new ProviderRegistry();
   registry.register(stubProvider);
-  // RV-6: setProviderRegistry is NOT required for the run — ArgonAgent uses
+  // RV-6: setProviderRegistry is NOT required for the run — AragonAgent uses
   // `config.providerRegistry` (passed below), not the global singleton. This call
   // exists only to verify the `setProviderRegistry` export is runtime-resolvable.
   setProviderRegistry(registry);
@@ -125,7 +125,7 @@ async function main() {
     },
   });
 
-  const agent = new ArgonAgent({
+  const agent = new AragonAgent({
     systemPrompt: 'You are a test agent.',
     model: { providerId: 'anthropic', modelId: 'stub-model' },
     tools: [echo],
@@ -144,7 +144,7 @@ async function main() {
   // runLoopWithLifecycle swallows loop errors and ALWAYS emits `agent_end` in
   // its finally block, see agent.ts:374-391 and §4.1.1 of the spec).
   // -------------------------------------------------------------------------
-  assert.equal(ArgonAgent, Agent, 'ArgonAgent must alias Agent');
+  assert.equal(AragonAgent, Agent, 'AragonAgent must alias Agent');
   assert.ok(agent.state.tools.some((t) => t.name === 'echo'), 'echo tool registered');
   assert.ok(THINKING_BUDGET !== undefined, 'THINKING_BUDGET runtime export present');
   assert.equal(typeof initProviders, 'function', 'initProviders runtime export present');
@@ -175,22 +175,22 @@ async function main() {
   // package.json#exports (other than ".") must dynamically import and expose its
   // key symbols. Deleting/renaming any `exports` key breaks these imports (AC3).
   // -------------------------------------------------------------------------
-  const llmTypes = await import('@argon-agent/core/llm/types');
+  const llmTypes = await import('@aragon-agent/core/llm/types');
   // RV-5: llm/types is NOT a pure type module — it exports the runtime constant
   // THINKING_BUDGET (types.ts:99), so its compiled `.js` is non-empty.
   assert.equal(typeof llmTypes.THINKING_BUDGET, 'object', 'llm/types exposes THINKING_BUDGET at runtime');
 
-  const helpers = await import('@argon-agent/core/tools/helpers');
+  const helpers = await import('@aragon-agent/core/tools/helpers');
   assert.equal(typeof helpers.textResult, 'function', 'tools/helpers.textResult resolves');
   assert.equal(typeof helpers.defineTool, 'function', 'tools/helpers.defineTool resolves');
 
-  const providers = await import('@argon-agent/core/llm/providers');
+  const providers = await import('@aragon-agent/core/llm/providers');
   assert.equal(typeof providers.initProviders, 'function', 'llm/providers.initProviders resolves');
   assert.equal(typeof providers.ProviderRegistry, 'function', 'llm/providers.ProviderRegistry resolves');
 
   // tools/types is (near) pure `export type` — its compiled `.js` may be empty.
   // The contract here is just "import() does not throw" → resolution succeeds.
-  await import('@argon-agent/core/tools/types');
+  await import('@aragon-agent/core/tools/types');
 
   // sandbox/* is on-demand + backed by optional `isolated-vm`; per R3 we do NOT
   // statically import it. The barrel must not pull it in — that invariant is

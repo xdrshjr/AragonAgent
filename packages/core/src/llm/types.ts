@@ -7,6 +7,11 @@
  * structures.
  */
 
+// TYPE-ONLY, and it must stay that way: `provider.ts` imports from this module,
+// so a value import here would close a runtime cycle. `import type` is erased
+// entirely at compile time, which is what keeps the pair legal.
+import type { LLMErrorType } from './provider.js';
+
 // ---------------------------------------------------------------------------
 // Content parts (for multimodal user messages)
 // ---------------------------------------------------------------------------
@@ -153,6 +158,57 @@ export interface ErrorEvent {
   error: Error;
 }
 
+// ---------------------------------------------------------------------------
+// Retry events (llm-api-retry-backoff §4.7)
+//
+// Produced ONLY by `withRetry` (`llm/retry.ts`), never by an adapter. Every
+// existing consumer is forward-compatible with them by construction:
+// `consumeStream` ignores anything that is not `done`/`error`, `agent-loop`
+// forwards everything and reacts only to `done`/`error`, and the CLI's
+// `reduceStreamEvent` has `default: return []`.
+// ---------------------------------------------------------------------------
+
+/** A retryable failure occurred; the next attempt fires at `resumeAt`. */
+export interface RetryScheduledEvent {
+  type: 'retry_scheduled';
+  /** 1-based retry index. */
+  attempt: number;
+  maxRetries: number;
+  delayMs: number;
+  /**
+   * Epoch ms the next attempt fires. THE UI TICKS AGAINST THIS, not `delayMs`.
+   *
+   * An absolute instant rather than a stream of countdown ticks is a deliberate
+   * boundary: a 1 Hz tick from core would be 300 events per exhausted retry
+   * sequence, would set core's render cadence for every embedder, and would
+   * make the idle watchdog un-fireable during a backoff for reasons unrelated to
+   * the explicit pause in `Agent`. The consumer owns its own clock.
+   */
+  resumeAt: number;
+  errorType: LLMErrorType;
+  /** Already truncated by `classifyHttpError`. */
+  message: string;
+  /** Present only when the provider stated one. */
+  retryAfterMs?: number;
+}
+
+/** The wait is over; attempt `attempt` is going out now. */
+export interface RetryAttemptEvent {
+  type: 'retry_attempt';
+  attempt: number;
+  maxRetries: number;
+}
+
+/**
+ * Content already forwarded this turn is being discarded and replayed.
+ * Emitted ONLY when the failed attempt had reached its commit point.
+ */
+export interface StreamRestartEvent {
+  type: 'stream_restart';
+  attempt: number;
+  discardedToolCallIds: string[];
+}
+
 export type StreamEvent =
   | TextDeltaEvent
   | ThinkingStartEvent
@@ -161,7 +217,10 @@ export type StreamEvent =
   | ToolCallDeltaEvent
   | ToolCallEndEvent
   | DoneEvent
-  | ErrorEvent;
+  | ErrorEvent
+  | RetryScheduledEvent
+  | RetryAttemptEvent
+  | StreamRestartEvent;
 
 // ---------------------------------------------------------------------------
 // Tool definition (schema sent to the LLM)

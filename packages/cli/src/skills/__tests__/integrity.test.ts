@@ -99,7 +99,7 @@ function installSkillFixture(name: string, opts: { entryBytes?: Buffer } = {}): 
 }
 
 beforeEach(() => {
-  tmp.root = makeTmpDir('argon-integrity-');
+  tmp.root = makeTmpDir('aragon-integrity-');
   mkdirSync(skillsRoot(), { recursive: true });
   mkdirSync(join(tmp.root, 'cwd'), { recursive: true });
 });
@@ -255,7 +255,9 @@ describe('AC-A10 — the three modes', () => {
 
     const { createSkillTools } = await import('../tools.js');
     const skillTool = createSkillTools(service).find((t) => t.name === 'skill')!;
-    const result = await skillTool.execute('call-1', { name: 'pdf-forms' });
+    // `ToolExecutionContext` is a REQUIRED third parameter; `{}` is the honest
+    // empty context (W3).
+    const result = await skillTool.execute('call-1', { name: 'pdf-forms' }, {});
     const text = result.content.map((c) => (c.type === 'text' ? c.text ?? '' : '')).join('');
     expect(result.isError).toBe(true);
     expect(text).toContain('SKILL_INTEGRITY_MISMATCH');
@@ -278,7 +280,7 @@ describe('AC-A10 — the three modes', () => {
 
     const { createSkillTools } = await import('../tools.js');
     const findTool = createSkillTools(service).find((t) => t.name === 'skill_find')!;
-    const result = await findTool.execute('call-1', { query: 'pdf' });
+    const result = await findTool.execute('call-1', { query: 'pdf' }, {});
     const text = result.content.map((c) => (c.type === 'text' ? c.text ?? '' : '')).join('');
     expect(text).not.toContain('- pdf-forms');
   });

@@ -2,7 +2,7 @@
  * Per-root advisory install lock (spec §7).
  *
  * ══════════════════════════════════════════════════════════════════════════
- * WHAT THIS PREVENTS: two argon processes installing at once can DELETE a
+ * WHAT THIS PREVENTS: two aragon processes installing at once can DELETE a
  * skill, and the path that does it reports success.
  * ══════════════════════════════════════════════════════════════════════════
  *
@@ -40,7 +40,7 @@ import process from 'node:process';
  * and already skips dotfiles, so the lock is invisible to the scanner twice
  * over — asserted by `lock.test.ts` rather than left to reasoning (AC-A16).
  */
-export const LOCK_FILENAME = '.argon-skills.lock';
+export const LOCK_FILENAME = '.aragon-skills.lock';
 
 /** A lock older than this is presumed abandoned. */
 export const LOCK_TTL_MS = 60_000;
@@ -217,7 +217,7 @@ function lockBusyError(holder: LockPayload | null): SkillLockError {
     ? `pid ${holder.pid} since ${new Date(holder.startedAt).toISOString()}`
     : 'an unreadable lock file that could not be cleared';
   return new SkillLockError(
-    `another argon process is installing skills (lock held by ${who}); retry in a moment`,
+    `another aragon process is installing skills (lock held by ${who}); retry in a moment`,
   );
 }
 

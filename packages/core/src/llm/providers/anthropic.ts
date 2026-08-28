@@ -29,6 +29,12 @@ import type {
 import { THINKING_BUDGET } from '../types.js';
 import type { LLMProvider, LLMRequest } from '../provider.js';
 import { LLMError, classifyHttpError, wrapFetchError } from '../provider.js';
+import {
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  resolveOutputTokens,
+  staticCeilingFor,
+} from '../output-limits.js';
+import { sendWithOutputLimitRecovery } from '../output-limit-recovery.js';
 import { parseSSEStream } from '../stream-utils.js';
 import { consumeStream } from '../stream-utils.js';
 
@@ -38,7 +44,6 @@ import { consumeStream } from '../stream-utils.js';
 
 const DEFAULT_BASE_URL = 'https://api.anthropic.com';
 const ANTHROPIC_VERSION = '2023-06-01';
-const DEFAULT_MAX_TOKENS = 64_000;
 
 // ---------------------------------------------------------------------------
 // Anthropic provider
@@ -60,25 +65,41 @@ export class AnthropicProvider implements LLMProvider {
     const body = buildRequestBody(request);
 
     let response: Response;
+    let errorBody = '';
     try {
-      response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': request.apiKey,
-          'anthropic-version': ANTHROPIC_VERSION,
-        },
-        body: JSON.stringify(body),
-        signal: request.signal,
+      const attempt = await sendWithOutputLimitRecovery({
+        providerId: this.id,
+        modelId: request.model,
+        body,
+        tokenField: 'max_tokens',
+        send: (payload) =>
+          fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': request.apiKey,
+              'anthropic-version': ANTHROPIC_VERSION,
+            },
+            body: JSON.stringify(payload),
+            signal: request.signal,
+          }),
       });
+      response = attempt.response;
+      errorBody = attempt.bodyText;
     } catch (err) {
       yield { type: 'error', error: wrapFetchError(err, this.id) };
       return;
     }
 
     if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      yield { type: 'error', error: classifyHttpError(response.status, text, this.id) };
+      // `errorBody` is the ALREADY-CONSUMED body; re-reading it would throw.
+      // `response.headers` carries `Retry-After` / `anthropic-ratelimit-*-reset`
+      // out on `LLMError.retryAfterMs`; without it a 429 that stated a wait is
+      // retried on the plain ladder instead of when the server said to.
+      yield {
+        type: 'error',
+        error: classifyHttpError(response.status, errorBody, this.id, response.headers),
+      };
       return;
     }
 
@@ -266,14 +287,47 @@ export class AnthropicProvider implements LLMProvider {
         }
       }
 
-      // Stream ended without message_stop — emit done with what we have
-      const message: AssistantMessage = {
-        role: 'assistant',
-        content: contentBlocks,
-        usage,
-        stopReason,
+      // ---- The terminal-sentinel contract (llm-api-retry-backoff §4.5a) ----
+      //
+      // Reaching here means the SSE ended WITHOUT `message_stop`: that case
+      // `return`s from inside the loop above, and so does the in-stream `error`
+      // case. No `sawTerminal` flag is needed for this adapter precisely because
+      // of those two returns — the absence is the signal. (`openai.ts` and
+      // `google.ts` DO need a flag, because their terminal frames only `break`.)
+      //
+      // TWO VERY DIFFERENT SITUATIONS SHARE THIS LINE, and conflating them is how
+      // every user abort would become a fake network error (constraint 1 / R-17):
+      //
+      //  - the request was ABORTED. `parseSSEStream` `break`s on
+      //    `signal.aborted` rather than throwing, so Esc lands here. An abort is
+      //    not a provider failure, and `agent-loop` discards the `done` anyway.
+      //  - the stream was TRUNCATED — a proxy idle cut, a load-balancer timeout,
+      //    an HTTP/2 GOAWAY, `message_stop` never arriving. This USED to yield
+      //    `done` with partial content, which is indistinguishable from success
+      //    at every layer above and is the single failure the retry machinery
+      //    exists to recover. It is now a retryable `network_error`.
+      //
+      // An empty-but-complete turn is unaffected: Anthropic always sends
+      // `message_stop`, so a model that emits zero content still returns above.
+      if (request.signal?.aborted) {
+        const message: AssistantMessage = {
+          role: 'assistant',
+          content: contentBlocks,
+          usage,
+          stopReason,
+        };
+        yield { type: 'done', message, usage };
+        return;
+      }
+      yield {
+        type: 'error',
+        error: new LLMError(
+          `${this.id} stream truncated before message_stop`,
+          this.id,
+          'network_error',
+          true,
+        ),
       };
-      yield { type: 'done', message, usage };
     } catch (err) {
       yield { type: 'error', error: wrapFetchError(err, this.id) };
     }
@@ -308,12 +362,16 @@ export class AnthropicProvider implements LLMProvider {
       if (!res.ok) return [];
 
       const data = await res.json() as { data?: Array<Record<string, unknown>> };
+      // The Anthropic models endpoint does NOT report an output ceiling, so this
+      // maps through the static table and deliberately does NOT call
+      // `learnModelCeiling`: asserting 64000 here is how `claude-3-5-haiku` ends
+      // up with a "discovered" ceiling that outranks its correct table entry.
       return (data.data || []).map((m) => ({
         id: String(m.id || ''),
         name: String(m.display_name || m.id || ''),
         provider: this.id,
         contextWindow: 200_000,
-        maxOutputTokens: DEFAULT_MAX_TOKENS,
+        maxOutputTokens: staticCeilingFor(this.id, String(m.id || '')) ?? DEFAULT_MAX_OUTPUT_TOKENS,
         supportsThinking: /claude-(sonnet-4|opus-4)/i.test(String(m.id)),
         supportsTools: true,
         supportsImages: true,
@@ -330,11 +388,26 @@ export class AnthropicProvider implements LLMProvider {
 // ---------------------------------------------------------------------------
 
 function buildRequestBody(request: LLMRequest): Record<string, unknown> {
+  // Requested thinking budget FIRST: the cap and the budget are resolved
+  // together because Anthropic requires `max_tokens > budget_tokens`, and
+  // `--thinking xhigh` (65536) against the 64000 default is otherwise a
+  // guaranteed 400 on every single request.
+  const requestedBudget = request.thinkingBudget
+    ?? (request.thinkingLevel ? THINKING_BUDGET[request.thinkingLevel] : 0);
+
+  const resolution = resolveOutputTokens({
+    providerId: 'anthropic',
+    modelId: request.model,
+    ...(request.maxTokens !== undefined ? { requested: request.maxTokens } : {}),
+    ...(request.modelLimits ? { modelLimits: request.modelLimits } : {}),
+    thinkingBudget: requestedBudget,
+  });
+
   const body: Record<string, unknown> = {
     model: request.model,
     messages: convertMessages(request.messages),
     stream: true,
-    max_tokens: request.maxTokens ?? DEFAULT_MAX_TOKENS,
+    max_tokens: resolution.value,
   };
 
   if (request.systemPrompt) {
@@ -353,9 +426,10 @@ function buildRequestBody(request: LLMRequest): Record<string, unknown> {
     body.stop_sequences = request.stopSequences;
   }
 
-  // Extended thinking
-  const thinkingBudget = request.thinkingBudget
-    ?? (request.thinkingLevel ? THINKING_BUDGET[request.thinkingLevel] : 0);
+  // Extended thinking. A resolved budget of 0 means the cap cannot legally house
+  // a `budget_tokens` at all, so the block is omitted entirely — and `temperature`
+  // is therefore NOT deleted, because nothing is enabled that forbids it.
+  const thinkingBudget = resolution.thinkingBudget ?? requestedBudget;
 
   if (thinkingBudget > 0) {
     body.thinking = {
