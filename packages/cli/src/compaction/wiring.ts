@@ -57,6 +57,7 @@ import { getLogger } from '../logging/logger.js';
 import { mintRunId, writeArchive } from './archive.js';
 import { createChildContextManager, type ChildContextManagerFactory } from './child.js';
 import { Compactor } from './compactor.js';
+import { ContextMeter } from './meter.js';
 import type {
   CompactionEvent,
   CompactionEventListener,
@@ -90,6 +91,17 @@ export interface CompactionWiringDeps {
   getMessages: () => readonly Message[];
   getSystemPrompt: () => string;
   notify: (level: NoticeLevel, text: string) => void;
+  /**
+   * The controller's `ContextMeter`, forwarded to the compactor
+   * (context-usage-gauge-accuracy W1).
+   *
+   * OPTIONAL SO EVERY EXISTING CONSTRUCTION SITE COMPILES (R-1); production
+   * always injects, and `AgentController` owns the instance because it builds
+   * one UNCONDITIONALLY while this class only exists when `compaction.enabled`
+   * is true. That asymmetry is the whole point: occupancy has to be measurable
+   * in a session that turned compaction off.
+   */
+  meter?: ContextMeter;
   /**
    * How the summarizer's own registry is built. Defaults to `initProviders`.
    *
@@ -129,6 +141,7 @@ export function offCompactionSnapshot(): CompactionSnapshot {
       headroom: 0,
       source: 'estimate',
       windowKnown: false,
+      windowOverridden: false,
       deltaTokens: 0,
     },
   };
@@ -138,6 +151,8 @@ export class CompactionWiring {
   private readonly log = getLogger().child('compaction');
   private readonly listeners = new Set<CompactionEventListener>();
   private readonly compactor: Compactor;
+  /** The occupancy meter, injected or private (R-1). Forwarded to the compactor. */
+  private readonly meter: ContextMeter;
   /** The compactor's OWN transport (D-10). Lazy - see `getRegistry()`. */
   private registry: ProviderRegistry | null = null;
   private unsubscribe: (() => void) | null = null;
@@ -190,6 +205,15 @@ export class CompactionWiring {
 
   constructor(private readonly deps: CompactionWiringDeps) {
     this.enabled = deps.getConfig().compaction.enabled;
+    this.meter =
+      deps.meter ??
+      new ContextMeter({
+        getMessages: deps.getMessages,
+        getSystemPrompt: deps.getSystemPrompt,
+        getModelInfo: () => deps.getModelInfoFor(this.mainRef()),
+        isWindowKnown: () => deps.isPricedModel(this.mainRef()),
+        getWindowOverride: () => deps.getConfig().contextWindow,
+      });
     this.compactor = new Compactor({
       getConfig: deps.getConfig,
       hasKey: deps.hasKey,
@@ -204,6 +228,9 @@ export class CompactionWiring {
       complete: (providerId, request) => this.getRegistry().complete(providerId, request),
       emit: (event) => this.onCompactorEvent(event),
       notify: deps.notify,
+      // ONE METER PER PROCESS. The compactor must not build its own fallback
+      // here, or the trigger would read a different number from the gauge.
+      meter: this.meter,
       // ONE NUMBER ON SCREEN AND IN THE TRIGGER (R-11 / DH-15). The checkpoint
       // has already measured; publishing THAT pressure rather than re-measuring
       // is what keeps the two from disagreeing by one turn's tool results.
@@ -278,10 +305,25 @@ export class CompactionWiring {
    * `/clear`, `/resume`, and any future host-side rewrite. A recorded prefix
    * length indexes an array that no longer exists, so the delta must be
    * abandoned rather than applied to a different history.
+   *
+   * THE **DEEP** RESET (I-8). `/resume` can change the model in the same breath,
+   * so `estimateOffset` - a calibration for one toolset on one model - goes too.
+   * The SHALLOW reset is `settlePending`'s splice branch, and the two are not
+   * interchangeable: swapping them produces silent errors in OPPOSITE
+   * directions (a splice that drops the offset reads too low and climbs back; a
+   * resume that keeps it reads too high and never self-corrects).
+   *
+   * DUPLICATED BY `AgentController` ON PURPOSE. The controller calls
+   * `contextMeter.onHistoryReplaced()` directly at the same two sites, because
+   * this class does not exist at all when `compaction.enabled` is false - and
+   * that unconditional call is the only thing that keeps `/resume` re-measuring
+   * for such a session. A deep reset is idempotent, so both firing costs
+   * nothing; deleting the controller's copy "to de-duplicate" reintroduces P0-2.
    */
   onHistoryReplaced(): void {
-    this.compactor.invalidateMeasurement();
+    this.meter.onHistoryReplaced();
   }
+
 
   /**
    * The per-child manager factory, or `null` when children get none
@@ -405,14 +447,19 @@ export class CompactionWiring {
   // Status and events
   // -----------------------------------------------------------------------
 
+  /**
+   * The status a reader gets right now.
+   *
+   * IT READS `meter.current()`, WHICH RE-MEASURES WHEN DIRTY - and that is the
+   * fix for P0-1 (§3.3). This method is called one statement after
+   * `settlePending` marks the meter spliced, so the `snapshot` event emitted
+   * immediately after `compaction_end` carries the POST-compaction occupancy.
+   * The old body preferred `compactor.lastMeasured()`, i.e. the measurement that
+   * TRIGGERED this compaction, so the gauge fell and was bounced straight back
+   * to the pre-compaction figure inside the same synchronous emit loop.
+   */
   snapshot(): CompactionSnapshot {
-    const pressure =
-      this.compactor.lastMeasured() ??
-      this.compactor.measure({
-        messages: this.deps.getMessages(),
-        systemPrompt: this.deps.getSystemPrompt(),
-      });
-    return this.snapshotWith(pressure);
+    return this.snapshotWith(this.meter.current());
   }
 
   /**
@@ -458,6 +505,18 @@ export class CompactionWiring {
   // -----------------------------------------------------------------------
   // Internals
   // -----------------------------------------------------------------------
+
+  /**
+   * The main model, for the FALLBACK meter's deps only (R-1).
+   *
+   * Production injects a meter built by `AgentController`, which resolves the
+   * same ref from the same live config; this exists so a test that constructs a
+   * bare wiring still gets a working denominator.
+   */
+  private mainRef(): Pick<ModelRef, 'providerId' | 'modelId'> {
+    const config = this.deps.getConfig();
+    return { providerId: config.provider, modelId: config.model };
+  }
 
   /**
    * The transport one summarization call goes through - separate from the lead's,
@@ -506,19 +565,16 @@ export class CompactionWiring {
       return;
     }
     if (event.type === 'turn_end') {
-      // The calibration offset, re-measured every turn (D-23). Read the history
-      // AFTER the turn's assistant message is pushed? No: `turn_end` is emitted
-      // BEFORE the push, so this is exactly the history the reported `usage`
-      // was measured against, which is what makes the difference meaningful.
-      this.compactor.onTurnEnd(event.usage, this.deps.getMessages(), this.deps.getSystemPrompt());
-      // The gauge and the trigger read one function (R-11 / AC-3), so the
-      // snapshot's pressure is refreshed from the same measurement the status bar
-      // is about to render.
-      this.compactor.measure({
-        lastUsage: event.usage,
-        messages: this.deps.getMessages(),
-        systemPrompt: this.deps.getSystemPrompt(),
-      });
+      // THE MEASUREMENT IS THE METER'S (context-usage-gauge-accuracy §3.3.4). It
+      // subscribes to `turn_end` on the same stream and recomputes the offset,
+      // the prefix length and the pressure there; the two calls that used to
+      // live here - `compactor.onTurnEnd(...)` and `compactor.measure(...)` -
+      // were both forwarders to it and doing the same work twice.
+      //
+      // THE SNAPSHOT EMIT STAYS. The other fields on it - `inFlight`, the
+      // session counts, the summarizer - are this class's own and still need
+      // refreshing on a turn boundary, and `snapshot()` picks up the meter's
+      // freshly published pressure for free.
       this.emit({ type: 'snapshot', snapshot: this.snapshot() });
       return;
     }
@@ -566,9 +622,13 @@ export class CompactionWiring {
       // A SILENT DECLINE (quiet-noop §3.6). No card - but the gauge and the chip
       // are still refreshed: `inFlight` has just gone false and `/compact status`
       // reads this same snapshot, which is where the `declined` count surfaces.
-      // `snapshot()` uses the CACHED pressure (`compactor.lastMeasured()`), so
-      // this costs no re-measurement, and guard 4 caps the number of declines per
-      // session at `stuckLimit`.
+      //
+      // `snapshot()` NOW GOES THROUGH `meter.current()`, so this path DOES pay a
+      // re-measurement when the history has moved since the last one (RV-11 -
+      // the previous sentence here claimed the opposite and was left stale by
+      // context-usage-gauge-accuracy). The cost is bounded the same way it always
+      // was: guard 4 caps declines per session at `stuckLimit`, and a re-measure
+      // on the measured branch walks one turn's worth of appended messages.
       this.emit({ type: 'snapshot', snapshot: this.snapshot() });
       return;
     }
@@ -583,10 +643,23 @@ export class CompactionWiring {
     };
     if (verdict.applied) {
       this.compactor.recordApplied(settled.tokensBefore, settled.tokensAfter);
-      // SITE 1 OF THE FOUR INVALIDATION SITES (hardening §3.2.3). The in-loop
-      // splice replaced the history, so every recorded index means nothing; the
-      // manual path settles through here too, so one call covers both.
-      this.compactor.invalidateMeasurement();
+      // SITE 1 OF THE FOUR INVALIDATION SITES (hardening §3.2.3), and THE LOAD-
+      // BEARING LINE OF THE P0-1 FIX (context-usage-gauge-accuracy I-9).
+      //
+      // ITS POSITION IS THE WHOLE ARGUMENT: it runs in this class's own
+      // synchronous code, BEFORE both `emit` calls below, so the `snapshot()`
+      // two statements down is guaranteed to see a dirty meter and re-measure -
+      // no matter which of the two agent-stream listeners the emitter reached
+      // first. Deleting it and relying on the meter's own `compaction_end`
+      // subscription instead moves correctness onto subscription ORDER, which is
+      // true in every unit test and false in production import order.
+      //
+      // THE **SHALLOW** RESET (I-8). A splice changes the history and nothing
+      // else, so `estimateOffset` - a calibration for this toolset on this model
+      // - is still valid and is the only thing keeping the post-compaction
+      // estimate honest (I-5). `onHistoryReplaced()` is the other depth and is
+      // NOT interchangeable with this one.
+      this.meter.onHistorySpliced();
       const path = this.archive(settled, dropped);
       if (path) settled.archivePath = path;
     }

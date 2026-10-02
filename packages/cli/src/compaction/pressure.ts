@@ -82,6 +82,12 @@ export interface PressureInput {
   contextWindow: number;
   /** False when the window is `buildRuntimeModel`'s 128k placeholder. */
   windowKnown: boolean;
+  /**
+   * Whether `contextWindow` came from the user's `contextWindow` override
+   * (context-usage-gauge-accuracy I-6). Defaults to `false`, so every existing
+   * construction site is unchanged and the arithmetic below is untouched.
+   */
+  windowOverridden?: boolean;
   /** Carried from the last `turn_end`; applied to every ESTIMATED figure. */
   estimateOffset?: number;
   /**
@@ -181,6 +187,10 @@ export function computePressure(input: PressureInput): Pressure {
     headroom: Math.max(0, window - occupied),
     source,
     windowKnown: input.windowKnown,
+    // PURE PASS-THROUGH. This function's arithmetic is unchanged by
+    // context-usage-gauge-accuracy; the flag only travels with the number so
+    // `/context` can name the denominator's source (I-6).
+    windowOverridden: input.windowOverridden ?? false,
     ...(input.estimateOffset !== undefined ? { estimateOffset: input.estimateOffset } : {}),
     deltaTokens,
   };

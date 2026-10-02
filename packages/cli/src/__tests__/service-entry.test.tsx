@@ -111,7 +111,7 @@ describe('AC-39: the three silent switches', () => {
     // the alternate screen is torn down.
     const text = renderTranscriptText([service()], {
       glyphs: GLYPHS,
-      usageTotal: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+      usageTotal: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 },
       model: 'm',
       provider: 'p',
       elapsedMs: 0,

@@ -4,6 +4,7 @@
  */
 
 import type { ModelCost, TokenUsage } from '@aragon-agent/core';
+import type { UsageTotal } from './reducer.js';
 
 /** Compute the USD cost of a single `TokenUsage` given a model's cost table. */
 export function computeCost(usage: TokenUsage, cost?: ModelCost): number {
@@ -16,6 +17,51 @@ export function computeCost(usage: TokenUsage, cost?: ModelCost): number {
     perM(usage.cacheReadTokens ?? 0, cost.cacheRead) +
     perM(usage.cacheWriteTokens ?? 0, cost.cacheWrite)
   );
+}
+
+/**
+ * Fold one `TokenUsage` into a running session total
+ * (context-usage-gauge-accuracy §3.6 / W5).
+ *
+ * THE ONE ADDITION SITE, and collapsing four hand-written copies into it is the
+ * point rather than a tidy-up. The reducer had the same three lines in four
+ * branches - `turnEnd`, `teamUsage`, `fastUsage`, `compactionUsage` - and all
+ * four silently omitted the cache terms, so the status bar's `^` read LOWER than
+ * the `$` beside it on any session behind a caching gateway. A fifth source
+ * added later would have made the identical omission; now it cannot.
+ *
+ * `costDelta` IS PRECOMPUTED BY THE CALLER, exactly as the four branches already
+ * required: the summarizer and the fast tier may be different models with
+ * different price tables, and a reducer that priced its own would have to know
+ * about three of them.
+ */
+export function addUsage(total: UsageTotal, usage: TokenUsage, costDelta: number): UsageTotal {
+  return {
+    inputTokens: total.inputTokens + usage.inputTokens,
+    outputTokens: total.outputTokens + usage.outputTokens,
+    cacheReadTokens: total.cacheReadTokens + (usage.cacheReadTokens ?? 0),
+    cacheWriteTokens: total.cacheWriteTokens + (usage.cacheWriteTokens ?? 0),
+    costUsd: total.costUsd + costDelta,
+  };
+}
+
+/**
+ * The number the status bar's `^` shows: the PROMPT side of the session total.
+ *
+ * DELIBERATELY THE SAME TERMS AS `occupiedTokens` MINUS `outputTokens`
+ * (`compaction/pressure.ts`). Anthropic reports `input_tokens` EXCLUDING cached
+ * tokens and puts them in two separate fields, so `inputTokens` alone
+ * under-reports for anyone behind a caching gateway - while `computeCost` above
+ * has always priced all three. That is the "three units on one row" defect
+ * (P1-3): the percentage counted cache, the dollars counted cache, and the arrow
+ * did not.
+ *
+ * `$` IS STILL NOT THE SAME TOTAL, and the distinction is worth keeping straight
+ * (RV-14): `computeCost` also prices OUTPUT tokens. What this function asserts is
+ * narrower and exact - both cache terms are counted, on both sides.
+ */
+export function promptTokensOf(total: UsageTotal): number {
+  return total.inputTokens + total.cacheReadTokens + total.cacheWriteTokens;
 }
 
 /** Format a USD amount for the status bar (`$0.0000`, or `$1.23` when large). */

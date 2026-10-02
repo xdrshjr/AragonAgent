@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { selectTodoRows, todoAnchorIndex } from '../todo/panel-rows.js';
+import { selectTodoRows, selectCompactTodoRows, todoAnchorIndex } from '../todo/panel-rows.js';
 import { TODO_LIMITS } from '../todo/limits.js';
 import type { TodoItem, TodoStatus } from '../todo/types.js';
 
@@ -21,6 +21,21 @@ function list(length: number, anchor: number): TodoItem[] {
 }
 
 describe('selectTodoRows', () => {
+  it('紧凑窗口保留锚点且隐藏数量守恒，包括零槽及全完成', () => {
+    for (let length = 0; length <= 20; length++) {
+      for (let anchor = 0; anchor <= length; anchor++) {
+        for (const slots of [NaN, Infinity, -1, 0, 1, 2, 3, 4, 20]) {
+          const items = list(length, anchor);
+          const result = selectCompactTodoRows(items, slots);
+          expect(result.hiddenAbove + result.visible.length + result.hiddenBelow).toBe(length);
+          if (Number.isFinite(slots) && slots > 0 && length > 0) {
+            expect(result.visible.some(v => v.index === todoAnchorIndex(items))).toBe(true);
+            expect(result.visible.length).toBeLessThanOrEqual(slots);
+          } else expect(result.visible).toEqual([]);
+        }
+      }
+    }
+  });
   it('AC-22: the anchor is ALWAYS visible, for every length/anchor/maxRows triple', () => {
     for (let length = 1; length <= TODO_LIMITS.maxItems; length += 1) {
       for (let anchor = 0; anchor < length; anchor += 1) {

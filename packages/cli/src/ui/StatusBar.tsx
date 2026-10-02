@@ -1,8 +1,15 @@
 /**
  * Status bar (spec §4.8). Width-aware, borderless, EXACTLY one row: a left
  * cluster (run status, model, thinking level) and a right cluster (context
- * gauge, tokens, cost, tokens/sec + elapsed while running, off-bottom `↑N`).
- * Clusters drop out gracefully on narrow terminals.
+ * gauge, occupancy pair, session total, cost, tokens/sec + elapsed while
+ * running, off-bottom `↑N`). Clusters drop out gracefully on narrow terminals.
+ *
+ * THE RIGHT CLUSTER'S WIDTH LADDER (context-usage-gauge-accuracy §3.6):
+ *
+ *   >= 96   [####....] 43%  86.0k/200.0k  total 1.2M^ 48.0k v  $3.21  12 tok/s  1m02s
+ *   72-95   [####....] 43%  86.0k/200.0k  $3.21
+ *   60-71   [####....] 43%  $3.21
+ *   < 60    43%  $3.21
  *
  * Dropping the round border here buys back 3 rows of a 24-row terminal — an
  * eighth of the screen was being spent framing a single line of text.
@@ -14,7 +21,8 @@ import type { Theme } from './theme.js';
 import type { TermCapabilities } from './capabilities.js';
 import { pickGlyphs } from './glyphs.js';
 import type { UsageTotal } from '../agent/reducer.js';
-import { formatCost, formatTokens, formatDuration } from '../agent/usage.js';
+import type { ContextUsageSnapshot } from '../compaction/types.js';
+import { formatCost, formatTokens, formatDuration, promptTokensOf } from '../agent/usage.js';
 import { buildGauge } from './gauge.js';
 import { MODE_LABEL, type AgentMode } from '../agent/agent-mode.js';
 import { formatRetryChip } from '../agent/retry-view.js';
@@ -28,9 +36,17 @@ interface StatusBarProps {
   model: string;
   provider: string;
   usageTotal: UsageTotal;
-  contextTokens: number;
-  contextWindow: number;
-  contextWindowKnown: boolean;
+  /**
+   * Context occupancy, as one object (context-usage-gauge-accuracy §4.3).
+   *
+   * IT REPLACED FOUR PARALLEL PROPS - `contextTokens`, `contextWindow`,
+   * `contextWindowKnown`, `contextEstimated`. Four props describing one reading
+   * are four chances for a caller to update three of them, which is the props-
+   * layer form of the "many writers" defect this feature removed from the
+   * reducer. `usageTotal` stays separate because it genuinely IS another
+   * quantity: session spend, not occupancy.
+   */
+  context: ContextUsageSnapshot;
   status: 'idle' | 'running';
   elapsedMs: number;
   thinkingLevel: string;
@@ -180,20 +196,32 @@ interface StatusBarProps {
    * the user sees agree with the number the trigger fires on.
    */
   gaugeMarks?: { warn: number; high: number };
-  /**
-   * Whether `contextTokens` is a DERIVED figure rather than a measured one.
-   *
-   * It WIDENS THE EXISTING `~`, it does not add a second marker. Today that
-   * prefix means "the window is a guess" (`contextWindowKnown`); with compaction
-   * it also has to mean "the occupancy is a guess", because the bar is written
-   * from an estimate for one turn after every compaction so it can fall
-   * immediately (§6.2 / AC-5).
-   */
-  contextEstimated?: boolean;
 }
 
 /** Below this the `eco` chip costs the context gauge more than it is worth. */
 const ECO_MIN_COLS = 72;
+
+/**
+ * Where `86k/200k` starts being shown (context-usage-gauge-accuracy §3.6 / W5).
+ *
+ * IT TAKES THE COLUMNS THE SESSION TOTAL USED TO HAVE, and the ordering is the
+ * point rather than a layout accident (D-6). "How full am I, out of how much" is
+ * the question a user asks the gauge; "what has this session cost in tokens" is
+ * a different one, and putting the second in front of the first spends the
+ * scarce columns on the number the user is more likely to MISREAD - the total
+ * looks like an occupancy until you notice it exceeds the window.
+ */
+const ABSOLUTE_PAIR_MIN_COLS = 72;
+
+/**
+ * Where the session total returns, now prefixed.
+ *
+ * `total ` IS AN ASCII WORD, NOT A SIGMA. `ui/**` is inside the glyph scanner's
+ * scope, so a new symbol would need an entry in `glyphs.ts` with an ASCII
+ * fallback for a legacy `cmd.exe` - a real cost for a three-character prefix
+ * that reads worse.
+ */
+const SESSION_TOTAL_MIN_COLS = 96;
 
 /**
  * I-5 — DO NOT "CLEAN THIS UP". Ink short-circuits identical output at TWO
@@ -220,9 +248,7 @@ export function StatusBar(props: StatusBarProps): React.ReactElement {
     model,
     provider,
     usageTotal,
-    contextTokens,
-    contextWindow,
-    contextWindowKnown,
+    context,
     status,
     elapsedMs,
     thinkingLevel,
@@ -241,7 +267,6 @@ export function StatusBar(props: StatusBarProps): React.ReactElement {
     fastActive,
     compactionActive,
     gaugeMarks,
-    contextEstimated = false,
   } = props;
 
   const { stdout } = useStdout();
@@ -249,21 +274,39 @@ export function StatusBar(props: StatusBarProps): React.ReactElement {
   const running = status === 'running';
 
   const glyphs = pickGlyphs(caps);
-  const pct =
-    contextWindow > 0 ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0;
+  // THE PERCENTAGE IS NOT RECOMPUTED HERE ANY MORE. It arrives already divided
+  // and clamped by the same code the compaction trigger reads, which is the
+  // whole of AC-2: a user watching 78 % and a `/compact status` reporting 91 %
+  // would rightly conclude one of them is lying.
+  const pct = context.pct;
   // `gaugeMarks` is spread rather than passed as `undefined`, so a session with
   // compaction off takes `buildGauge`'s own default and the bar is byte-identical
   // to the pre-feature build.
   const gauge = gaugeMarks
     ? buildGauge(pct, cols < 72 ? 8 : 12, theme, caps, gaugeMarks)
     : buildGauge(pct, cols < 72 ? 8 : 12, theme, caps);
-  // ONE `~` FOR TWO KINDS OF APPROXIMATION (§6.2). A second marker would be a
-  // second thing to explain for a distinction the user does not act on
-  // differently: either way the number is a guess.
-  const pctLabel = `${contextWindowKnown && !contextEstimated ? '' : '~'}${gauge.pct}%`;
-  const tokens = `${formatTokens(usageTotal.inputTokens)}${glyphs.arrowUp} ${formatTokens(
-    usageTotal.outputTokens,
-  )}${glyphs.arrowDown}`;
+  // `~` BELONGS TO THE NUMERATOR, `?` TO THE DENOMINATOR (P2-7). One glyph used
+  // to carry three meanings - the window is a guess, the occupancy is a guess,
+  // the occupancy contains an appended-message estimate - and a user could not
+  // tell from it which half to distrust. The `~` keeps every case it had: an
+  // unknown window still produces it, so a session that never touches the new
+  // absolute pair sees the identical string it saw before.
+  const occupancyApproximate = context.source === 'estimate' || context.deltaTokens > 0;
+  const pctLabel = `${context.windowKnown && !occupancyApproximate ? '' : '~'}${gauge.pct}%`;
+  // `?` ON THE WINDOW, AND ONLY ON THE NEW READOUT. `windowKnown` is false
+  // exactly when `buildRuntimeModel` invented the 128k placeholder, and saying
+  // `128k?` is the difference between a denominator the user can act on and one
+  // they will assume came from their model card.
+  const windowLabel = `${formatTokens(context.window)}${context.windowKnown ? '' : '?'}`;
+  const absolutePair = `${formatTokens(context.occupied)}/${windowLabel}`;
+  // THE PROMPT-SIDE TOTAL, NOT `inputTokens` (P1-3 / AC-11). Anthropic reports
+  // `input_tokens` EXCLUDING cached tokens, so the old expression under-reported
+  // for anyone behind a caching gateway - on the same row as a `$` that has
+  // always priced the cache. Any session with cache hits sees this number grow,
+  // and that is the fix rather than a regression.
+  const tokens = `total ${formatTokens(promptTokensOf(usageTotal))}${
+    glyphs.arrowUp
+  } ${formatTokens(usageTotal.outputTokens)}${glyphs.arrowDown}`;
 
   const statusGlyph = running ? theme.symbols.toolRunning : theme.symbols.toolPending;
 
@@ -369,7 +412,10 @@ export function StatusBar(props: StatusBarProps): React.ReactElement {
           </Text>
         )}
         <Text color={theme.muted}>{pctLabel}</Text>
-        {cols >= 72 && <Text color={theme.muted}>  {tokens}</Text>}
+        {cols >= ABSOLUTE_PAIR_MIN_COLS && (
+          <Text color={theme.muted}>  {absolutePair}</Text>
+        )}
+        {cols >= SESSION_TOTAL_MIN_COLS && <Text color={theme.muted}>  {tokens}</Text>}
         <Text color={theme.muted}>  {formatCost(usageTotal.costUsd)}</Text>
         {running && (
           <Text color={theme.muted}>

@@ -59,6 +59,7 @@ export class AnthropicProvider implements LLMProvider {
   // -----------------------------------------------------------------------
 
   async *stream(request: LLMRequest): AsyncIterableIterator<StreamEvent> {
+    if (request.signal?.aborted) return;
     const baseUrl = (request.baseUrl || this.defaultBaseUrl).replace(/\/+$/, '');
     const url = `${baseUrl}/v1/messages`;
 
@@ -87,10 +88,12 @@ export class AnthropicProvider implements LLMProvider {
       response = attempt.response;
       errorBody = attempt.bodyText;
     } catch (err) {
+      if (request.signal?.aborted) return;
       yield { type: 'error', error: wrapFetchError(err, this.id) };
       return;
     }
 
+    if (request.signal?.aborted) return;
     if (!response.ok) {
       // `errorBody` is the ALREADY-CONSUMED body; re-reading it would throw.
       // `response.headers` carries `Retry-After` / `anthropic-ratelimit-*-reset`
@@ -120,6 +123,7 @@ export class AnthropicProvider implements LLMProvider {
 
     try {
       for await (const sse of parseSSEStream(response.body, request.signal)) {
+        if (request.signal?.aborted) return;
         // Anthropic uses the `event` field to distinguish event types
         const eventType = sse.event;
         if (!eventType || !sse.data) continue;
@@ -255,6 +259,7 @@ export class AnthropicProvider implements LLMProvider {
           }
 
           case 'message_stop': {
+            if (request.signal?.aborted) return;
             const message: AssistantMessage = {
               role: 'assistant',
               content: contentBlocks,
@@ -287,38 +292,8 @@ export class AnthropicProvider implements LLMProvider {
         }
       }
 
-      // ---- The terminal-sentinel contract (llm-api-retry-backoff §4.5a) ----
-      //
-      // Reaching here means the SSE ended WITHOUT `message_stop`: that case
-      // `return`s from inside the loop above, and so does the in-stream `error`
-      // case. No `sawTerminal` flag is needed for this adapter precisely because
-      // of those two returns — the absence is the signal. (`openai.ts` and
-      // `google.ts` DO need a flag, because their terminal frames only `break`.)
-      //
-      // TWO VERY DIFFERENT SITUATIONS SHARE THIS LINE, and conflating them is how
-      // every user abort would become a fake network error (constraint 1 / R-17):
-      //
-      //  - the request was ABORTED. `parseSSEStream` `break`s on
-      //    `signal.aborted` rather than throwing, so Esc lands here. An abort is
-      //    not a provider failure, and `agent-loop` discards the `done` anyway.
-      //  - the stream was TRUNCATED — a proxy idle cut, a load-balancer timeout,
-      //    an HTTP/2 GOAWAY, `message_stop` never arriving. This USED to yield
-      //    `done` with partial content, which is indistinguishable from success
-      //    at every layer above and is the single failure the retry machinery
-      //    exists to recover. It is now a retryable `network_error`.
-      //
-      // An empty-but-complete turn is unaffected: Anthropic always sends
-      // `message_stop`, so a model that emits zero content still returns above.
-      if (request.signal?.aborted) {
-        const message: AssistantMessage = {
-          role: 'assistant',
-          content: contentBlocks,
-          usage,
-          stopReason,
-        };
-        yield { type: 'done', message, usage };
-        return;
-      }
+      // A caller abort is silent; only an incomplete transport EOF is retried.
+      if (request.signal?.aborted) return;
       yield {
         type: 'error',
         error: new LLMError(
@@ -329,6 +304,7 @@ export class AnthropicProvider implements LLMProvider {
         ),
       };
     } catch (err) {
+      if (request.signal?.aborted) return;
       yield { type: 'error', error: wrapFetchError(err, this.id) };
     }
   }

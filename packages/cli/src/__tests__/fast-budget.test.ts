@@ -104,6 +104,7 @@ function harness(
   };
   const completeFn = vi.fn(complete ?? (async () => ok()));
 
+  let reviewerRef: FastReviewer | null = null;
   const reviewer = new FastReviewer({
     subscribe: (l) => {
       listeners.add(l);
@@ -120,9 +121,27 @@ function harness(
     available: () => true,
     getApiKey: () => 'k',
     emit: (e) => events.push(e),
+    // The reviewer announces its own self-disable with a `tier_changed`, and
+    // the snapshot for it can only come from the wiring. A minimal stand-in is
+    // enough here: the field under test is `selfDisabled`, which the reviewer
+    // answers itself.
+    snapshot: () => ({
+      live: true,
+      selfDisabled: reviewerRef?.isSelfDisabled() ?? false,
+      model: TIER.ok ? TIER.ref.modelId : '',
+      sameAsMain: false,
+      reviews: 0,
+      reviewBudget: 0,
+      budgetReached: false,
+      delegated: 0,
+      usage: { inputTokens: 0, outputTokens: 0 },
+      pricingUnknown: false,
+      inFlight: false,
+    }),
     notify: (level, text) => notices.push([level, text]),
     now: () => 1_000_000,
   });
+  reviewerRef = reviewer;
 
   return {
     reviewer,
@@ -350,6 +369,7 @@ function cliConfig(fast: Partial<FastConfig>): CliConfig {
     thinkingLevel: 'high',
     showThinking: false,
     liveToolOutput: false,
+    contextWindow: null,
     theme: 'auto',
     reducedMotion: false,
     exitTranscript: true,

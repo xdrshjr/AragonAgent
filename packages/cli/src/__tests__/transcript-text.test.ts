@@ -11,7 +11,7 @@ const ASCII = pickGlyphs({ colorLevel: 3, unicode: false });
 
 const OPTS = {
   glyphs: UNI,
-  usageTotal: { inputTokens: 12_300, outputTokens: 4100, costUsd: 0.08 },
+  usageTotal: { inputTokens: 12_300, outputTokens: 4100, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.08 },
   model: 'claude-sonnet-4-6',
   provider: 'anthropic',
   elapsedMs: 134_000,

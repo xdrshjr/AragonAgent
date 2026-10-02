@@ -271,6 +271,31 @@ describe('resolveFastConfig - defaults > file > env > flags (§3.7)', () => {
     expect(cfg.fast.reviewEveryTurns).toBe(7);
     expect(cfg.fast.review).toBe(true);
   });
+
+  // ── `--fast-delegate` / `--no-fast-delegate`
+  //    (web-use-tier-cooperation-and-control-closure §4.1.5) ─────────────────
+
+  it('`--fast-delegate` and `--no-fast-delegate` both reach `fast.delegate`', () => {
+    expect(loadConfig({ cwd: HOME, fastDelegate: true }).fast.delegate).toBe(true);
+    expect(loadConfig({ cwd: HOME, fastDelegate: false }).fast.delegate).toBe(false);
+  });
+
+  /**
+   * THE REVERSE ASSERTION, AND IT IS THE ONE THAT MATTERS (invariant 4).
+   *
+   * `fast.delegate` is persisted and defaults to TRUE. If the option pair were
+   * declared negative-first, commander would materialise `opts.fastDelegate` as
+   * `true` on every run that passed no flag at all, `resolveFastConfig`'s
+   * `!== undefined` would fire, and a user's stored `false` would be silently
+   * overwritten on EVERY run — the exact failure `--update` and `--compaction`
+   * each record. Only this direction catches it.
+   */
+  it('passing NEITHER form preserves a stored `delegate: false`', () => {
+    updatePersistedConfig({ fast: { delegate: false } as never });
+    expect(loadConfig({ cwd: HOME }).fast.delegate).toBe(false);
+    // And an explicit positive still wins over the file, as the layer order says.
+    expect(loadConfig({ cwd: HOME, fastDelegate: true }).fast.delegate).toBe(true);
+  });
 });
 
 afterEach(() => {

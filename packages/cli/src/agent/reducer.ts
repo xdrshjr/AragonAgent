@@ -27,8 +27,9 @@ import type {
   CompactionRecord,
   CompactionSnapshot,
   CompactionUiTrigger,
+  ContextUsageSnapshot,
 } from '../compaction/types.js';
-import { occupiedTokens } from '../compaction/pressure.js';
+import { emptyContextUsage } from '../compaction/meter.js';
 import type { TodoItem, TodoSnapshot } from '../todo/types.js';
 // TYPE-ONLY: `proc/types.ts` is a pure leaf and the erased import keeps this
 // module free of a runtime edge into the supervisor.
@@ -37,7 +38,7 @@ import type { RetryPhase } from './retry-view.js';
 // TYPE-ONLY, and deliberately so: `tools/patch.ts` is a pure leaf and the erased
 // import keeps this module free of a runtime edge into the tool layer.
 import type { FilePatch } from '../tools/patch.js';
-import { computeCost } from './usage.js';
+import { addUsage, computeCost } from './usage.js';
 import { ENTRY_LIMITS, appendBounded, entryRetain, trimEntries } from './entry-limits.js';
 
 // ---------------------------------------------------------------------------
@@ -357,6 +358,16 @@ export type Entry =
 export interface UsageTotal {
   inputTokens: number;
   outputTokens: number;
+  /**
+   * Cache read hits (context-usage-gauge-accuracy §3.6 / P1-3).
+   *
+   * `occupiedTokens` counts them and `computeCost` PRICES them, so a session
+   * total that omits them makes the status bar's `^` read lower than the `$`
+   * next to it - on the same row, from the same turns. That was three units on
+   * one line, and this field plus its sibling are what collapse them to one.
+   */
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   costUsd: number;
 }
 
@@ -379,8 +390,20 @@ export interface ViewState {
   entries: Entry[];
   status: 'idle' | 'running';
   usageTotal: UsageTotal;
-  /** Running input size of the most recent turn vs. the model context window. */
-  contextTokens: number;
+  /**
+   * Context occupancy, as published by `AgentController`'s `ContextMeter`.
+   *
+   * ITS ONLY WRITER IS `case 'contextUsage'` (I-1), and that is the structural
+   * half of the P0-1 fix. It replaced `contextTokens` + `contextTokensEstimated`,
+   * which between them had THREE writing branches (`turnEnd`,
+   * `contextTokensEstimated`, `resetConversation`) fed by two competing
+   * upstreams. Two writers in one synchronous fan-out means the later one wins,
+   * and the later one was the stale `snapshot` carrying the PRE-compaction
+   * figure - so the bar fell and bounced straight back, every time, with nothing
+   * logging a fault. `context-one-writer.test.ts` scans this file to keep it
+   * that way.
+   */
+  context: ContextUsageSnapshot;
   overlay: Overlay;
   thinkingVisible: boolean;
   /** Ephemeral acks; auto-dismissed by App (spec §3.9). */
@@ -438,16 +461,12 @@ export interface ViewState {
    * totals. `null` is what leaves an ordinary session's status bar unchanged.
    */
   compaction: CompactionSnapshot | null;
-  /**
-   * Whether `contextTokens` is currently a DERIVED figure rather than a measured
-   * one (§6.2 / P1-11).
-   *
-   * Set by `compactionEnd`, cleared by the next `turnEnd`. The status bar widens
-   * its leading `~` to cover it: today `~` means "the window is a guess", and
-   * this makes it also mean "the occupancy is a guess". Honesty about a guess is
-   * cheaper than a support thread about a wrong percentage.
+  /*
+   * `contextTokensEstimated` IS GONE. "Part of this number is a guess" now
+   * travels ON the reading itself - `context.source` and `context.deltaTokens` -
+   * so it cannot get out of step with the figure it describes, which a separate
+   * boolean written by a different branch could and did.
    */
-  contextTokensEstimated: boolean;
 
   // Internal bookkeeping (not rendered directly).
   seq: number;
@@ -476,6 +495,21 @@ export interface ViewState {
   droppedEntries: number;
 }
 
+/**
+ * The zero session total.
+ *
+ * ONE LITERAL FOR TWO SITES (`initialViewState` and `resetConversation`). They
+ * used to spell the object out twice, which is how `cacheReadTokens` would have
+ * been added to one of them and not the other.
+ */
+const EMPTY_USAGE_TOTAL: UsageTotal = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  costUsd: 0,
+};
+
 export interface ViewStateSeed {
   /** Start with thinking blocks expanded. Defaults to FALSE, the product default. */
   thinkingVisible?: boolean;
@@ -498,8 +532,8 @@ export function initialViewState(seed: ViewStateSeed = {}): ViewState {
   return {
     entries: [],
     status: 'idle',
-    usageTotal: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
-    contextTokens: 0,
+    usageTotal: EMPTY_USAGE_TOTAL,
+    context: emptyContextUsage(),
     overlay: null,
     thinkingVisible: seed.thinkingVisible ?? false,
     toasts: [],
@@ -513,7 +547,6 @@ export function initialViewState(seed: ViewStateSeed = {}): ViewState {
     retry: null,
     fast: null,
     compaction: null,
-    contextTokensEstimated: false,
     seq: 0,
     teamEntryId: undefined,
     todoEntryId: undefined,
@@ -634,13 +667,15 @@ export type ViewAction =
   | { type: 'compactionUsage'; usage: TokenUsage; costDelta: number }
   | { type: 'compactionSnapshot'; snapshot: CompactionSnapshot }
   /**
-   * Overwrite the gauge with a DERIVED occupancy (§6.2).
+   * The occupancy reading, from `AgentController.subscribeContextUsage`.
    *
-   * Separate from `compactionEnd` because the value is not always available at
-   * the same instant, and because the flag it sets — `contextTokensEstimated` —
-   * has to be clearable by the next `turnEnd` independently.
+   * THE ONLY ACTION THAT WRITES `state.context`, AND IT IS DISPATCHED FROM
+   * EXACTLY ONE PLACE (I-1 / T11). It replaced `contextTokensEstimated`, which
+   * `App` fired from two branches of the compaction stream while `turnEnd` wrote
+   * the same field from the agent stream - three writers, two upstreams, one
+   * number, and the P0-1 bounce as the result.
    */
-  | { type: 'contextTokensEstimated'; tokens: number }
+  | { type: 'contextUsage'; snapshot: ContextUsageSnapshot }
   // --- Background services (background-service-supervision §3.10) ---------
   //
   // ALL THREE ARE DISPATCHED FROM EXACTLY ONE PLACE — `App.tsx`'s
@@ -1269,22 +1304,12 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
         ...state,
         streamingId: undefined,
         turnProduced: true,
-        // ONE FUNCTION, SHARED WITH THE COMPACTION TRIGGER (§3.4.1 / R-11 /
-        // AC-3). The old expression — `inputTokens + outputTokens` — silently
-        // UNDER-reports for anyone behind a caching gateway, because Anthropic
-        // reports `input_tokens` EXCLUDING cached tokens and puts them in two
-        // separate fields. That was a live defect in the number this gauge shows;
-        // it becomes a much worse one the moment a trigger fires on a different
-        // number from the one the user is watching.
-        contextTokens: occupiedTokens(action.usage),
-        // A MEASUREMENT SUPERSEDES A DERIVATION (§6.2). `compactionEnd` writes an
-        // estimate so the bar falls immediately; this is where it stops being one.
-        contextTokensEstimated: false,
-        usageTotal: {
-          inputTokens: state.usageTotal.inputTokens + action.usage.inputTokens,
-          outputTokens: state.usageTotal.outputTokens + action.usage.outputTokens,
-          costUsd: state.usageTotal.costUsd + action.costDelta,
-        },
+        // `contextTokens` IS NOT WRITTEN HERE ANY MORE (I-1). The occupancy this
+        // turn produced reaches the view through `ContextMeter`, which subscribes
+        // to the same `turn_end` and publishes the measured pressure - window,
+        // percentage and approximation markers included, none of which this
+        // branch ever had. Two branches writing one number is what P0-1 was.
+        usageTotal: addUsage(state.usageTotal, action.usage, action.costDelta),
         // The turn produced an answer, so whatever it had to retry, it recovered.
         ...settleRetryCard(state, entries, 'recovered'),
       };
@@ -1437,8 +1462,13 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
         droppedEntries: 0,
         streamingId: undefined,
         expandedToolIds: {},
-        contextTokens: 0,
-        usageTotal: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+        // `context` IS DELIBERATELY UNTOUCHED (I-1). `builtins.ts` calls
+        // `controller.clearMessages()` BEFORE dispatching this, and that marks
+        // the meter dirty and schedules a publication; zeroing here would make
+        // the final state `0` rather than the meter's real answer - which for an
+        // emptied conversation is the system prompt's own couple of percent, not
+        // nothing. `usageTotal` DOES reset: that is session spend, not occupancy.
+        usageTotal: EMPTY_USAGE_TOTAL,
         teamEntryId: undefined,
         // `/reset` clears `messages`, so the belief is gone and the list goes
         // with it — the other half of I-2. `controller.clearMessages()` clears
@@ -1448,10 +1478,6 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
         retryEntryId: undefined,
         retry: null,
         compactionEntryId: undefined,
-        // `contextTokens` is zeroed above, so the flag that says it is a
-        // DERIVATION has to go with it — otherwise a fresh conversation renders
-        // `~0%` and the tilde is a lie about a number that is simply zero.
-        contextTokensEstimated: false,
       };
 
     case 'setOverlay':
@@ -1544,18 +1570,11 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
 
     case 'teamUsage':
       // `usageTotal` AND NOTHING ELSE (§3.9 / AC-15). In particular NOT
-      // `contextTokens`: that gauge shows the LEAD's context occupancy against
+      // `context`: that gauge shows the LEAD's context occupancy against
       // the model's window, and folding five children into it would read 180%
       // on a perfectly healthy session. Child spend is real money and has to
       // appear in the cost readout; it is not the lead's context.
-      return {
-        ...state,
-        usageTotal: {
-          inputTokens: state.usageTotal.inputTokens + action.usage.inputTokens,
-          outputTokens: state.usageTotal.outputTokens + action.usage.outputTokens,
-          costUsd: state.usageTotal.costUsd + action.costDelta,
-        },
-      };
+      return { ...state, usageTotal: addUsage(state.usageTotal, action.usage, action.costDelta) };
 
     case 'teamEnd': {
       const { outcome } = action;
@@ -1691,17 +1710,10 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
 
     case 'fastUsage':
       // `usageTotal` AND NOTHING ELSE, exactly as `teamUsage` (§3.6 / AC-18). In
-      // particular NOT `contextTokens`: that gauge shows the LEAD's context
+      // particular NOT `context`: that gauge shows the LEAD's context
       // occupancy against the lead model's window, and a review is a separate
       // conversation with a different model entirely.
-      return {
-        ...state,
-        usageTotal: {
-          inputTokens: state.usageTotal.inputTokens + action.usage.inputTokens,
-          outputTokens: state.usageTotal.outputTokens + action.usage.outputTokens,
-          costUsd: state.usageTotal.costUsd + action.costDelta,
-        },
-      };
+      return { ...state, usageTotal: addUsage(state.usageTotal, action.usage, action.costDelta) };
 
     case 'fastTier':
       return { ...state, fast: action.snapshot };
@@ -1844,42 +1856,45 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
 
     case 'compactionUsage':
       // `usageTotal` AND NOTHING ELSE, exactly as `teamUsage` and `fastUsage`. In
-      // particular NOT `contextTokens`: that gauge shows the LEAD's context
+      // particular NOT `context`: that gauge shows the LEAD's context
       // occupancy against the lead model's window, and a summarization is a
       // separate conversation with a possibly different model entirely.
-      return {
-        ...state,
-        usageTotal: {
-          inputTokens: state.usageTotal.inputTokens + action.usage.inputTokens,
-          outputTokens: state.usageTotal.outputTokens + action.usage.outputTokens,
-          costUsd: state.usageTotal.costUsd + action.costDelta,
-        },
-      };
+      return { ...state, usageTotal: addUsage(state.usageTotal, action.usage, action.costDelta) };
 
     case 'compactionSnapshot':
       return { ...state, compaction: action.snapshot };
 
     /**
-     * THE GAUGE MUST FALL IMMEDIATELY (§6.2 / AC-5).
+     * THE ONE WRITER OF `state.context` (I-1).
      *
-     * `contextTokens` is otherwise only written at `turnEnd`, so a compaction
-     * that took the session from 92 % to 24 % would leave the bar at 92 % until
-     * the next turn completes — and the user would reasonably conclude that
-     * nothing happened. This is a small change and it is the difference between
-     * the feature feeling real and feeling broken.
+     * THE IDENTITY SHORT-CIRCUIT BELOW IS LOAD-BEARING, NOT A MICRO-OPTIMISATION
+     * (§5.2 / R-3). The meter publishes on a 400 ms tick throughout a turn and
+     * most of those ticks measure the same number - the history did not change
+     * between two tool calls of the same size, or the percentage rounded to the
+     * same integer. Returning the SAME state object lets React skip the whole
+     * subtree; returning a fresh one would make a permanently visible row into a
+     * 2.5 Hz re-render source and walk the render governor up its ladder for no
+     * visible change at all.
      *
-     * The value arrives ALREADY CALIBRATED from `App` (§6.2 / P1-11): it replaces
-     * a MEASUREMENT that included the tool schemas, and core's raw estimator
-     * never counts them, so writing the raw figure would make the bar fall too
-     * far and then visibly climb again on the next `turn_end` for no reason the
-     * user can see.
+     * `ContextUsageSnapshot` carries no timestamp for exactly this reason: a
+     * field that moves every tick would make this comparison never hold.
      */
-    case 'contextTokensEstimated':
-      return {
-        ...state,
-        contextTokens: Math.max(0, Math.round(action.tokens)),
-        contextTokensEstimated: true,
-      };
+    case 'contextUsage': {
+      const prev = state.context;
+      const next = action.snapshot;
+      if (
+        prev.occupied === next.occupied &&
+        prev.window === next.window &&
+        prev.pct === next.pct &&
+        prev.source === next.source &&
+        prev.deltaTokens === next.deltaTokens &&
+        prev.windowKnown === next.windowKnown &&
+        prev.windowOverridden === next.windowOverridden
+      ) {
+        return state;
+      }
+      return { ...state, context: next };
+    }
 
     // --- API retry (llm-api-retry-backoff §6.4) ---------------------------
 

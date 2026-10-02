@@ -84,7 +84,7 @@ export interface ScrollViewportProps {
    * This component is the ONLY one inside the viewport subtree that reads
    * `stdout.columns` directly, and the place it uses the number — the
    * `MIN_INDICATOR_COLS` gate — is about how much room THIS BOX has, not how
-   * wide the terminal is. Once the todo rail takes a fifth of the frame those two
+   * wide the terminal is. Once the todo rail takes its responsive share of the frame those two
    * stop being the same number. Optional so every existing caller (and every
    * test) is unchanged.
    */

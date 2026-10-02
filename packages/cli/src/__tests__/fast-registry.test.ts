@@ -73,6 +73,7 @@ function cliConfig(fast: Partial<FastConfig>): CliConfig {
     thinkingLevel: 'high',
     showThinking: false,
     liveToolOutput: false,
+    contextWindow: null,
     theme: 'auto',
     reducedMotion: false,
     exitTranscript: true,

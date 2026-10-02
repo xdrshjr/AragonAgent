@@ -33,7 +33,9 @@ import {
   type FollowThroughMode,
 } from '../todo/follow-through.js';
 import type { ExecEmitter } from './emitter.js';
+import type { FastSnapshot } from '../fast/types.js';
 import type { ExecEvent, ExecStopReason } from './events.js';
+import { ExecProgressReporter } from './progress-reporter.js';
 
 /**
  * The controller surface the runner needs.
@@ -47,6 +49,16 @@ export interface ExecRunnerController extends HeadlessController {
   abort(): void;
   /** `cost.known` (P2-3). Optional so a stub need not model pricing. */
   isPricedModel?(ref: { providerId: string; modelId: string }): boolean;
+  /**
+   * The fast tier's current snapshot, or `null` when this session has no tier
+   * (web-use-tier-cooperation-and-control-closure §4.2.1).
+   *
+   * OPTIONAL, for the identical reason `subscribeFast` is: this interface is
+   * minimal so a test can satisfy it with an object literal, and a controller
+   * with no tier has nothing to report. Called with `?.()`, so a stub that omits
+   * it simply emits no `fast_tier` events.
+   */
+  fastSnapshot?(): FastSnapshot | null;
 }
 
 /** Where the caller's messages come from. One turn, or an NDJSON stdin stream. */
@@ -113,6 +125,7 @@ export class ExecRunner {
   private readonly opts: ExecRunnerOptions;
   private readonly signals: ExecSignalPort;
   private readonly now: () => number;
+  private readonly progress: ExecProgressReporter;
 
   private controller: ExecRunnerController | null = null;
   private unsubscribers: (() => void)[] = [];
@@ -139,6 +152,7 @@ export class ExecRunner {
     this.opts = options;
     this.signals = options.signals ?? DEFAULT_SIGNAL_PORT;
     this.now = options.now ?? Date.now;
+    this.progress = new ExecProgressReporter(this.sessionId, (event) => this.emit(event));
   }
 
   // -----------------------------------------------------------------------
@@ -179,19 +193,63 @@ export class ExecRunner {
       });
     });
     if (todos) this.unsubscribers.push(todos);
+    // FOUR BRANCHES, and the split is the whole of W2
+    // (web-use-tier-cooperation-and-control-closure §4.2.1):
+    //
+    //  · `usage`         — folded into the run's totals (unchanged).
+    //  · `review_end`    — the EXISTING `fast_review` still fires only when the
+    //                      critique has text, byte-for-byte as before; a
+    //                      `fast_tier` now fires UNCONDITIONALLY beside it, so a
+    //                      failed / empty / dropped review is finally visible.
+    //  · `tier_changed`  — a `fast_tier` with no `review` sub-object. This is the
+    //                      one that carries `selfDisabled: true`, because the
+    //                      reviewer emits it right after switching itself off.
+    //  · `review_start`  — DROPPED. `inFlight` on the snapshot already says it,
+    //                      and once every N turns it is pure noise.
     const fast = controller.subscribeFast?.((event) => {
       if (event.type === 'usage') {
         this.usage.inputTokens += event.usage.inputTokens;
         this.usage.outputTokens += event.usage.outputTokens;
         return;
       }
-      if (event.type !== 'review_end' || !event.review.text) return;
+      if (event.type === 'review_start') return;
+      if (event.type === 'review_end' && event.review.text) {
+        this.emit({
+          type: 'fast_review',
+          sessionId: this.sessionId,
+          turn: event.review.turn,
+          model: event.review.model,
+          text: event.review.text,
+        });
+      }
+      // `null` means this session never registered a tier, and a session with no
+      // tier has no business appearing on this channel at all.
+      const snapshot = controller.fastSnapshot?.();
+      if (!snapshot) return;
       this.emit({
-        type: 'fast_review',
+        type: 'fast_tier',
         sessionId: this.sessionId,
-        turn: event.review.turn,
-        model: event.review.model,
-        text: event.review.text,
+        turn: this.turns,
+        live: snapshot.live,
+        selfDisabled: snapshot.selfDisabled,
+        model: snapshot.model,
+        sameAsMain: snapshot.sameAsMain,
+        reviews: snapshot.reviews,
+        reviewBudget: snapshot.reviewBudget,
+        budgetReached: snapshot.budgetReached,
+        delegated: snapshot.delegated,
+        inFlight: snapshot.inFlight,
+        ...(event.type === 'review_end'
+          ? {
+              review: {
+                index: event.review.index,
+                kind: event.review.kind,
+                ...(event.review.detail !== undefined ? { detail: event.review.detail } : {}),
+                durationMs: event.review.durationMs,
+                injected: event.review.injected,
+              },
+            }
+          : {}),
       });
     });
     if (fast) this.unsubscribers.push(fast);
@@ -206,6 +264,7 @@ export class ExecRunner {
         return;
       }
       if (event.type === 'compaction_start') {
+        this.progress.record('compaction');
         this.emit({
           type: 'compaction',
           sessionId: this.sessionId,
@@ -216,6 +275,7 @@ export class ExecRunner {
         return;
       }
       if (event.type !== 'compaction_end') return;
+      this.progress.record('model');
       const r = event.record;
       this.emit({
         type: 'compaction',
@@ -249,6 +309,7 @@ export class ExecRunner {
   detach(): void {
     if (this.detached) return;
     this.detached = true;
+    this.progress.dispose();
     for (const off of this.unsubscribers.splice(0)) {
       try {
         off();
@@ -313,13 +374,39 @@ export class ExecRunner {
       // that true: a conversation of exactly `--max-turns` turns whose caller has
       // nothing more to say exits 0 with `end_turn`, not 3 with `max_turns`.
       if (next === null) break;
-      if (this.turnBudgetExhausted()) {
-        this.stopReason = 'max_turns';
-        break;
+      const requestSeq = ++this.requestSeq;
+      this.requestHadError = false;
+      this.progress.begin(requestSeq);
+      this.emit({ type: 'turn_state', sessionId: this.sessionId, requestSeq, phase: 'started' });
+      this.progress.started(requestSeq);
+      try {
+        if (this.isRequestCancelled()) break;
+        if (this.turnBudgetExhausted()) {
+          this.stopReason = 'max_turns';
+          break;
+        }
+        const finished = await this.runFollowThroughChain(controller, next, followThrough);
+        if (finished) break;
+      } catch (err) {
+        this.errored = true;
+        this.recordError('agent_error', err instanceof Error ? err.message : String(err));
+        throw err;
+      } finally {
+        this.progress.finish(requestSeq);
+        const phase = this.isRequestCancelled()
+          ? 'cancelled'
+          : this.requestHadError ? 'failed' : 'completed';
+        this.emit({ type: 'turn_state', sessionId: this.sessionId, requestSeq, phase });
       }
-      const finished = await this.runFollowThroughChain(controller, next, followThrough);
-      if (finished) break;
     }
+  }
+
+  private requestSeq = 0;
+  private requestHadError = false;
+
+  private isRequestCancelled(): boolean {
+    return this.stopReason === 'interrupted' || this.stopReason === 'timeout' ||
+      this.stopReason === 'max_turns';
   }
 
   /** One caller message plus every auto-continuation it produces. */
@@ -358,7 +445,7 @@ export class ExecRunner {
         // `aborted` is false here for the same structural reason `-p` gives: an
         // interrupt sets `stopReason` and returns above, so this branch is only
         // reached by a run that ended on its own terms.
-        runEnd: { aborted: false, errored: this.errored },
+        runEnd: { aborted: false, errored: this.requestHadError },
         budget,
         interactive: false,
       });
@@ -474,18 +561,41 @@ export class ExecRunner {
    * this and add the getter.
    */
   private installTerminator(): void {
-    this.signals.setTerminator((signo: number) => {
-      const at = this.now();
-      const secondSignal = at - this.lastSignalAt <= SECOND_SIGNAL_WINDOW_MS;
-      if (this.detached || (this.lastSignalAt > 0 && secondSignal)) {
-        this.signals.exit(128 + signo);
-        return;
-      }
-      this.lastSignalAt = at;
-      this.signalNumber = signo;
-      this.stopReason = 'interrupted';
-      this.controller?.abort();
-    });
+    this.signals.setTerminator((signo: number) => this.onSignal(signo));
+  }
+
+  /**
+   * Exactly synonymous with a SIGINT, only it does not travel through a signal.
+   *
+   * The stdin `{"type":"interrupt"}` frame routes here. It used to route through
+   * `process.kill(process.pid, 'SIGINT')`, which is fine on POSIX and WRONG on
+   * Windows: Node does not deliver a self-directed SIGINT to its own handlers
+   * there, so the process terminates with exit code 1 having run neither the
+   * terminator below, nor the settle path, nor `persist()`, nor the `result`
+   * event. A wrapper that interrupts a turn and respawns on the same
+   * `--session-id` would silently get a conversation missing everything since the
+   * last save - and `exec/index.ts` was already designed for exactly that caller
+   * ("PERSIST FIRST, ANNOUNCE SECOND").
+   *
+   * POSIX behaviour is byte-for-byte unchanged: the same closure runs, with
+   * `signalNumber = 2`, `exitCode() = 130`, and the two-second second-signal
+   * escape hatch intact.
+   */
+  requestInterrupt(): void {
+    this.onSignal(2);
+  }
+
+  private onSignal(signo: number): void {
+    const at = this.now();
+    const secondSignal = at - this.lastSignalAt <= SECOND_SIGNAL_WINDOW_MS;
+    if (this.detached || (this.lastSignalAt > 0 && secondSignal)) {
+      this.signals.exit(128 + signo);
+      return;
+    }
+    this.lastSignalAt = at;
+    this.signalNumber = signo;
+    this.stopReason = 'interrupted';
+    this.controller?.abort();
   }
 
   // -----------------------------------------------------------------------
@@ -514,6 +624,7 @@ export class ExecRunner {
         this.checkTurnBudget();
         break;
       case 'tool_execution_start':
+        this.progress.record('tool');
         this.emit({
           type: 'tool_call',
           sessionId: this.sessionId,
@@ -524,6 +635,7 @@ export class ExecRunner {
         });
         break;
       case 'tool_execution_end':
+        this.progress.record('model');
         this.emit({
           type: 'tool_result',
           sessionId: this.sessionId,
@@ -540,7 +652,7 @@ export class ExecRunner {
         break;
       case 'agent_end':
         // A swallowed throw (missing key / empty stream) produces no `turn_end`.
-        if (!this.sawTurnEnd && !this.errored && this.stopReason === 'end_turn') {
+        if (!this.sawTurnEnd && !this.requestHadError && !this.isRequestCancelled()) {
           this.errored = true;
           this.recordError('agent_error', 'The run produced no assistant turn.');
         }
@@ -551,6 +663,11 @@ export class ExecRunner {
   }
 
   private onStreamEvent(se: StreamEvent): void {
+    if (se.type === 'text_delta' && se.delta) this.progress.record('model');
+    if (se.type === 'thinking_delta' && se.delta) this.progress.record('thinking');
+    if (se.type === 'tool_call_delta' && se.argsDelta) this.progress.record('tool_arguments');
+    if (se.type === 'retry_scheduled') this.progress.record('retry', se.delayMs);
+    if (se.type === 'retry_attempt') this.progress.record('model');
     if (se.type === 'text_delta') {
       this.flushThinking();
       if (this.opts.partialMessages) {
@@ -612,6 +729,7 @@ export class ExecRunner {
   }
 
   private recordError(code: string, message: string): void {
+    this.requestHadError = true;
     if (this.errorCode) return;
     this.errorCode = code;
     this.errorMessage = message;

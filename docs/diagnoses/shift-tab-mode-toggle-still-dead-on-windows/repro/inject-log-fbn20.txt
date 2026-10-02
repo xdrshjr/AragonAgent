@@ -1,0 +1,10 @@
+﻿[    9ms] mode_before=0x01F7
+[ 1555ms] mode_during=0x0008 VT_INPUT=False
+[ 1600ms] inject Shift+Tab (control, expect 09) ok=True written=2
+[ 1925ms] inject Ctrl+P (expect 10) ok=True written=2
+[ 2268ms] inject Ctrl+B (expect 02) ok=True written=2
+[ 2611ms] inject Alt+M  (expect 1b 6d?) ok=True written=2
+[ 2952ms] inject F2     (expect fn-key table) ok=True written=2
+[ 3277ms] inject Ctrl+Tab (expect 09?) ok=True written=2
+[ 9119ms] mode_after=0x0008
+[ 9120ms] done

@@ -3,6 +3,7 @@
  */
 
 import type { AssistantMessage, StreamEvent } from './types.js';
+import { SseParser } from './sse-parser.js';
 
 // ---------------------------------------------------------------------------
 // SSE event type
@@ -22,115 +23,75 @@ export interface SSEEvent {
 // ---------------------------------------------------------------------------
 
 /**
- * Parse a `ReadableStream<Uint8Array>` (typically `Response.body`) into an
- * async iterator of {@link SSEEvent} objects.
- *
- * Handles:
- * - Multi-line `data:` fields (concatenated with `\n`)
- * - `event:` and `id:` fields
- * - Proper `\n\n` event boundary detection
- * - Graceful abort via `signal`
- *
- * The iterator ends when the stream closes or `signal` fires.
+ * Parse model SSE frames, retaining the normal EOF compatibility extension.
+ * Abort drops pending data; all early exits cancel once without awaiting cleanup.
+ * Throws SseFrameLimitError when an individual frame exceeds its capacity.
  */
 export async function* parseSSEStream(
   body: ReadableStream<Uint8Array>,
   signal?: AbortSignal,
 ): AsyncIterableIterator<SSEEvent> {
+  if (signal?.aborted) return;
   const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  // Set up abort listener to release the reader
-  const onAbort = () => {
-    reader.cancel().catch(() => {});
+  const decoder = new TextDecoder('utf-8', { ignoreBOM: true });
+  const parser = new SseParser();
+  let reachedEof = false;
+  let cancelled = false;
+  const cancelOnce = (): void => {
+    if (cancelled) return;
+    cancelled = true;
+    try {
+      // A transport can reject or never settle its cleanup promise.
+      void reader.cancel().catch(() => {});
+    } catch {
+      // A synchronous transport cleanup failure must not mask the stream result.
+    }
   };
-  signal?.addEventListener('abort', onAbort, { once: true });
-
+  signal?.addEventListener('abort', cancelOnce, { once: true });
   try {
-    while (true) {
-      if (signal?.aborted) break;
-
+    if (signal?.aborted) { cancelOnce(); return; }
+    while (!signal?.aborted) {
       const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-
-      // Process complete events separated by \n\n
-      let boundary: number;
-      while ((boundary = buffer.indexOf('\n\n')) !== -1) {
-        const rawEvent = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-
-        const parsed = parseSSEBlock(rawEvent);
-        if (parsed) {
-          yield parsed;
-        }
+      if (signal?.aborted) return;
+      if (done) { reachedEof = true; break; }
+      for (const event of decodeChunk(value, decoder, parser)) {
+        if (signal?.aborted) return;
+        yield event;
+        if (signal?.aborted) return;
       }
     }
-
-    // Flush any trailing data that wasn't terminated by \n\n
-    if (buffer.trim().length > 0) {
-      const parsed = parseSSEBlock(buffer);
-      if (parsed) {
-        yield parsed;
-      }
+    if (signal?.aborted) return;
+    for (const event of parser.push(decoder.decode())) {
+      if (signal?.aborted) return;
+      yield event;
     }
+    if (signal?.aborted) return;
+    for (const event of parser.finish()) {
+      if (signal?.aborted) return;
+      yield event;
+    }
+  } catch (err) {
+    cancelOnce();
+    if (signal?.aborted) return;
+    throw err;
   } finally {
-    signal?.removeEventListener('abort', onAbort);
+    signal?.removeEventListener('abort', cancelOnce);
+    parser.clear();
+    if (!reachedEof) cancelOnce();
     reader.releaseLock();
   }
 }
 
-/**
- * Parse a single SSE block (the text between two `\n\n` boundaries) into an
- * {@link SSEEvent}.  Returns `undefined` for comment-only or empty blocks.
- */
-function parseSSEBlock(block: string): SSEEvent | undefined {
-  let event: string | undefined;
-  let id: string | undefined;
-  const dataLines: string[] = [];
-
-  for (const line of block.split('\n')) {
-    // Comment lines start with ':'
-    if (line.startsWith(':')) continue;
-
-    const colonIdx = line.indexOf(':');
-    if (colonIdx === -1) {
-      // Field with no value — treat field name as the value (per SSE spec)
-      continue;
-    }
-
-    const field = line.slice(0, colonIdx);
-    // Value starts after ':' — strip a single leading space if present
-    let value = line.slice(colonIdx + 1);
-    if (value.startsWith(' ')) {
-      value = value.slice(1);
-    }
-
-    switch (field) {
-      case 'event':
-        event = value;
-        break;
-      case 'data':
-        dataLines.push(value);
-        break;
-      case 'id':
-        id = value;
-        break;
-      // 'retry' and unknown fields are ignored
-    }
+function* decodeChunk(
+  bytes: Uint8Array,
+  decoder: TextDecoder,
+  parser: SseParser,
+): IterableIterator<SSEEvent> {
+  const decodeSliceBytes = 16 * 1024;
+  for (let offset = 0; offset < bytes.length; offset += decodeSliceBytes) {
+    const slice = bytes.subarray(offset, offset + decodeSliceBytes);
+    yield* parser.push(decoder.decode(slice, { stream: true }));
   }
-
-  if (dataLines.length === 0 && event === undefined) {
-    return undefined;
-  }
-
-  return {
-    event,
-    data: dataLines.join('\n'),
-    id,
-  };
 }
 
 // ---------------------------------------------------------------------------

@@ -63,12 +63,14 @@ import {
   clampHumanTimeout,
   clampSkillsIntegrity,
   clampSkillsToolPolicy,
+  clampContextWindow,
   clampMaxRenderInterval,
   clampScrollResumeMs,
   clampTranscriptRetain,
   clampTranscriptWindow,
   coercePositiveInt,
   isAdapterProvider,
+  isAutoToken,
   parseMaxTokensInput,
   DEFAULT_MAX_RENDER_INTERVAL_MS,
   DEFAULT_MAX_TOKENS,
@@ -194,6 +196,7 @@ interface RawOpts {
   fastModel?: string;
   fastProvider?: string;
   fastReview?: string;
+  fastDelegate?: boolean;
   logLevel?: string;
   logFile?: boolean;
   logDir?: string;
@@ -282,6 +285,11 @@ function toFlags(opts: RawOpts): CliFlags {
     fastModel: opts.fastModel,
     fastProvider: opts.fastProvider,
     fastReview: opts.fastReview,
+    // …and again for `--fast-delegate` / `--no-fast-delegate`, one feature
+    // later — NINE features, one trap. It is `fast.delegate`'s only channel:
+    // there is no `ARAGON_FAST_DELEGATE`, so missing this line leaves a wrapper
+    // with no way at all to say "do not delegate on this run".
+    fastDelegate: opts.fastDelegate,
     // `--verbose` is just a shorthand for `--log-level debug`; an explicit
     // `--log-level` still wins, so the two can be combined without surprise.
     logLevel: opts.logLevel ?? (opts.verbose ? 'debug' : undefined),
@@ -1137,6 +1145,11 @@ const CONFIG_SET_KEYS = new Set([
   'baseUrl',
   'thinkingLevel',
   'maxTokens',
+  // context-usage-gauge-accuracy §3.6. Listed here AND given its own branch in
+  // `runConfigSet` below - a key present here but absent there falls through
+  // every case, writes nothing, and still prints `Set contextWindow = 1000000`
+  // (P1-2).
+  'contextWindow',
   'theme',
   'confirmTools',
   'toolTimeoutMs',
@@ -1239,6 +1252,33 @@ function runConfigSetMaxTokens(value: string): void {
   process.stdout.write(`Set maxTokens = ${merged.maxTokens ?? 'auto'}\n`);
 }
 
+/**
+ * `aragon config set contextWindow <n|auto>`.
+ *
+ * ITS OWN BRANCH, AHEAD OF THE SWITCH, for the reason `maxTokens` has one: it
+ * must echo the STORED value rather than the typed one, so
+ * `config set contextWindow 99999999` reports the clamped 5000000 instead of a
+ * number that was never written. It also REJECTS nonsense rather than clamping
+ * it - a non-numeric argument here is almost always a typo for a number, and
+ * storing AUTO for `20O000` would quietly discard the user's intent.
+ */
+function runConfigSetContextWindow(value: string): void {
+  const trimmed = value.trim();
+  const auto = isAutoToken(trimmed);
+  if (!auto && !/^\d+$/.test(trimmed)) {
+    process.stderr.write(
+      `Invalid contextWindow "${value}". Use a number of tokens or "auto".\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  // `null` GOES IN UNCLAMPED (RV-12). Running AUTO through the clamp yields
+  // 8000 and removes "auto" from the config permanently.
+  const stored = auto ? null : clampContextWindow(trimmed, null);
+  const merged = updatePersistedConfig({ contextWindow: stored });
+  process.stdout.write(`Set contextWindow = ${merged.contextWindow ?? 'auto'}\n`);
+}
+
 function runConfigSet(key: string, value: string): void {
   if (!CONFIG_SET_KEYS.has(key)) {
     process.stderr.write(
@@ -1261,6 +1301,12 @@ function runConfigSet(key: string, value: string): void {
   // was never written. Same reason `team.*` has its own branch.
   if (key === 'maxTokens') {
     runConfigSetMaxTokens(value);
+    return;
+  }
+
+  // The second tri-state key, and it needs its own branch for the same reason.
+  if (key === 'contextWindow') {
+    runConfigSetContextWindow(value);
     return;
   }
 
@@ -1740,6 +1786,14 @@ function buildProgram(): Command {
     .option('--fast-model <id>', 'The fast model id (implies nothing about --fast)')
     .option('--fast-provider <id>', 'Provider for the fast model (default: the main provider)')
     .option('--fast-review <n|off>', 'Turns between automatic fast reviews, or "off"')
+    // BOTH FORMS, POSITIVE FIRST, and here it matters more than anywhere above:
+    // `fast.delegate` is PERSISTED and defaults to TRUE, so declaring only
+    // `--no-fast-delegate` would make commander default `opts.fastDelegate` to
+    // `true` and force `delegate: true` on EVERY run that passed no flag at all
+    // — silently overwriting a user's stored `false`. Same polarity, same trap
+    // and same fix as `--update` / `--compaction`.
+    .option('--fast-delegate', 'Let the fast tier take mechanical sub-steps (the default)')
+    .option('--no-fast-delegate', 'Run every sub-step on the main model')
     // BOTH FORMS, positive first, for the reason recorded seven times above —
     // and this is the pair whose omission would be worst. `update.mode` is
     // PERSISTED and defaults to `'auto'`, so a lone `--no-update` would make

@@ -212,12 +212,9 @@ describe('a completed stream is untouched (AC-9b)', () => {
       expect(events.some((e) => e.type === 'error')).toBe(false);
     });
 
-    it(`${testCase.name} yields done, NOT an error, when the request was aborted`, async () => {
-      // `parseSSEStream` `break`s on `signal.aborted` and lands on the very same
-      // fall-through the truncation check guards. Treating that as a provider
-      // failure would turn every Esc into a fake retryable network error and
-      // re-create the trap `isRetryableError` check 1 exists to close (R-17).
-      // THIS ASSERTION IS NOT OPTIONAL.
+    it(`${testCase.name} emits no terminal output when the request was aborted`, async () => {
+      // Intentional v2 contract change: cancellation produces neither a success
+      // terminal nor a retryable truncation error, even with accumulated content.
       stubSSE(testCase.complete);
       const controller = new AbortController();
       controller.abort();
@@ -225,8 +222,7 @@ describe('a completed stream is untouched (AC-9b)', () => {
         ...baseRequest,
         signal: controller.signal,
       });
-      expect(events.some((e) => e.type === 'error')).toBe(false);
-      expect(events[events.length - 1]?.type).toBe('done');
+      expect(events).toEqual([]);
     });
   }
 });

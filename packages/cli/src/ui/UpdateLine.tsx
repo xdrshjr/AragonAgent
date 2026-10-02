@@ -9,7 +9,7 @@
  * still truthy. Taking that branch would emit a box of ZERO rows - the frame
  * keeps its fixed height, Yoga hands the row to the transcript, and
  * `viewportRows()` goes on reporting the old number to `ScrollViewport`,
- * `selectWindow`, `overlayMaxRows`, `popupMaxRows` and `todoRailRows`. The
+ * `selectWindow`, `overlayMaxRows`, `popupMaxRows` and `buildTodoRailLayout`. The
  * transcript would gain a row while the updater is idle and lose it the moment
  * it has news. Presence is the CALLER's decision, through
  * `shouldRenderUpdateLine`, exactly as `App.tsx` already decides the activity

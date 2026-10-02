@@ -21,7 +21,6 @@ import {
 } from '../agent/reducer.js';
 import { mergeDeltas } from '../agent/coalesce.js';
 import { computeCost } from '../agent/usage.js';
-import { isApproximate } from '../compaction/pressure.js';
 import {
   parseMaxTokensInput,
   DEFAULT_MAX_RENDER_INTERVAL_MS,
@@ -72,8 +71,8 @@ import { UPDATE_LIMITS } from '../update/limits.js';
 import type { UpdateBridge, UpdateSnapshot } from '../update/types.js';
 import { AppShell } from './layout/AppShell.js';
 import { ScrollViewport } from './layout/ScrollViewport.js';
-import { todoRailRows, todoRailWidth } from './layout/rail.js';
-import { TODO_LIMITS } from '../todo/limits.js';
+import { buildTodoRailLayout } from './layout/todo-layout.js';
+import { buildTeamPanelLayout } from './layout/team-panel.js';
 import {
   advanceBudget,
   decideFollowThrough,
@@ -961,6 +960,28 @@ export function App({
     });
   }, [controller]);
 
+  // --- Context occupancy (context-usage-gauge-accuracy §3.3 / I-1). --------
+  //
+  // A SEVENTH SUBSCRIPTION, AND THE SOLE DISPATCHER OF `contextUsage`. The gauge
+  // used to be written from three reducer branches fed by two upstreams, which
+  // is what let a stale `snapshot` bounce the bar back to the pre-compaction
+  // figure one statement after a compaction correctly dropped it (P0-1). One
+  // writer makes that unrepresentable.
+  //
+  // IT SUBSCRIBES UNCONDITIONALLY. `subscribeContextUsage` is not a compaction
+  // forwarder - the meter exists in every session, including one started with
+  // `--no-compaction`, which is precisely the session whose gauge previously had
+  // one sample per turn and read 0 % after a `/resume`.
+  useEffect(() => {
+    // SEED ON MOUNT so a resumed session shows a real occupancy on frame 1
+    // rather than after its first completed turn. `getContextUsage()` measures
+    // on demand, so this works before any event has ever arrived.
+    dispatch({ type: 'contextUsage', snapshot: controller.getContextUsage() });
+    return controller.subscribeContextUsage((snapshot) => {
+      dispatch({ type: 'contextUsage', snapshot });
+    });
+  }, [controller]);
+
   // --- Compaction event stream (context-auto-compaction §5.2). -------------
   //
   // A SIXTH SUBSCRIPTION, for the reason the team, todo and fast ones record:
@@ -998,23 +1019,20 @@ export function App({
             model: event.model,
           });
           break;
-        case 'compaction_end': {
+        case 'compaction_end':
+          // THE CARD, AND NOTHING ELSE (context-usage-gauge-accuracy §3.3).
+          //
+          // A `contextTokensEstimated` dispatch used to live here, hand-building
+          // the post-compaction occupancy out of `record.tokensAfter` plus the
+          // snapshot's `estimateOffset`. It is gone because the gauge now has ONE
+          // writer: `ContextMeter` learns about the splice from
+          // `CompactionWiring.settlePending` itself and re-measures, so the bar
+          // falls in the same frame WITHOUT this branch and without the `snapshot`
+          // branch below racing it. Those two dispatches were the second and
+          // third writers of one number, and the loser of that race was the
+          // correct value (P0-1).
           dispatch({ type: 'compactionEnd', record: event.record });
-          // THE GAUGE MUST FALL IMMEDIATELY (§6.2 / AC-5), and it must fall to a
-          // number in the SAME UNIT as the one it replaces (P1-11). The value
-          // being overwritten came from `occupiedTokens(usage)` — a provider
-          // measurement that includes the tool schemas — while
-          // `record.tokensAfter` comes from core's `estimatePromptTokens`, which
-          // never counts them. Writing the raw estimate makes the bar fall too
-          // far and then visibly climb again on the next `turn_end` for no reason
-          // the user can see, which is the same is-this-thing-working doubt the
-          // immediate drop exists to prevent, one turn later.
-          if (event.record.applied) {
-            const offset = controller.getCompactionSnapshot().pressure.estimateOffset ?? 0;
-            dispatch({ type: 'contextTokensEstimated', tokens: event.record.tokensAfter + offset });
-          }
           break;
-        }
         case 'usage': {
           // Compaction spend is REAL SPEND at the SUMMARIZER's price (§6.4 /
           // AC-15), which may be neither the lead's nor the fast tier's — so the
@@ -1032,24 +1050,12 @@ export function App({
           break;
         }
         case 'snapshot':
+          // THE CHIP, THE COUNTS AND THE SUMMARIZER (§3.3). The occupancy that
+          // rides along on `snapshot.pressure` is deliberately NOT dispatched
+          // here: the meter that produced it publishes it on its own channel, and
+          // a second dispatch of the same number is the second writer this
+          // feature removed.
           dispatch({ type: 'compactionSnapshot', snapshot: event.snapshot });
-          // ONE NUMBER ON SCREEN AND IN THE TRIGGER (R-11 / hardening §3.2.4).
-          // The checkpoint's occupancy is a measured base PLUS an estimate of
-          // what was appended after it, and without this the gauge would still
-          // show the bare base from the last `turn_end` - so a user watching
-          // 76 % would see compaction fire and conclude the feature is broken.
-          //
-          // `contextTokensEstimated` IS REUSED RATHER THAN A SECOND WRITER ADDED:
-          // it is the one existing action for "this figure is derived", and it
-          // already sets the `~`. Gated on `isApproximate`, which is precisely
-          // the case it was built for - a wholly measured figure belongs to
-          // `turnEnd`.
-          if (isApproximate(event.snapshot.pressure)) {
-            dispatch({
-              type: 'contextTokensEstimated',
-              tokens: event.snapshot.pressure.occupied,
-            });
-          }
           break;
       }
     });
@@ -1363,6 +1369,10 @@ export function App({
   // may call an updater more than once, and scheduling a timer from inside one
   // would arm it twice.
   const [draftRows, setDraftRows] = useState(1);
+  const [popupRows, setPopupRows] = useState(0);
+  const onPopupRowsChange = useCallback((next: number) => {
+    setPopupRows(previous => previous === next ? previous : next);
+  }, []);
   const draftRowsRef = useRef(1);
   const shrinkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onDraftRows = useCallback((next: number) => {
@@ -2077,8 +2087,12 @@ export function App({
 
   // --- Render ------------------------------------------------------------
 
-  const modelInfo = controller.getModelInfo();
-  const modelKnown = !!controller.getModelRegistry().getModel(cfg.provider, cfg.model);
+  // `const modelInfo = controller.getModelInfo()` AND ITS `modelKnown` COMPANION
+  // USED TO LIVE HERE (context-usage-gauge-accuracy §4.3). They fed the status
+  // bar's `contextWindow` / `contextWindowKnown` props, which no longer exist:
+  // the denominator and its trustworthiness are resolved inside `ContextMeter`,
+  // which is what lets the user's `contextWindow` override reach the gauge at
+  // all. Nothing else in this render read them.
   const overlay = state.overlay;
   const hasKey = controller.hasApiKey();
   const empty = state.entries.length === 0;
@@ -2142,23 +2156,19 @@ export function App({
   const viewportBudget = computeViewportRows(rows, draftRows);
   const overlayMaxRows = fullscreen ? viewportBudget : Number.POSITIVE_INFINITY;
 
-  // --- The todo rail (todo-plan-execution §3.9). --------------------------
-  //
-  // ONE NUMBER FOR THE GATE AND FOR THE LAYOUT (I-10). `railRows` is both what
-  // decides whether the panel mounts and what the panel lays out against; a
-  // panel that mounts on one number and renders against another shows nothing
-  // and reports nothing. `todoRailRows` is NOT `viewportBudget`: the live team
-  // roster costs up to 8 rows inside `AppShell`'s measured bottom box that the
-  // budget knows nothing about (P1-3).
-  const railRows = todoRailRows(viewportBudget, state.team !== null);
-  const railWidth = todoRailWidth(cols);
-  const showRail =
-    fullscreen && // non-goal 4: inline mode has no fixed frame
-    cfg.todo.panel && // `/todo panel off`, persisted
-    overlay === null && // a modal owns the screen (D-7)
-    state.todos !== null && // no list -> no furniture, zero layout cost
-    railWidth > 0 && // too narrow (under 80 columns)
-    railRows >= TODO_LIMITS.panelMinRows; // too short to say anything useful
+  // Renderers consume these same projections. Team capacity does not depend on
+  // popup occupancy, so a menu cannot toggle the team's collapsed state.
+  const teamLayout = buildTeamPanelLayout({
+    snapshot: state.team, terminalRows: rows, availableRows: viewportBudget,
+  });
+  const railLayout = buildTodoRailLayout({
+    mode, cols, panelEnabled: cfg.todo.panel, overlayOpen: overlay !== null,
+    itemCount: state.todos?.items.length ?? 0, viewportBudget,
+    teamRows: teamLayout.rowCount, popupRows,
+  });
+  // Every viewport consumer uses contentCols; header, composer, status and
+  // overlays keep the full terminal width. Overlay visibility is in the gate.
+  const { visible: showRail, width: railWidth, rows: railRows, contentCols } = railLayout;
 
   // The inline plan strip (todo-plan-followthrough §3.7 / W2).
   //
@@ -2172,13 +2182,6 @@ export function App({
   // needless — this runs in RENDER scope, where `cfg` is re-read every frame.
   // The asymmetry with the `agent_end` handler above is the whole of P1-1.
   const showStrip = !fullscreen && cfg.todo.panel && state.todos !== null;
-
-  // Every consumer INSIDE the viewport slot switches to this; the header,
-  // composer, status bar, toasts and every overlay keep the full frame width
-  // (C-7). Overlays keep it because `showRail` already includes `overlay ===
-  // null`: splitting the screen with a status panel behind a modal is both worse
-  // design and a second source of width-contract bugs in six components.
-  const contentCols = cols - (showRail ? railWidth : 0);
 
   const overlayNode =
     overlay === 'help' ? (
@@ -2471,6 +2474,8 @@ export function App({
       services={liveServices}
       modeToggleKey={modeToggleKey}
       popupMaxRows={popupMaxRows}
+      popupMaxHeight={railLayout.popupMaxHeight}
+      onPopupRowsChange={onPopupRowsChange}
       scrolledLines={scrolledLines}
       onDraftRows={onDraftRows}
       onNotice={notify}
@@ -2507,6 +2512,7 @@ export function App({
         state.team ? (
           <TeamPanel
             snapshot={state.team}
+            layout={fullscreen ? teamLayout : undefined}
             rows={rows}
             cols={cols}
             reducedMotion={viewReducedMotion}
@@ -2604,10 +2610,13 @@ export function App({
           model={cfg.model}
           provider={cfg.provider}
           usageTotal={state.usageTotal}
-          contextTokens={state.contextTokens}
-          contextWindow={modelInfo.contextWindow}
-          contextWindowKnown={modelKnown}
-          contextEstimated={state.contextTokensEstimated}
+          // ONE OBJECT INSTEAD OF FOUR PARALLEL PROPS (§4.3). The four were a
+          // projection of "many sources of truth" into the props layer, and a
+          // caller could update three of them; a single reading cannot be
+          // partially stale. The window and its `known` flag now travel INSIDE
+          // it, resolved by the meter - which is what makes the user's
+          // `contextWindow` override reach the bar.
+          context={state.context}
           status={state.status}
           elapsedMs={elapsedMs}
           thinkingLevel={cfg.thinkingLevel}
@@ -2651,13 +2660,34 @@ export function App({
           // note above gives one chip over: a session that registered compaction
           // and then turned it off with `/compact off` must stop advertising it.
           //
-          // The GAUGE MARKS ride the same condition, so a session with compaction
-          // off gets `buildGauge`'s own 60/85 defaults and a byte-identical bar
-          // (§6.2). When they are present the colour the user sees agrees with
-          // the number the trigger fires on, which is the whole point.
+          // THE GAUGE MARKS NO LONGER RIDE THIS CONDITION (P2-6 / RV-4). They
+          // used to, and the spread just below is now their own; see the note
+          // there for why colour answers a different question than the chip.
           {...(state.compaction?.live
+            ? { compactionActive: { inFlight: state.compaction.inFlight } }
+            : {})}
+          // THE GAUGE MARKS RIDE THEIR OWN CONDITION (P2-6 / RV-4). They used to
+          // share the chip's `state.compaction?.live`, and `live` is
+          // `enabled && summarizer !== null` - so a session whose summarizer
+          // simply fails to resolve lost the correct colour thresholds as well,
+          // and coloured by 60/85 while the trigger fired at 90.
+          //
+          // THE PREDICATE IS `isCompactionEnabled()`, NOT `isCompactionRegistered()`.
+          // Colour answers "when will I be rescued", and that is decided by
+          // CONFIG, not by whether a summarizer resolves this instant. But
+          // `/compact off` means no rescue is coming, and colouring by the
+          // compaction thresholds afterwards would be a promise the session
+          // cannot keep; `isCompactionEnabled()` is false there and the bar
+          // correctly falls back to `gauge.ts`'s 60/85, whose meaning is exactly
+          // "nobody is coming".
+          //
+          // READING A NON-REACTIVE GETTER IN RENDER IS SAFE HERE because both
+          // `setEnabled` and `onConfigChanged` emit a `snapshot`, which
+          // dispatches and re-renders. A future start/stop path that emits NO
+          // snapshot would freeze this colour; the fix then is an `enabled` field
+          // on `CompactionSnapshot`, not a polling effect.
+          {...(controller.isCompactionEnabled()
             ? {
-                compactionActive: { inFlight: state.compaction.inFlight },
                 gaugeMarks: {
                   warn: cfg.compaction.warnThreshold * 100,
                   high: cfg.compaction.threshold * 100,

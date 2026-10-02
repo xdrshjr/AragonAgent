@@ -74,7 +74,7 @@ import {
   runReviewCall,
   usageOf,
 } from './review-call.js';
-import type { FastEvent, FastReview, FastTier } from './types.js';
+import type { FastEvent, FastReview, FastSnapshot, FastTier } from './types.js';
 
 /**
  * Everything the reviewer needs from the rest of the world.
@@ -109,6 +109,14 @@ export interface FastReviewerDeps {
   available(): boolean;
   getApiKey(providerId: string): string | undefined;
   emit(event: FastEvent): void;
+  /**
+   * `FastWiring.snapshot()`, so the self-disable can announce itself.
+   *
+   * The reviewer cannot build a `FastSnapshot` on its own — `live`,
+   * `sameAsMain`, `delegated` and `pricingUnknown` all belong to the wiring —
+   * and the two existing `tier_changed` emitters read it the same way.
+   */
+  snapshot(): FastSnapshot;
   notify(level: NoticeLevel, text: string): void;
   /** Injected clock. A test that reads the wall clock fails on a slow machine
    *  and nowhere else - the reason `TodoStore` and `TeamPanel` take one. */
@@ -222,6 +230,19 @@ export class FastReviewer {
 
   isReviewInFlight(): boolean {
     return this.inFlight;
+  }
+
+  /**
+   * Whether this reviewer switched itself off after
+   * `FAST_LIMITS.maxConsecutiveFailures` non-transient failures in a row.
+   *
+   * Carried onto `FastSnapshot` so a wrapper can say "the fast reviews stopped,
+   * and here is why" instead of showing a tier that reads as healthy while not
+   * one review ever arrives. Same shape as `reviewCount()` / `isBudgetReached()`
+   * — a read-only accessor, no side effects.
+   */
+  isSelfDisabled(): boolean {
+    return this.selfDisabled;
   }
 
   /**
@@ -690,6 +711,16 @@ export class FastReviewer {
         `Fast review disabled for this session after ${FAST_LIMITS.maxConsecutiveFailures} ` +
           `failures. Last error: ${errorText(err)}`,
       );
+      // THE ONE LINE THAT MAKES THE FLAG OBSERVABLE OUTSIDE THIS PROCESS.
+      //
+      // `emitReview({kind:'failed'})` above already fired, carrying a snapshot
+      // in which `selfDisabled` was still `false`, and after this point the
+      // reviewer emits NOTHING EVER AGAIN (`shouldReview()` opens with
+      // `if (this.selfDisabled) return false;`). Without this extra
+      // `tier_changed`, the field exists, the accessor exists, the snapshot line
+      // exists — and no consumer can ever see it as `true`. The `App` chip also
+      // consumes `tier_changed`; one more refresh is free.
+      this.deps.emit({ type: 'tier_changed', snapshot: this.deps.snapshot() });
     }
   }
 

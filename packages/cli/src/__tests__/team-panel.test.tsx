@@ -8,6 +8,7 @@ import { TeamCard } from '../ui/entries/TeamCard.js';
 import { StatusBar } from '../ui/StatusBar.js';
 import { getTheme } from '../ui/theme.js';
 import { TEAM_LIMITS } from '../team/limits.js';
+import { buildTeamPanelLayout } from '../ui/layout/team-panel.js';
 import type { SubagentRun, TeamSnapshot } from '../team/types.js';
 
 const RICH = { colorLevel: 3 as const, unicode: true };
@@ -53,6 +54,40 @@ function frameOf(node: React.ReactElement): string {
 }
 
 describe('TeamPanel (§6.1)', () => {
+  it('多行任务描述与邮件主题只占预算内的一行，保留原始数据', () => {
+    const description = 'first\r\nsecond\t任务';
+    const subject = 'hello\nagain\t邮件';
+    const data = snapshot({
+      runs: [run({ description })],
+      lastMessage: { from: 'a1', to: 'lead', subject, body: '', at: 1 },
+    });
+    const layout = buildTeamPanelLayout({
+      snapshot: data, terminalRows: 20, availableRows: 12,
+    });
+    const frame = frameOf(<TeamPanel snapshot={data} rows={20} cols={100}
+      layout={layout} reducedMotion theme={getTheme('cool', ASCII)} caps={ASCII} now={1000} />);
+    expect(frame.split('\n')).toHaveLength(layout.rowCount);
+    expect(frame).toContain('first second 任务');
+    expect(frame).toContain('hello again 邮件');
+    expect(data.runs[0]!.description).toBe(description);
+    expect(data.lastMessage!.subject).toBe(subject);
+  });
+  it('共享投影的行数等于实际渲染高度', () => {
+    for (const count of [0, 1, 5, 8]) {
+      for (const availableRows of [0, 8, 12, Infinity]) {
+        for (const mail of [false, true]) {
+          const data = snapshot({
+            runs: Array.from({ length: count }, (_, i) => run({ label: `a${i}` })),
+            ...(mail ? { lastMessage: { from: 'a', to: 'b', subject: 'mail', body: '', at: 1 } } : {}),
+          });
+          const layout = buildTeamPanelLayout({ snapshot: data, terminalRows: 20, availableRows });
+          const frame = frameOf(<TeamPanel snapshot={data} rows={20} cols={100}
+            layout={layout} reducedMotion theme={getTheme('cool', ASCII)} caps={ASCII} now={1000} />);
+          expect(frame ? frame.split('\n').length : 0).toBe(layout.rowCount);
+        }
+      }
+    }
+  });
   it('names each subagent, what it is doing, and how long it has been going', () => {
     const frame = frameOf(
       <TeamPanel
@@ -399,10 +434,16 @@ describe('StatusBar team cluster (§6.2 / D-20 / P2-1)', () => {
       <StatusBar
         model="claude-sonnet-4-5"
         provider="anthropic"
-        usageTotal={{ inputTokens: 10, outputTokens: 5, costUsd: 0.24 }}
-        contextTokens={1000}
-        contextWindow={200_000}
-        contextWindowKnown
+        usageTotal={{ inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.24 }}
+        context={{
+          occupied: 1000,
+          window: 200_000,
+          pct: 1,
+          source: 'usage',
+          deltaTokens: 0,
+          windowKnown: true,
+          windowOverridden: false,
+        }}
         status="running"
         elapsedMs={1000}
         thinkingLevel="off"

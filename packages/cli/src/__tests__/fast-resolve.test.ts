@@ -30,6 +30,7 @@ function config(fast: Partial<FastConfig> = {}, over: Partial<CliConfig> = {}): 
     thinkingLevel: 'off',
     showThinking: false,
     liveToolOutput: false,
+    contextWindow: null,
     theme: 'auto',
     reducedMotion: false,
     exitTranscript: true,

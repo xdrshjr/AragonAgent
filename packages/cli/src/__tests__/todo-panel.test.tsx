@@ -12,7 +12,7 @@ import { TodoCard } from '../ui/entries/TodoCard.js';
 import { StatusBar } from '../ui/StatusBar.js';
 import { getTheme } from '../ui/theme.js';
 import { todoRailWidth } from '../ui/layout/rail.js';
-import { TODO_LIMITS } from '../todo/limits.js';
+import stringWidth from 'string-width';
 import type { TodoItem, TodoSnapshot } from '../todo/types.js';
 
 const RICH = { colorLevel: 3 as const, unicode: true };
@@ -52,7 +52,7 @@ function panel(over: Partial<React.ComponentProps<typeof TodoPanel>> = {}): stri
   return frameOf(
     <TodoPanel
       snapshot={snapshot()}
-      width={todoRailWidth(120)}
+      width={24}
       rows={20}
       running={false}
       reducedMotion={false}
@@ -64,6 +64,36 @@ function panel(over: Partial<React.ComponentProps<typeof TodoPanel>> = {}): stri
 }
 
 describe('TodoPanel (§6.1)', () => {
+  it('窄栏完成标题按实际内宽保留 done 提示', () => {
+    for (const total of [2, 20]) {
+      const done = { ...snapshot(total, total), activeIndex: -1 };
+      const minimumWidth = total === 2 ? 15 : 17;
+      for (const width of [minimumWidth - 1, minimumWidth]) {
+        const header = panel({ snapshot: done, width, rows: 3 }).split('\n')[0]!;
+        expect(header).toContain('TODO');
+        expect(header).toContain(`${total}/${total}`);
+        expect(header.includes('done')).toBe(width === minimumWidth);
+        expect(stringWidth(header)).toBeLessThanOrEqual(width);
+      }
+    }
+  });
+  it('常规视图切换紧凑视图时保留当前项', async () => {
+    const props = { snapshot: snapshot(20, 9), width: 15, running: false,
+      reducedMotion: true, theme: getTheme('auto', ASCII), caps: ASCII };
+    const view = render(<TodoPanel {...props} rows={12} />);
+    view.rerender(<TodoPanel {...props} rows={4} />);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(view.lastFrame()).toContain('Doing');
+    expect(view.lastFrame()).toContain('-9 +9');
+    view.unmount();
+  });
+  it('三行紧凑视图保留当前项、计数及两端隐藏数量', () => {
+    const frame = panel({ snapshot: snapshot(20, 9), width: 15, rows: 3 });
+    expect(frame).toContain('9/20');
+    expect(frame).toContain('Doing');
+    expect(frame).toContain('-9 +10');
+    expect(frame.split('\n')).toHaveLength(3);
+  });
   it('leads with the header and the counter', () => {
     const frame = panel();
     expect(frame).toContain('TODO');
@@ -81,7 +111,7 @@ describe('TodoPanel (§6.1)', () => {
     const frame = frameOf(
       <TodoPanel
         snapshot={snapshot()}
-        width={todoRailWidth(120)}
+        width={24}
         rows={20}
         running
         reducedMotion={false}
@@ -144,7 +174,7 @@ describe('TodoPanel (§6.1)', () => {
     const ascii = frameOf(
       <TodoPanel
         snapshot={snapshot()}
-        width={todoRailWidth(120)}
+        width={24}
         rows={20}
         running
         reducedMotion={false}
@@ -178,7 +208,7 @@ describe('TodoPanel (§6.1)', () => {
 
   it('drops the index column on a narrow rail but keeps the item text', () => {
     const narrow = panel({ width: todoRailWidth(80), rows: 20 });
-    expect(narrow).toContain('Doing step 3');
+    expect(narrow).toContain('Doing');
   });
 
   it('AC-40: the panel never renders wider than the width it was given', () => {
@@ -202,13 +232,20 @@ describe('TodoPanel (§6.1)', () => {
     }
   });
 
-  it('the wrapping budget belongs to the in-progress row alone', () => {
-    const width = todoRailWidth(80);
-    const frame = panel({ snapshot: snapshot(3, 0), width, rows: 20 });
-    // Two rows at most, per `TODO_LIMITS.activeWrapRows`; every other row is
-    // `wrap="truncate"` and cannot claim a second line at all.
-    expect(TODO_LIMITS.activeWrapRows).toBe(2);
-    expect(frame.split('\n').length).toBeLessThanOrEqual(20);
+  it('所有任务各占一行，宽字符及组合字符不超出预算', () => {
+    for (const width of [14, 15, 18, 22, 30, 36]) {
+      for (let rows = 3; rows <= 12; rows++) {
+        const data = snapshot(20, 9);
+        data.items[9]!.activeForm = '当前😀e\u0301步骤'.repeat(12);
+        const frame = panel({ snapshot: data, width, rows });
+        expect(frame.split('\n')).toHaveLength(rows);
+        expect(frame).toContain('当前');
+        expect(frame).not.toContain('\ufffd');
+        for (const line of frame.split('\n')) expect(stringWidth(line), JSON.stringify(line)).toBeLessThanOrEqual(width);
+      }
+    }
+    expect(panel({ rows: 2 })).toBe('');
+    expect(panel({ snapshot: snapshot(0, 0) })).toBe('');
   });
 });
 
@@ -281,10 +318,16 @@ describe('StatusBar todo cluster (§6.3)', () => {
       <StatusBar
         model="m"
         provider="anthropic"
-        usageTotal={{ inputTokens: 0, outputTokens: 0, costUsd: 0 }}
-        contextTokens={0}
-        contextWindow={200_000}
-        contextWindowKnown
+        usageTotal={{ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 }}
+        context={{
+          occupied: 1000,
+          window: 200_000,
+          pct: 1,
+          source: 'usage',
+          deltaTokens: 0,
+          windowKnown: true,
+          windowOverridden: false,
+        }}
         status="idle"
         elapsedMs={0}
         thinkingLevel="off"

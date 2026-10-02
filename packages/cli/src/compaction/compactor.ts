@@ -39,7 +39,8 @@ import {
   truncationBody,
 } from './summary-prompt.js';
 import { accumulateUsage, errorText, runSummarizeCall } from './summarize-call.js';
-import { computeEstimateOffset, computePressure, shouldCompactAt } from './pressure.js';
+import { computePressure, shouldCompactAt } from './pressure.js';
+import { ContextMeter } from './meter.js';
 import type {
   CompactionEvent,
   CompactionMode,
@@ -77,6 +78,24 @@ export interface CompactorDeps {
   complete: (providerId: string, request: LLMRequest) => Promise<AssistantMessage>;
   emit: (event: CompactionEvent) => void;
   notify: (level: NoticeLevel, text: string) => void;
+  /**
+   * The ONE owner of occupancy measurement (context-usage-gauge-accuracy W1).
+   *
+   * THE COMPACTOR NO LONGER MEASURES. It used to hold `estimateOffset`,
+   * `measuredPrefixLength` and `lastPressure` itself, which locked the only
+   * measuring code in the process behind `compaction.enabled` - and a session
+   * that turned compaction OFF is exactly the one whose gauge then had a single
+   * sample per turn and nothing else. Reading a meter the controller owns makes
+   * "the trigger and the gauge read one number" a STRUCTURAL fact rather than a
+   * discipline (§3.3).
+   *
+   * OPTIONAL SO EVERY EXISTING CONSTRUCTION SITE COMPILES (R-1), and lazily
+   * replaced by a private one built from the deps already here. PRODUCTION MUST
+   * INJECT: `context-gauge-wiring.test.ts` asserts one instance per process
+   * (`controller.getContextMeter()` is the same object the wiring forwards), and
+   * two meters in one session means two answers to one question.
+   */
+  meter?: ContextMeter;
   /**
    * Publish the occupancy this checkpoint measured (hardening §3.2.4 / DH-15).
    *
@@ -152,18 +171,15 @@ export class Compactor implements ContextManager {
   private selfDisabledReason: string | undefined;
   private pendingManual: PendingManual | null = null;
   private generation = 0;
-  /** Calibration for every ESTIMATED figure (D-23). Recomputed on every turn_end. */
-  private estimateOffset: number | undefined;
-  /** The last pressure computed, so the status bar and `/compact status` agree. */
-  private lastPressure: Pressure | null = null;
   /**
-   * The history LENGTH the measurement in `lastUsage` covered (hardening W1).
+   * The fallback meter, built on first use when no host injected one (R-1).
    *
-   * `undefined` DISABLES THE DELTA and reproduces round 1's arithmetic exactly.
-   * Every host-side mutation that is not an append must clear it - see
-   * `invalidateMeasurement`.
+   * `estimateOffset`, `measuredPrefixLength` and `lastPressure` used to be
+   * FIELDS HERE. They moved to `ContextMeter` wholesale
+   * (context-usage-gauge-accuracy W1), because keeping them here is what put the
+   * only measurement in the process behind `compaction.enabled`.
    */
-  private measuredPrefixLength: number | undefined;
+  private ownMeter: ContextMeter | null = null;
   /**
    * The messages the last splice dropped, held ONLY until the wiring collects
    * them for the archive (W4 / RV-3).
@@ -203,29 +219,35 @@ export class Compactor implements ContextManager {
   }
 
   /**
-   * `turn_end` — recompute the calibration offset (D-23).
+   * `turn_end` - recompute the calibration offset (D-23).
    *
-   * RE-MEASURED EVERY TURN, not once, so it tracks a toolset that changed
-   * mid-session (`/tools`, a skill that registers one).
+   * A THIN FORWARDER since context-usage-gauge-accuracy W1. The meter subscribes
+   * to `turn_end` itself, so BOTH PATHS MUST BE IDEMPOTENT: this one recomputes
+   * exactly what the other one did from the same inputs, which it is.
+   *
+   * `messages` / `systemPrompt` stay in the signature and are ignored: the meter
+   * reads them from its own lazy deps, and every existing caller and test keeps
+   * compiling.
    */
-  onTurnEnd(usage: TokenUsage, messages: readonly Message[], systemPrompt: string): void {
-    this.estimateOffset = computeEstimateOffset(usage, messages, systemPrompt);
-    // THE SAME ARRAY `computeEstimateOffset` JUST MEASURED, so the two numbers
-    // describe the same request by construction (hardening §3.2.3).
-    this.measuredPrefixLength = messages.length;
+  onTurnEnd(usage: TokenUsage, _messages: readonly Message[], _systemPrompt: string): void {
+    this.meter().onTurnEnd(usage);
   }
 
-  /**
-   * Any host-side history mutation that is NOT an append (hardening §3.2.3).
+  /*
+   * `invalidateMeasurement()` IS GONE, DELIBERATELY (I-9 / RV-2 round two).
    *
-   * `/clear`, `/resume`, and the splice itself: after any of them a recorded
-   * index means nothing, and the delta would be measured against the wrong
-   * array. `estimateAppendedTokens` bounds-checks as well, so a MISSED call here
-   * costs accuracy - the number degrades to round 1's - and never correctness.
+   * It had exactly two production callers and their reset depths are now
+   * OPPOSITE: `CompactionWiring.onHistoryReplaced` (a `/clear`, `/reset` or
+   * `/resume`) must drop `estimateOffset`, while `settlePending`'s applied
+   * branch (a splice) must KEEP it - the toolset and the model are unchanged, so
+   * the calibration still holds and dropping it makes the gauge fall too far and
+   * climb back (I-5 / I-8). The two used to share a method only because the one
+   * field it cleared happened to be their intersection; that intersection no
+   * longer exists. Both call sites now name the depth they mean, on the meter.
+   *
+   * Reinstating a forwarder here would hide "which caller gets which depth"
+   * behind a name that mentions neither, and BOTH wrong choices are silent.
    */
-  invalidateMeasurement(): void {
-    this.measuredPrefixLength = undefined;
-  }
 
   /**
    * The dropped messages, released as they are returned (W4 / RV-3).
@@ -297,17 +319,13 @@ export class Compactor implements ContextManager {
     const config = this.deps.getConfig().compaction;
     if (!config.enabled) return false;
 
-    // THE HISTORY IS PASSED IN, NEVER OMITTED (§3.4.2). Without it the estimate
-    // branch of `computePressure` measures an EMPTY array and reports 0 %, so a
-    // resumed 180 k-token session — where `lastUsage` is `undefined` by
-    // definition and this branch is the only one available — would never trigger.
-    // The measured branch reads `messages` only to estimate what was appended
-    // after the measurement (hardening §3.2.2); the slice is one turn wide.
-    const pressure = this.measure({
-      ...(probe.lastUsage ? { lastUsage: probe.lastUsage } : {}),
-      messages: this.deps.getMessages(),
-      systemPrompt: this.deps.getSystemPrompt(),
-    });
+    // THE METER READS THE LIVE HISTORY ITSELF (W1), so the estimate branch can no
+    // longer be handed an empty array by a caller that forgot - which used to be
+    // a 0 % reading on precisely the session that most needs a trigger, the
+    // resumed 180 k-token one where `lastUsage` is `undefined` by definition.
+    // The probe's own usage is still passed, because it is the authority for
+    // THIS checkpoint.
+    const pressure = this.meter().measureWith(probe.lastUsage);
     this.deps.onPressure?.(pressure);
 
     const manual = this.pendingManual !== null;
@@ -801,12 +819,17 @@ export class Compactor implements ContextManager {
   ): void {
     const config = this.deps.getConfig().compaction;
     const info = this.modelInfo();
+    // THE OFFSET NOW LIVES ON THE METER (W1), and it is read from the last
+    // PUBLISHED pressure rather than re-derived: `Pressure.estimateOffset` is
+    // carried on every measurement, so this is the same number the field used to
+    // hold, without the compactor owning a second copy of it.
+    const estimateOffset = this.meter().lastPublished()?.estimateOffset;
     const projected = computePressure({
       messages: after,
       systemPrompt: ctx.systemPrompt,
       contextWindow: info.contextWindow,
       windowKnown: true,
-      ...(this.estimateOffset !== undefined ? { estimateOffset: this.estimateOffset } : {}),
+      ...(estimateOffset !== undefined ? { estimateOffset } : {}),
     });
 
     const target = config.threshold - COMPACTION_LIMITS.minReclaimRatio;
@@ -870,7 +893,9 @@ export class Compactor implements ContextManager {
   ): CompactionOutcome {
     const before = args.ctx.messages.length;
     const after = outcome.action === 'replace' ? outcome.messages.length : before;
-    const tokensBefore = this.lastPressure?.occupied ?? 0;
+    // THE OCCUPANCY BEFORE THE SPLICE (I-10). `lastMeasured()` is the pure cache
+    // read on purpose; anything that re-measures here reports 0 reclaimed.
+    const tokensBefore = this.lastMeasured()?.occupied ?? 0;
     // `'relieved'` IS A CLI-ONLY WORD (RV-5 / DH-20). The port reports
     // `'truncated'` for a relief-only compaction, which is accurate for the
     // engine's narrower question; the card's `summarized N messages with
@@ -947,33 +972,36 @@ export class Compactor implements ContextManager {
   // =========================================================================
 
   /**
-   * The pressure the trigger and the gauge both read.
+   * The pressure the trigger and the gauge both read - MEASURED NOW.
    *
-   * CACHED on every evaluation, so `/compact status` reports the same number the
-   * last decision used rather than recomputing one that has since moved.
+   * A FORWARDER since W1: the decision point supplies its own authoritative
+   * `lastUsage` (the probe's), and the meter owns everything else. `messages` /
+   * `systemPrompt` stay in the signature and are ignored, because the meter
+   * reads the LIVE history through its own deps - which is strictly better than
+   * a caller that could pass `[]` and get a 0 % reading (the old default here).
    */
-  measure(probe: Pick<CompactionProbe, 'lastUsage'> & { messages?: readonly Message[]; systemPrompt?: string }): Pressure {
-    const info = this.modelInfo();
-    const pressure = computePressure({
-      ...(probe.lastUsage ? { lastUsage: probe.lastUsage } : {}),
-      messages: probe.messages ?? [],
-      systemPrompt: probe.systemPrompt ?? '',
-      contextWindow: info.contextWindow,
-      windowKnown: this.deps.isPricedModel({
-        providerId: this.mainRef().providerId,
-        modelId: this.mainRef().modelId,
-      }),
-      ...(this.estimateOffset !== undefined ? { estimateOffset: this.estimateOffset } : {}),
-      ...(this.measuredPrefixLength !== undefined
-        ? { measuredPrefixLength: this.measuredPrefixLength }
-        : {}),
-    });
-    this.lastPressure = pressure;
-    return pressure;
+  measure(
+    probe: Pick<CompactionProbe, 'lastUsage'> & {
+      messages?: readonly Message[];
+      systemPrompt?: string;
+    },
+  ): Pressure {
+    return this.meter().measureWith(probe.lastUsage);
   }
 
+  /**
+   * The last pressure PUBLISHED. NEVER re-measured - `lastPublished`, not
+   * `current` (I-10 / RV-3).
+   *
+   * `finish()` below reads this for `tokensBefore`, which is the sole upstream of
+   * `tokensReclaimed`, the card's "reclaimed N tokens" and `/compact status`'s
+   * session total. All three want the occupancy BEFORE the splice. Point this at
+   * `meter.current()` and the moment the meter is dirty - which after a splice it
+   * always is - `tokensBefore` becomes the POST-compaction figure, `reclaimed`
+   * collapses to 0, and the card renders that with nothing logging a fault.
+   */
   lastMeasured(): Pressure | null {
-    return this.lastPressure;
+    return this.meter().lastPublished();
   }
 
   /** Written by the wiring once the engine has reported its verdict. */
@@ -1039,6 +1067,29 @@ export class Compactor implements ContextManager {
     const ref = this.mainRef();
     if (!this.deps.hasKey(ref.providerId)) return null;
     return { ref, fromFastTier: false };
+  }
+
+  /**
+   * The meter this compactor reads, injected or private (R-1).
+   *
+   * MEMOIZED, because a fresh meter on every call would have no `estimateOffset`
+   * and no cached pressure - `lastMeasured()` would answer `null` forever and
+   * `tokensReclaimed` would sit at 0. The fallback exists so the ten existing
+   * `compaction-*.test.ts` construction sites compile unchanged; production
+   * injects, and `context-gauge-wiring.test.ts` asserts the single instance.
+   */
+  private meter(): ContextMeter {
+    if (this.deps.meter) return this.deps.meter;
+    if (!this.ownMeter) {
+      this.ownMeter = new ContextMeter({
+        getMessages: () => this.deps.getMessages(),
+        getSystemPrompt: () => this.deps.getSystemPrompt(),
+        getModelInfo: () => this.modelInfo(),
+        isWindowKnown: () => this.deps.isPricedModel(this.mainRef()),
+        getWindowOverride: () => this.deps.getConfig().contextWindow,
+      });
+    }
+    return this.ownMeter;
   }
 
   private mainRef(): ModelRef {

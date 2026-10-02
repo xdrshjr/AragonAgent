@@ -24,6 +24,7 @@ import {
   clampUpdateConfig,
   clampTheme,
   clampThinkingLevel,
+  clampContextWindow,
   clampMaxTokens,
   clampMaxRenderInterval,
   clampScrollResumeMs,
@@ -247,6 +248,23 @@ export interface CliFlags {
    * to keep in step with `toFlags`.
    */
   fastReview?: string;
+  /**
+   * `--fast-delegate` ⇒ true, `--no-fast-delegate` ⇒ false, absent ⇒ undefined
+   * (web-use-tier-cooperation-and-control-closure §4.1.5).
+   *
+   * DECLARED AS A PAIR — MANDATORY, for the reason `--team`, `--todo-panel`,
+   * `--render-governor`, `--retry` and `--fast` each record in turn, and here
+   * with the SAME polarity as `--update`: `fast.delegate` is PERSISTED and
+   * defaults to `true`, so a lone `--no-fast-delegate` would make commander
+   * default `opts.fastDelegate` to `true` and silently overwrite a stored
+   * `false` on every run that passed no flag at all.
+   *
+   * It exists because it is the ONLY `fast.*` sub-switch with no channel a
+   * wrapper can reach: `--fast-review <n|off>` already covers `review` and
+   * `reviewEveryTurns`, and `enabled` / `model` / `provider` have both a flag
+   * and an environment variable.
+   */
+  fastDelegate?: boolean;
   /**
    * `--update` ⇒ true, `--no-update` ⇒ false, absent ⇒ undefined
    * (cli-auto-update §4.2).
@@ -546,6 +564,12 @@ function resolveFastConfig(
     ...(flags.fastProvider !== undefined && flags.fastProvider !== ''
       ? { provider: flags.fastProvider }
       : {}),
+    // `!== undefined`, for the reason stated on `flags.fast` above: commander
+    // materialises a lone `--no-fast-delegate` as `opts.fastDelegate = true`
+    // when the flag is absent, and `delegate` defaults to TRUE — so a truthiness
+    // check would force it on for every run that passed no flag at all,
+    // overwriting a stored `false` with nothing to show for it.
+    ...(flags.fastDelegate !== undefined ? { delegate: flags.fastDelegate } : {}),
     ...reviewPatch,
   });
 }
@@ -736,6 +760,45 @@ function resolveMaxTokens(
 }
 
 /**
+ * Resolve the context-window override: env > file > default, where an EXPLICIT
+ * `null` at either layer means AUTO (context-usage-gauge-accuracy §3.6).
+ *
+ * IT CANNOT USE `pick()` FOR THE REASON `resolveMaxTokens` GIVES: `pick` skips
+ * `null`, and `null` is exactly the value being looked for. NO CLI FLAG feeds
+ * this - it is a per-installation correction for a model table entry, not a
+ * per-invocation choice, so `config set` and the environment variable are the
+ * two surfaces the design names.
+ */
+function resolveContextWindow(
+  env: Partial<PersistedConfig>,
+  file: Partial<PersistedConfig>,
+): number | null {
+  const layers: Array<{ name: string; value: unknown }> = [
+    {
+      name: 'ARAGON_CONTEXT_WINDOW',
+      value: hasOwn(env, 'contextWindow') ? env.contextWindow : undefined,
+    },
+    {
+      name: 'config.json contextWindow',
+      value: hasOwn(file, 'contextWindow') ? file.contextWindow : undefined,
+    },
+  ];
+
+  for (const layer of layers) {
+    if (layer.value === undefined) continue; // this layer said nothing
+    if (layer.value === null || isAutoToken(layer.value)) return null; // AUTO
+    const n = clampContextWindow(layer.value, null);
+    if (n !== null) return n;
+    getLogger().warn('config', 'context_window_unusable', {
+      source: layer.name,
+      value: String(layer.value),
+    });
+  }
+
+  return DEFAULT_CONFIG.contextWindow;
+}
+
+/**
  * Resolve the effective config by merging all layers, then derive the runtime
  * (non-persisted) fields and enforce the timeout invariant.
  */
@@ -788,6 +851,7 @@ export function loadConfig(flags: CliFlags = {}): CliConfig {
     DEFAULT_CONFIG.liveToolOutput;
 
   const maxTokens = resolveMaxTokens(flags, env.partial, file);
+  const contextWindow = resolveContextWindow(env.partial, file);
 
   // `clampTheme` is also where the v0.3.0 `dark` name is migrated to `cool`,
   // so reading a legacy config file needs no extra step here (§4.5 / R-4).
@@ -920,6 +984,7 @@ export function loadConfig(flags: CliFlags = {}): CliConfig {
     showThinking,
     liveToolOutput,
     maxTokens,
+    contextWindow,
     theme,
     reducedMotion,
     fullscreen: resolveFullscreen(flags, env.partial, file),

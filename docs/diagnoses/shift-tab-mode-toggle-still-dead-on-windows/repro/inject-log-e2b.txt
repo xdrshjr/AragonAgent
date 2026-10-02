@@ -1,0 +1,7 @@
+﻿[    4ms] node_exe=C:\Users\jdqqj\AppData\Local\Temp\claude\M--takoAI-JRAgentMesh-aragon-agent-core\16b45c69-21b1-4c8d-86f6-3930b467cb31\scratchpad\n20\node-v20.19.0-win-x64\node.exe
+[ 1553ms] during_rawmode mode=0x0008 VT_INPUT=False
+[ 1607ms] inject Shift+Tab#1_baseline ok=True written=2
+[ 5826ms] after_helper mode=0x0208 VT_INPUT=True
+[ 5831ms] inject Shift+Tab#2_after_helper ok=True written=2
+[ 9112ms] after_exit mode=0x0208 VT_INPUT=True
+[ 9114ms] done

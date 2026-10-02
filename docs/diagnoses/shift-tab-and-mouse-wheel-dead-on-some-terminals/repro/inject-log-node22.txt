@@ -1,0 +1,13 @@
+﻿node_exe=node
+mode_before=0x01F7
+mode_during_rawmode=0x0208
+ENABLE_VIRTUAL_TERMINAL_INPUT during raw mode: True
+inject a ok=True written=2
+inject Tab ok=True written=2
+inject Shift+Tab ok=True written=2
+inject Up ok=True written=2
+inject Shift+Up ok=True written=2
+inject WheelUp ok=True written=1
+inject WheelDown ok=True written=1
+mode_after=0x01F7
+done

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { AgentEvent } from '@aragon-agent/core';
+import type { AgentEvent, TokenUsage } from '@aragon-agent/core';
 import {
   buildToolPreview,
   initialViewState,
@@ -9,6 +9,9 @@ import {
   type ViewAction,
   type ViewState,
 } from '../agent/reducer.js';
+import { promptTokensOf } from '../agent/usage.js';
+import { occupiedTokens } from '../compaction/pressure.js';
+import type { ContextUsageSnapshot } from '../compaction/types.js';
 
 function fold(state: ViewState, actions: ViewAction[]): ViewState {
   return actions.reduce(viewReducer, state);
@@ -323,5 +326,116 @@ describe('the patch side channel (§3.3.7 / AC-14a)', () => {
       if (entry.kind !== 'tool' || !entry.patch) continue;
       expect(entry.preview?.includes('\n')).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Context occupancy and the session total (context-usage-gauge-accuracy §7.1)
+// ---------------------------------------------------------------------------
+
+function usageSnapshot(over: Partial<ContextUsageSnapshot> = {}): ContextUsageSnapshot {
+  return {
+    occupied: 86_000,
+    window: 200_000,
+    pct: 43,
+    source: 'usage',
+    deltaTokens: 0,
+    windowKnown: true,
+    windowOverridden: false,
+    ...over,
+  };
+}
+
+describe('T12 - the `contextUsage` identity short-circuit (§5.2 / R-3)', () => {
+  it('an unchanged reading returns the SAME state object', () => {
+    // NOT A MICRO-OPTIMISATION. The meter publishes on a 400 ms tick throughout
+    // a turn and most of those ticks measure the same number; a fresh state
+    // object every time turns a permanently visible row into a 2.5 Hz re-render
+    // source and walks the render governor up its ladder for no visible change.
+    // This is also why `ContextUsageSnapshot` carries no timestamp - a field
+    // that moved every tick would make this comparison never hold.
+    const seeded = viewReducer(initialViewState(), {
+      type: 'contextUsage',
+      snapshot: usageSnapshot(),
+    });
+    const again = viewReducer(seeded, { type: 'contextUsage', snapshot: usageSnapshot() });
+    expect(again).toBe(seeded);
+  });
+
+  it('every field participates, so no change is swallowed', () => {
+    const seeded = viewReducer(initialViewState(), {
+      type: 'contextUsage',
+      snapshot: usageSnapshot(),
+    });
+    const fields: Array<Partial<ContextUsageSnapshot>> = [
+      { occupied: 86_001 },
+      { window: 128_000 },
+      { pct: 44 },
+      { source: 'estimate' },
+      { deltaTokens: 1 },
+      { windowKnown: false },
+      { windowOverridden: true },
+    ];
+    for (const over of fields) {
+      const next = viewReducer(seeded, { type: 'contextUsage', snapshot: usageSnapshot(over) });
+      expect(next, JSON.stringify(over)).not.toBe(seeded);
+    }
+  });
+});
+
+describe('T13 - the session total counts the cache on all four paths (P1-3)', () => {
+  const usage: TokenUsage = {
+    inputTokens: 1_000,
+    outputTokens: 200,
+    cacheReadTokens: 5_000,
+    cacheWriteTokens: 300,
+  };
+
+  for (const type of ['turnEnd', 'teamUsage', 'fastUsage', 'compactionUsage'] as const) {
+    it(`${type} accumulates both cache terms`, () => {
+      // ONE HELPER, FOUR CALLERS. These four branches used to carry the same
+      // three lines of hand-written addition and all four omitted the cache
+      // terms; a fifth source added later would have made the same omission.
+      const state = viewReducer(initialViewState(), { type, usage, costDelta: 0.5 });
+      expect(state.usageTotal.cacheReadTokens).toBe(5_000);
+      expect(state.usageTotal.cacheWriteTokens).toBe(300);
+      expect(state.usageTotal.costUsd).toBeCloseTo(0.5);
+    });
+  }
+
+  it('AC-5 / AC-11 - `promptTokensOf` is `occupiedTokens` minus the output side', () => {
+    // THE PRECISE CLAIM (RV-14). `computeCost` also prices OUTPUT, so `^` and
+    // `$` are not the same total; what has to agree is that BOTH cache terms are
+    // counted on both sides, which is exactly what `^` used to miss.
+    const state = viewReducer(initialViewState(), { type: 'turnEnd', usage, costDelta: 0 });
+    expect(promptTokensOf(state.usageTotal)).toBe(occupiedTokens(usage) - usage.outputTokens);
+    // And it is strictly larger than the pre-feature `inputTokens` reading.
+    expect(promptTokensOf(state.usageTotal)).toBeGreaterThan(state.usageTotal.inputTokens);
+  });
+});
+
+describe('T14 - `resetConversation` clears spend, never the gauge (I-1)', () => {
+  it('leaves `context` untouched and zeroes `usageTotal`', () => {
+    // `builtins.ts` calls `controller.clearMessages()` BEFORE dispatching this,
+    // and that marks the meter dirty and schedules a publication. Zeroing here
+    // would win the race and pin the bar at 0 rather than at the system prompt`s
+    // own couple of percent. Session spend is a different quantity and DOES go.
+    const seeded = viewReducer(
+      viewReducer(initialViewState(), {
+        type: 'turnEnd',
+        usage: { inputTokens: 40_000, outputTokens: 0 },
+        costDelta: 1.5,
+      }),
+      { type: 'contextUsage', snapshot: usageSnapshot() },
+    );
+    const reset = viewReducer(seeded, { type: 'resetConversation' });
+    expect(reset.context).toBe(seeded.context);
+    expect(reset.usageTotal).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      costUsd: 0,
+    });
   });
 });

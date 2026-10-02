@@ -1,0 +1,7 @@
+{"event":"start","node":"v20.19.0","uv":"1.46.0","platform":"win32","release":"node","stdinIsTTY":true,"stdoutIsTTY":true,"env":{"SESSIONNAME":"Console"}}
+{"event":"data","hex":"61","text":"\"a\""}
+{"event":"data","hex":"09","text":"\"\\t\""}
+{"event":"data","hex":"09","text":"\"\\t\""}
+{"event":"data","hex":"1b5b41","text":"\"\\u001b[A\""}
+{"event":"data","hex":"1b5b313b3241","text":"\"\\u001b[1;2A\""}
+{"event":"stop"}

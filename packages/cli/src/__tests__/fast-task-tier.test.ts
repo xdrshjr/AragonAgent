@@ -100,6 +100,7 @@ function config(): CliConfig {
     thinkingLevel: 'high',
     showThinking: false,
     liveToolOutput: false,
+    contextWindow: null,
     theme: 'auto',
     reducedMotion: false,
     exitTranscript: true,

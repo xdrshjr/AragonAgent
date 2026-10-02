@@ -1,0 +1,7 @@
+{"t":0,"event":"start","node":"v20.19.0","uv":"1.46.0","platform":"win32","stdinIsTTY":true,"stdoutIsTTY":true}
+{"t":1512,"event":"data","hex":"09","text":"\"\\t\""}
+{"t":2460,"event":"data","hex":"1b5b5a","text":"\"\\u001b[Z\""}
+{"t":5010,"event":"rawmode_toggle_begin"}
+{"t":5010,"event":"rawmode_toggle_end"}
+{"t":5973,"event":"data","hex":"09","text":"\"\\t\""}
+{"t":9016,"event":"stop"}

@@ -153,9 +153,9 @@ describe('event translation', () => {
     await runner.run(singlePrompt('hi'));
     runner.detach();
 
-    const types = out.lines().map((e) => e.type);
-    expect(types).toEqual(['user', 'tool_call', 'tool_result', 'assistant']);
-    const toolResult = out.lines()[2] as { output: string; durationMs: number };
+    const types = out.lines().filter((e) => e.type !== 'execution_progress').map((e) => e.type);
+    expect(types).toEqual(['turn_state', 'user', 'tool_call', 'tool_result', 'assistant', 'turn_state']);
+    const toolResult = out.lines().find((e) => e.type === 'tool_result') as { output: string; durationMs: number };
     expect(toolResult.output).toBe('contents');
     expect(toolResult.durationMs).toBe(7);
     expect(runner.stats().lastAssistantText).toBe('final');
@@ -174,7 +174,7 @@ describe('event translation', () => {
     const runner = makeRunner(out.stream);
     runner.attach(controller);
     await runner.run(singlePrompt('hi'));
-    const types = out.lines().map((e) => e.type);
+    const types = out.lines().filter((e) => e.type !== 'execution_progress').map((e) => e.type);
     expect(types).not.toContain('text_delta');
     expect(types).not.toContain('thinking');
   });
@@ -191,9 +191,9 @@ describe('event translation', () => {
     const runner = makeRunner(out.stream, { partialMessages: true, includeThinking: true });
     runner.attach(controller);
     await runner.run(singlePrompt('hi'));
-    const types = out.lines().map((e) => e.type);
+    const types = out.lines().filter((e) => e.type !== 'execution_progress').map((e) => e.type);
     // Thinking is flushed when text starts, so it precedes the first delta.
-    expect(types).toEqual(['user', 'thinking', 'text_delta', 'assistant']);
+    expect(types).toEqual(['turn_state', 'user', 'thinking', 'text_delta', 'assistant', 'turn_state']);
   });
 
   it('reports a stream error as fatal and exits 1', async () => {
@@ -324,5 +324,107 @@ describe('AC-17: --max-duration', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('per-input lifecycle', () => {
+  it('wraps multiple model turns and two todo continuations in one request', async () => {
+    const out = sink();
+    const stub = makeStub({ onRun: (call, emit) => {
+      emit({ type: 'message_update', streamEvent: { type: 'thinking_delta', delta: 'reason' } } as AgentEvent);
+      healthyTurn(emit, `answer ${call}`);
+      if (call === 1) healthyTurn(emit, 'another model turn');
+    } });
+    stub.controller.getTodoSnapshot = () => ({
+      items: [0, 1, 2].map(i => ({ content: `step ${i}`, activeForm: `doing ${i}`,
+        status: i < stub.prompts.length ? 'completed' as const : 'pending' as const })),
+      total: 3, doneCount: stub.prompts.length, activeIndex: stub.prompts.length < 3 ? stub.prompts.length : -1,
+      updatedAt: stub.prompts.length,
+    });
+    const runner = makeRunner(out.stream, { followThrough: 'auto' });
+    runner.attach(stub.controller);
+    await runner.run(singlePrompt('finish all steps'));
+    expect(stub.prompts).toHaveLength(3);
+    const progress = out.lines().filter(e => e.type === 'execution_progress');
+    expect(progress.map(e => e.requestSeq)).toEqual([1, 1]);
+    expect(progress.map(e => e.progressSeq)).toEqual([1, 3]);
+    expect(out.lines().filter(e => e.type === 'turn_state')).toEqual([
+      { type: 'turn_state', sessionId: 's1', requestSeq: 1, phase: 'started' },
+      { type: 'turn_state', sessionId: 's1', requestSeq: 1, phase: 'completed' },
+    ]);
+    runner.detach();
+  });
+
+  it('assigns a sequence to each dequeued input including a rejected budget input', async () => {
+    const out = sink();
+    const stub = makeStub();
+    const runner = makeRunner(out.stream, { maxTurns: 2 });
+    runner.attach(stub.controller);
+    const queue = ['one', 'two', 'three'];
+    await runner.run({ next: async () => queue.shift() ?? null });
+    const events = out.lines().filter(e => e.type === 'turn_state');
+    expect(events.map(e => [e.requestSeq, e.phase])).toEqual([
+      [1, 'started'], [1, 'completed'], [2, 'started'], [2, 'completed'],
+      [3, 'started'], [3, 'cancelled'],
+    ]);
+    expect(stub.prompts).toEqual(['one', 'two']);
+    runner.detach();
+  });
+
+  it('does not prompt an input obtained after interruption while waiting for source', async () => {
+    const out = sink();
+    const stub = makeStub();
+    const runner = makeRunner(out.stream);
+    runner.attach(stub.controller);
+    let supply!: (value: string) => void;
+    const running = runner.run({ next: () => new Promise(resolve => { supply = resolve; }) });
+    runner.requestInterrupt();
+    supply('too late');
+    await running;
+    expect(stub.prompts).toEqual([]);
+    expect(out.lines().filter(e => e.type === 'turn_state').map(e => e.phase)).toEqual(['started', 'cancelled']);
+    runner.detach();
+  });
+
+  it('records each request error even when the cumulative error is already set', async () => {
+    const out = sink();
+    const stub = makeStub({ onRun: (call, emit) => {
+      if (call === 1 || call === 3) throw new Error(`failure ${call}`);
+      healthyTurn(emit, 'recovered');
+    } });
+    const runner = makeRunner(out.stream);
+    runner.attach(stub.controller);
+    await expect(runner.run(singlePrompt('one'))).rejects.toThrow('failure 1');
+    await runner.run(singlePrompt('two'));
+    await expect(runner.run(singlePrompt('three'))).rejects.toThrow('failure 3');
+    expect(out.lines().filter(e => e.type === 'turn_state').map(e => [e.requestSeq, e.phase])).toEqual([
+      [1, 'started'], [1, 'failed'], [2, 'started'], [2, 'completed'], [3, 'started'], [3, 'failed'],
+    ]);
+    runner.detach();
+  });
+
+  it('keeps cancellation ahead of a concurrent thrown error', async () => {
+    const out = sink();
+    const runner = makeRunner(out.stream);
+    const stub = makeStub({ onRun: () => { runner.requestInterrupt(); throw new Error('aborted'); } });
+    runner.attach(stub.controller);
+    await expect(runner.run(singlePrompt('go'))).rejects.toThrow('aborted');
+    expect(out.lines().filter(e => e.type === 'turn_state').map(e => e.phase)).toEqual(['started', 'cancelled']);
+    expect(out.lines().filter(e => e.type === 'result')).toEqual([]);
+    runner.detach();
+  });
+
+  it('does not hide a later silent failure behind the first cumulative error', async () => {
+    const out = sink();
+    const stub = makeStub({ onRun: (call, emit) => {
+      if (call === 1) throw new Error('first failure');
+      emit({ type: 'agent_end', messages: [] } as AgentEvent);
+    } });
+    const runner = makeRunner(out.stream);
+    runner.attach(stub.controller);
+    await expect(runner.run(singlePrompt('one'))).rejects.toThrow('first failure');
+    await runner.run(singlePrompt('two'));
+    expect(out.lines().filter(e => e.type === 'turn_state').at(-1)?.phase).toBe('failed');
+    runner.detach();
   });
 });

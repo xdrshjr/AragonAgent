@@ -9,6 +9,20 @@ were written.
 
 ### Added
 
+- **`system/init` now lists what this build can do.** A new optional
+  `capabilities: string[]` field, carrying `["interrupt"]` for this release.
+
+  A wrapper cannot tell by observation whether an interrupt will settle
+  gracefully or kill the process outright, and guessing wrong costs the user
+  their conversation. Rather than have callers compare version numbers — which
+  breaks on forks, prereleases, and version shapes nobody anticipated — the
+  build now says so itself, in an event that already arrives on every start.
+  Absent on older builds, and absence should be read as "no", never as
+  "probably".
+
+  Additive, so `schemaVersion` does not move. Consumers that do not know the
+  field ignore it, exactly as the schema contract asks.
+
 - **The composer understands pasting.** Until now it did not have the concept at
   all: every byte the terminal delivered on stdin was a keystroke, and a
   clipboard block is thousands of bytes arriving in an unpredictable number of
@@ -57,6 +71,29 @@ were written.
   0.6.2 did.
 
 ### Fixed
+
+- **`{"type":"interrupt"}` now really does settle the run — on every platform.**
+  The stdin interrupt frame used to raise a SIGINT at our own process. On POSIX
+  that reaches the runner's terminator and the run winds down properly: it
+  breaks out of the loop, persists the session, and emits `result` with the
+  usage and cost. On Windows, Node does not deliver a self-directed SIGINT to
+  its own handlers — the process simply terminated with exit code 1, having run
+  none of it.
+
+  For anyone using `aragon exec` interactively that difference was invisible,
+  because an interrupt there is usually the last thing that happens. It is not
+  invisible to a **wrapper** that interrupts a turn and then respawns on the same
+  `--session-id` to keep the conversation going: on Windows it silently got back
+  a session missing everything since the previous save. `exec/index.ts` has
+  carried a comment about that caller for some time ("PERSIST FIRST, ANNOUNCE
+  SECOND … a caller that reads `result` and immediately respawns with the same
+  `--session-id` must not race the writer"), so the intent was there; the path
+  just could not be reached on Windows.
+
+  The frame now calls the runner directly instead of going through a signal.
+  POSIX behaviour is byte-for-byte unchanged — the same code runs, with the same
+  `stopReason`, the same exit code 130, and the same two-second window in which a
+  second signal still forces an immediate exit.
 
 - **A pasted API key is stored correctly again.** Ink broadcasts each stdin chunk
   to every mounted input handler, so the settings screen, the question overlay

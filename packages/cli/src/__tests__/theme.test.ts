@@ -16,11 +16,29 @@ describe('detectCapabilities', () => {
     expect(detectCapabilities({ COLORTERM: '24bit' }).colorLevel).toBe(3);
   });
 
+  it.each([['0', 0], ['false', 0], ['1', 1], ['2', 2], ['3', 3]] as const)(
+    'honors FORCE_COLOR=%s over automatic truecolor detection', (force, level) => {
+      expect(detectCapabilities({ COLORTERM: 'truecolor', FORCE_COLOR: force }).colorLevel).toBe(level);
+    },
+  );
+
   it('detects Unicode from a UTF locale or Windows Terminal, ASCII otherwise', () => {
     expect(detectCapabilities({ LANG: 'en_US.UTF-8' }).unicode).toBe(true);
     expect(detectCapabilities({ WT_SESSION: 'abc' }).unicode).toBe(true);
     expect(detectCapabilities({ TERM_PROGRAM: 'vscode' }).unicode).toBe(true);
     expect(detectCapabilities({}).unicode).toBe(false);
+  });
+
+  it('uses the same glyphs in AragonMesh as Windows Terminal without a locale hint', () => {
+    const embedded = detectCapabilities({ TERM_PROGRAM: 'aragonmesh', COLORTERM: 'truecolor' });
+    const manual = detectCapabilities({ WT_SESSION: 'abc', COLORTERM: 'truecolor' });
+    expect(embedded).toEqual(manual);
+    expect(getTheme('warm', embedded)).toEqual(getTheme('warm', manual));
+    expect(getTheme('warm', embedded).symbols.boxStyle).toBe('round');
+  });
+
+  it.each([{ LANG: 'C' }, { LC_ALL: 'C' }, { LANG: 'zh_CN.GBK' }])('recognizes the embedded terminal independently of locale %j', locale => {
+    expect(detectCapabilities({ ...locale, TERM_PROGRAM: 'aragonmesh' }).unicode).toBe(true);
   });
 });
 

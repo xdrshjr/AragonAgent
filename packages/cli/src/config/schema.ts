@@ -151,6 +151,39 @@ export function clampTranscriptWindow(v: unknown, fallback: number): number {
   return Math.min(MAX_TRANSCRIPT_WINDOW, Math.max(MIN_TRANSCRIPT_WINDOW, n));
 }
 
+// ---------------------------------------------------------------------------
+// Context window override (context-usage-gauge-accuracy §3.6 / W5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Bounds for a hand-supplied context window.
+ *
+ * The floor is roughly the smallest window any current model ships with; the
+ * ceiling is well above the largest, and both exist to keep a typo (a missing
+ * or an extra zero) from producing a gauge that is permanently red or
+ * permanently flat.
+ */
+export const MIN_CONTEXT_WINDOW = 8_000;
+export const MAX_CONTEXT_WINDOW = 5_000_000;
+
+/**
+ * THE single gate for every `contextWindow` read AND write.
+ *
+ * TRI-STATE, AND `null` MUST PASS STRAIGHT THROUGH (RV-12). `null` means AUTO -
+ * take the model table's number, or the 128k placeholder. Clamping it into
+ * `[8000, ...]` yields 8000, which removes "auto" from the config permanently
+ * and presents to the user as an 8k denominator with a permanently red bar and
+ * no visible source. `maxTokens` above is the existing tri-state precedent and
+ * this deliberately copies its shape rather than inventing a second convention.
+ */
+export function clampContextWindow(v: unknown, fallback: number | null): number | null {
+  if (v === null) return null;
+  if (v === undefined || v === '') return fallback;
+  const n = typeof v === 'number' ? v : Number.parseInt(String(v), 10);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(MAX_CONTEXT_WINDOW, Math.max(MIN_CONTEXT_WINDOW, Math.floor(n)));
+}
+
 /**
  * Entries kept in `ViewState` at all (tui-render-performance L1 / R5).
  *
@@ -1504,6 +1537,18 @@ export interface PersistedConfig {
    * `null`), which left the user no way to express "let the model decide".
    */
   maxTokens: number | null;
+  /**
+   * The context window to measure occupancy against, or `null` for AUTO
+   * (context-usage-gauge-accuracy §3.6).
+   *
+   * `null` MEANS AUTO - the model table's window, or `buildRuntimeModel`'s 128k
+   * placeholder for a model the table has never seen. It exists because that
+   * placeholder is a FABRICATED denominator: on a custom `baseUrl` or an
+   * unlisted model id the gauge is a percentage of a number nobody supplied, and
+   * before this key there was no way to correct it. Setting it also removes the
+   * `?` marker from the absolute pair (I-6).
+   */
+  contextWindow: number | null;
   theme: ThemeName;
   /** Replace spinners with a static glyph for calmer, low-motion output. */
   reducedMotion: boolean;
@@ -1610,6 +1655,9 @@ export const DEFAULT_CONFIG: PersistedConfig = {
   // The engine owns this number; spelling it here again is how the CLI and the
   // provider adapters end up disagreeing about what "the default" is.
   maxTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+  // AUTO. The model table is right for every listed model, and a default number
+  // here would be the same fabricated denominator this key exists to correct.
+  contextWindow: null,
   theme: 'auto',
   reducedMotion: false,
   fullscreen: true,
@@ -1737,6 +1785,17 @@ export interface CliConfig {
   liveToolOutput: boolean;
   /** The resolved cap, or `undefined` for AUTO (per-model ceiling, ≤ 64000). */
   maxTokens?: number;
+  /**
+   * The user's context-window override, or `null` for AUTO.
+   *
+   * IT MUST EXIST HERE AND NOT ONLY IN `PersistedConfig`, for the reason
+   * `showThinking` / `liveToolOutput` / `diffRender` each record above: the
+   * runtime reads `config.*`, where `config` is a `CliConfig`, so a key added to
+   * the persisted shape alone would round-trip through `config set`, appear in
+   * `config list` - and never reach `ContextMeter`. `ARAGON_CONTEXT_WINDOW`
+   * would parse and be discarded, with nothing failing.
+   */
+  contextWindow: number | null;
   theme: ThemeName;
   reducedMotion: boolean;
   /**

@@ -1,0 +1,13 @@
+﻿in_mode_before=0x01F7  out_mode_before=0x0007
+in_mode_during=0x0208  out_mode_during=0x0007
+ENABLE_MOUSE_INPUT set during raw mode: False
+ENABLE_VIRTUAL_TERMINAL_INPUT set during raw mode: True
+--- phase A: mode exactly as libuv left it ---
+inject WheelUp-A ok=True written=1
+inject WheelDown-A ok=True written=1
+--- phase B: ENABLE_MOUSE_INPUT forced back on ---
+SetConsoleMode(0x0218) ok=True; readback=0x0218
+inject WheelUp-B ok=True written=1
+inject WheelDown-B ok=True written=1
+in_mode_after=0x01F7
+done

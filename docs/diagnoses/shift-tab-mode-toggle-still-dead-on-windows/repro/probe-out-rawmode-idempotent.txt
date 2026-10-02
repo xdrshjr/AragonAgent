@@ -1,0 +1,9 @@
+node=v22.18.0 isTTY=true
+1. after our own setRawMode(true):        0x0208
+2. after an outside process OR-ed 0x0010: 0x0218
+3. after a REPEATED setRawMode(true):     0x0218
+4. after a full false->true transition:   0x0208
+
+repeat kept the bit:      true   <- C1 depends on this being true
+transition cleared it:    true   <- section 3.3's finding, re-measured
+VERDICT: ORDERING HOLDS

@@ -33,7 +33,12 @@ import { entryRevision, estimateEntryRows } from '../ui/layout/virtual-window.js
 import { renderTranscriptText } from '../ui/transcript-text.js';
 import { normalizeLoadedEntries } from '../session/persist.js';
 import { COMPACTION_LIMITS } from '../compaction/limits.js';
-import type { CompactionRecord, CompactionSnapshot } from '../compaction/types.js';
+import type {
+  CompactionRecord,
+  CompactionSnapshot,
+  ContextUsageSnapshot,
+} from '../compaction/types.js';
+import { promptTokensOf } from '../agent/usage.js';
 
 const UNICODE: TermCapabilities = { colorLevel: 3, unicode: true };
 const ASCII: TermCapabilities = { colorLevel: 0, unicode: false };
@@ -75,7 +80,21 @@ function snapshot(over: Partial<CompactionSnapshot> = {}): CompactionSnapshot {
       deltaTokens: 0,
       source: 'estimate',
       windowKnown: true,
+      windowOverridden: false,
     },
+    ...over,
+  };
+}
+
+function usageSnapshot(over: Partial<ContextUsageSnapshot> = {}): ContextUsageSnapshot {
+  return {
+    occupied: 0,
+    window: 200_000,
+    pct: 0,
+    source: 'usage',
+    deltaTokens: 0,
+    windowKnown: true,
+    windowOverridden: false,
     ...over,
   };
 }
@@ -290,10 +309,16 @@ describe('the status chip (§6.2)', () => {
   const base = {
     model: 'claude-sonnet-4-5',
     provider: 'anthropic',
-    usageTotal: { inputTokens: 100, outputTokens: 50, costUsd: 0.01 },
-    contextTokens: 50_000,
-    contextWindow: 200_000,
-    contextWindowKnown: true,
+    usageTotal: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.01 },
+    context: {
+      occupied: 50_000,
+      window: 200_000,
+      pct: 25,
+      source: 'usage' as const,
+      deltaTokens: 0,
+      windowKnown: true,
+      windowOverridden: false,
+    },
     status: 'idle' as const,
     elapsedMs: 0,
     thinkingLevel: 'off',
@@ -318,7 +343,11 @@ describe('the status chip (§6.2)', () => {
     const measured = render(<StatusBar {...base} />);
     expect(measured.lastFrame()).not.toContain('~');
 
-    const derived = render(<StatusBar {...base} contextEstimated />);
+    // The flag travels ON the reading now (context-usage-gauge-accuracy §4.3):
+    // an estimate base, or any appended-message delta, is what the `~` reports.
+    const derived = render(
+      <StatusBar {...base} context={{ ...base.context, source: 'estimate' }} />,
+    );
     expect(derived.lastFrame()).toContain('~');
   });
 });
@@ -376,25 +405,35 @@ describe('the reducer (§5.5)', () => {
     expect(state.entries.filter((e) => e.kind === 'compaction')).toHaveLength(1);
   });
 
-  it('AC-5 — the gauge falls immediately and is marked as derived', () => {
+  it('AC-5 — the gauge falls through `contextUsage`, its ONE writer (I-1)', () => {
+    // `contextTokensEstimated` USED TO BE DISPATCHED HERE, from `App`'s
+    // `compaction_end` branch. It is gone: the meter learns about the splice
+    // from `CompactionWiring.settlePending` and publishes the post-compaction
+    // reading itself, so this action is the only thing that writes the gauge.
     const state = run([
       { type: 'turnEnd', usage: { inputTokens: 190_000, outputTokens: 0 }, costDelta: 0 },
-      { type: 'contextTokensEstimated', tokens: 23_100 },
+      { type: 'contextUsage', snapshot: usageSnapshot({ occupied: 23_100, pct: 12 }) },
     ]);
-    expect(state.contextTokens).toBe(23_100);
-    expect(state.contextTokensEstimated).toBe(true);
+    expect(state.context.occupied).toBe(23_100);
+    expect(state.context.pct).toBe(12);
   });
 
-  it('a MEASUREMENT supersedes the derivation at the next turnEnd', () => {
-    const state = run([
-      { type: 'contextTokensEstimated', tokens: 23_100 },
-      { type: 'turnEnd', usage: { inputTokens: 30_000, outputTokens: 500 }, costDelta: 0 },
+  it('turnEnd does NOT write the gauge any more (I-1)', () => {
+    // The bounce that was P0-1: two branches wrote one number in the same
+    // synchronous fan-out and the stale one won. `turnEnd` keeping its hands off
+    // is half of what makes that unrepresentable rather than merely fixed.
+    const seeded = run([
+      { type: 'contextUsage', snapshot: usageSnapshot({ occupied: 23_100, pct: 12 }) },
     ]);
-    expect(state.contextTokens).toBe(30_500);
-    expect(state.contextTokensEstimated).toBe(false);
+    const state = viewReducer(seeded, {
+      type: 'turnEnd',
+      usage: { inputTokens: 30_000, outputTokens: 500 },
+      costDelta: 0,
+    });
+    expect(state.context).toBe(seeded.context);
   });
 
-  it('turnEnd counts the CACHE fields, sharing one function with the trigger (AC-3)', () => {
+  it('turnEnd counts the CACHE fields into the session total (AC-11 / P1-3)', () => {
     const state = run([
       {
         type: 'turnEnd',
@@ -407,8 +446,12 @@ describe('the reducer (§5.5)', () => {
         costDelta: 0,
       },
     ]);
-    // The old formula gave 1200 and silently under-reported behind a gateway.
-    expect(state.contextTokens).toBe(6500);
+    // The old accumulator kept `inputTokens` alone - 1000 - while `computeCost`
+    // priced all three, which is what made the `^` disagree with the `$` on the
+    // same row for anyone behind a caching gateway.
+    expect(state.usageTotal.cacheReadTokens).toBe(5000);
+    expect(state.usageTotal.cacheWriteTokens).toBe(300);
+    expect(promptTokensOf(state.usageTotal)).toBe(6300);
   });
 
   it('compactionUsage touches usageTotal and NOTHING else', () => {
@@ -422,9 +465,9 @@ describe('the reducer (§5.5)', () => {
     });
     expect(state.usageTotal.inputTokens).toBe(41_000);
     expect(state.usageTotal.costUsd).toBeCloseTo(0.05);
-    // NOT `contextTokens`: that gauge is the LEAD's occupancy, and a
-    // summarization is a separate conversation with a different model.
-    expect(state.contextTokens).toBe(40_000);
+    // NOT `context`: that gauge is the LEAD's occupancy, and a summarization is
+    // a separate conversation with a different model.
+    expect(state.context).toBe(seeded.context);
   });
 
   it('clearTranscript and resetConversation both drop the live card id', () => {
@@ -434,8 +477,17 @@ describe('the reducer (§5.5)', () => {
     expect(opened.compactionEntryId).toBeDefined();
     expect(viewReducer(opened, { type: 'clearTranscript' }).compactionEntryId).toBeUndefined();
     expect(viewReducer(opened, { type: 'resetConversation' }).compactionEntryId).toBeUndefined();
-    // `/reset` zeroes the gauge, so the tilde has to go with it.
-    expect(viewReducer(opened, { type: 'resetConversation' }).contextTokensEstimated).toBe(false);
+    // `/reset` LEAVES THE GAUGE ALONE (I-1). `builtins.ts` calls
+    // `controller.clearMessages()` first, which marks the meter dirty; zeroing
+    // here would win the race and pin the bar at 0 rather than at the system
+    // prompt's own couple of percent. The SESSION TOTAL does reset.
+    const seeded = viewReducer(opened, {
+      type: 'contextUsage',
+      snapshot: usageSnapshot({ occupied: 40_000, pct: 20 }),
+    });
+    const reset = viewReducer(seeded, { type: 'resetConversation' });
+    expect(reset.context).toBe(seeded.context);
+    expect(reset.usageTotal.inputTokens).toBe(0);
   });
 });
 
@@ -586,7 +638,7 @@ describe('the new kind is plumbed everywhere it has to be', () => {
     const text = renderTranscriptText([compactionEntry()], {
       provider: 'anthropic',
       model: 'claude-sonnet-4-5',
-      usageTotal: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+      usageTotal: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 },
       glyphs: pickGlyphs(ASCII),
       elapsedMs: 0,
       droppedEntries: 0,
@@ -629,6 +681,7 @@ describe('compactionSnapshot drives the chip', () => {
 
   it('starts null, which is what leaves an ordinary bar unchanged', () => {
     expect(initialViewState().compaction).toBeNull();
-    expect(initialViewState().contextTokensEstimated).toBe(false);
+    expect(initialViewState().context.occupied).toBe(0);
+    expect(initialViewState().context.windowKnown).toBe(false);
   });
 });

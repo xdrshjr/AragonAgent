@@ -78,17 +78,31 @@ afterAll(() => {
 
 describe('readiness', () => {
   it('AC-14: a service that prints a URL reaches ready via `url`', async () => {
+    // A URL row that names a PORT is a CANDIDATE, not a verdict (P2-2): the
+    // watcher confirms it with one TCP connect before the status flips. The
+    // child therefore has to actually LISTEN on the port it names - a process
+    // that only prints the URL never settles unless some unrelated process
+    // happens to be squatting on that port, which is not this test's business.
+    // A free port and a per-test script keep the case hermetic on any machine.
+    const port = await freePort();
+    const urlScript = join(dir, 'url-server.js');
+    writeFileSync(
+      urlScript,
+      'const p=Number(process.argv[2]);' +
+        "require('net').createServer().listen(p,'127.0.0.1',()=>{console.log(" +
+        "'ready - started server on http://localhost:'+p+'');});" +
+        'setTimeout(()=>{},5000);',
+      'utf-8',
+    );
     const supervisor = make();
-    const command =
-      `${node} -e "console.log('ready - started server on http://localhost:3000');` +
-      `setTimeout(()=>{},5000)"`;
+    const command = `${node} ${JSON.stringify(urlScript)} ${port}`;
     const started = await supervisor.start({ command, cwd: dir, toolCallId: 't1' });
     expect(started.ok).toBe(true);
     const id = started.service!.id;
     await until(() => supervisor.get(id)?.status === 'ready', 6000, 'url readiness');
     const service = supervisor.get(id)!;
     expect(service.detectedBy).toBe('url');
-    expect(service.url).toBe('http://localhost:3000');
+    expect(service.url).toBe(`http://localhost:${port}`);
   }, 20_000);
 
   it('AC-15: a service that only LISTENS reaches ready via the probe', async () => {

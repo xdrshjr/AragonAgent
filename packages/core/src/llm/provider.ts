@@ -22,6 +22,7 @@ import type {
  * Keep both usages inside functions.
  */
 import { parseRetryAfterMs } from './retry.js';
+import { SseFrameLimitError } from './sse-parser.js';
 
 // ---------------------------------------------------------------------------
 // LLMRequest
@@ -103,7 +104,8 @@ export interface LLMProvider {
    * Stream a completion from the model.
    *
    * The returned iterator yields {@link StreamEvent} items and MUST terminate
-   * with either a `done` or an `error` event.
+   * with either a `done` or an `error` event, unless the caller cancels. Caller
+   * cancellation ends silently without executable tool results or a terminal.
    */
   stream(request: LLMRequest): AsyncIterableIterator<StreamEvent>;
 
@@ -239,6 +241,9 @@ export function classifyHttpError(
  */
 export function wrapFetchError(err: unknown, provider: string): LLMError {
   if (err instanceof LLMError) return err;
+  if (err instanceof SseFrameLimitError) {
+    return new LLMError('SSE_FRAME_TOO_LARGE', provider, 'unknown', false);
+  }
 
   const message = err instanceof Error ? err.message : String(err);
 

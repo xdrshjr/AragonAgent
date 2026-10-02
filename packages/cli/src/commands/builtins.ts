@@ -36,6 +36,7 @@ import { getLogger } from '../logging/logger.js';
 import { copyText } from '../ui/clipboard.js';
 import { perfCommand } from './perf.js';
 import { runCompactCommand } from '../compaction/command.js';
+import { runContextCommand } from '../compaction/context-command.js';
 import { CommandRegistry, type SlashCommand } from './registry.js';
 // `import type` for the reason `commands/registry.ts` records: tsc erases the
 // specifier, so `/update` gains no runtime edge into `update/` (§3.1 rule 1).
@@ -942,6 +943,14 @@ const COMMANDS: SlashCommand[] = [
     description:
       'Context compaction: status | on | off | threshold <n> | keep <n> | <instructions>',
     run: (ctx) => runCompactCommand(ctx),
+  },
+  {
+    // REGISTRATION ONLY, for the reason `/compact` records one entry up: this
+    // file is past the 1000-line guideline and the report has five sections.
+    // The body is in `compaction/context-command.ts`.
+    name: 'context',
+    description: 'Show context occupancy, the window it is measured against, and session spend',
+    run: (ctx) => runContextCommand(ctx),
   },
   {
     name: 'expand',

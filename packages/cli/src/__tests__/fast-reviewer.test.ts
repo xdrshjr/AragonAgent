@@ -77,6 +77,7 @@ function harness(
     opts.complete ?? (async () => answer('You edited schema.ts three times without testing.')),
   );
 
+  let reviewerRef: FastReviewer | null = null;
   const reviewer = new FastReviewer({
     subscribe: (l) => {
       listeners.add(l);
@@ -93,9 +94,27 @@ function harness(
     available: () => state.tier.ok,
     getApiKey: () => 'k',
     emit: (e) => events.push(e),
+    // The reviewer announces its own self-disable with a `tier_changed`, and
+    // the snapshot for it can only come from the wiring. A minimal stand-in is
+    // enough here: the field under test is `selfDisabled`, which the reviewer
+    // answers itself.
+    snapshot: () => ({
+      live: state.tier.ok,
+      selfDisabled: reviewerRef?.isSelfDisabled() ?? false,
+      model: state.tier.ok ? state.tier.ref.modelId : '',
+      sameAsMain: false,
+      reviews: 0,
+      reviewBudget: 0,
+      budgetReached: false,
+      delegated: 0,
+      usage: { inputTokens: 0, outputTokens: 0 },
+      pricingUnknown: false,
+      inFlight: false,
+    }),
     notify: (level, text) => notices.push([level, text]),
     now: () => now.value,
   });
+  reviewerRef = reviewer;
 
   return {
     reviewer,
@@ -433,6 +452,45 @@ describe('failure policy (§3.5.5)', () => {
     expect(h.complete.mock.calls.length).toBe(FAST_LIMITS.maxConsecutiveFailures);
     expect(h.notices.filter(([level]) => level === 'warn')).toHaveLength(1);
     expect(h.notices[0]![1]).toContain('no such model');
+  });
+
+  /**
+   * The self-disable has to LEAVE THE PROCESS
+   * (web-use-tier-cooperation-and-control-closure invariant 10b, case 20c).
+   *
+   * THE ASSERTION MUST LAND ON THE TRAILING `tier_changed`, never on the third
+   * `review_end`: the flag is set AFTER `emitReview({kind:'failed'})` runs, so
+   * the snapshot the third review carries still reads `selfDisabled: false`.
+   * Asserting there would report "upstream forgot to update the snapshot" while
+   * the real defect is the missing emit — and after this point the reviewer
+   * emits nothing ever again, so that one event is the ONLY chance a wrapper has.
+   */
+  it('case 20c: the self-disable emits a trailing `tier_changed` carrying selfDisabled:true', async () => {
+    const h = harness({
+      fast: { reviewEveryTurns: 1 },
+      complete: async () => {
+        throw Object.assign(new Error('no such model'), { errorType: 'invalid_request' });
+      },
+    });
+    await runTurns(h, 6);
+
+    const last = h.events[h.events.length - 1]!;
+    expect(last.type).toBe('tier_changed');
+    expect((last as Extract<FastEvent, { type: 'tier_changed' }>).snapshot.selfDisabled).toBe(true);
+    expect(h.reviewer.isSelfDisabled()).toBe(true);
+
+    // The reverse half: the LAST `review_end` still says `false`, which is
+    // exactly why the trailing event has to exist.
+    const reviews = h.events.filter((e) => e.type === 'review_end');
+    expect(reviews).toHaveLength(FAST_LIMITS.maxConsecutiveFailures);
+    expect(h.events.filter((e) => e.type === 'tier_changed')).toHaveLength(1);
+  });
+
+  it('case 20c reverse: a reviewer that never failed reports selfDisabled:false', async () => {
+    const h = harness({ fast: { reviewEveryTurns: 1 } });
+    await runTurns(h, 3);
+    expect(h.reviewer.isSelfDisabled()).toBe(false);
+    expect(h.events.filter((e) => e.type === 'tier_changed')).toHaveLength(0);
   });
 
   it('AC-36: a busy provider (`rate_limit`) NEVER self-disables the reviewer (D-24)', async () => {

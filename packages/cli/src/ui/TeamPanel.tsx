@@ -26,7 +26,7 @@ import { pickGlyphs } from './glyphs.js';
 import { formatDuration } from '../agent/usage.js';
 import { describeToolActivity, sanitizeActivity } from '../team/activity.js';
 import { TEAM_LIMITS } from '../team/limits.js';
-import { selectPanelRows } from '../team/panel-rows.js';
+import { buildTeamPanelLayout, type TeamPanelLayout } from './layout/team-panel.js';
 import type { SubagentRun, TeamSnapshot } from '../team/types.js';
 
 export interface TeamPanelProps {
@@ -44,6 +44,7 @@ export interface TeamPanelProps {
   caps: TermCapabilities;
   /** Injectable clock so the panel test does not depend on wall time. */
   now?: number;
+  layout?: TeamPanelLayout;
 }
 
 function isRunning(run: SubagentRun): boolean {
@@ -152,7 +153,12 @@ export function TeamPanel({
   theme,
   caps,
   now,
-}: TeamPanelProps): React.ReactElement {
+  layout,
+}: TeamPanelProps): React.ReactElement | null {
+  const projection = layout ?? buildTeamPanelLayout({
+    snapshot, terminalRows: rows, availableRows: Infinity,
+  });
+  if (projection.rowCount === 0) return null;
   const glyphs = pickGlyphs(caps);
   const at = now ?? Date.now();
   const running = snapshot.runs.filter(isRunning).length;
@@ -175,10 +181,9 @@ export function TeamPanel({
     </Box>
   );
 
-  // Below 20 rows the roster is more expensive than the transcript it displaces,
-  // so the panel degrades to the one line that still answers "is something
-  // running, and for how long" (§6.4).
-  if (rows < TEAM_LIMITS.panelCollapseRows) {
+  // Short terminals or a long draft leave only the shared header projection,
+  // which still answers whether anything is running and for how long.
+  if (projection.collapsed) {
     return <Box flexDirection="column" flexShrink={0}>{header}</Box>;
   }
 
@@ -186,10 +191,7 @@ export function TeamPanel({
   // order, so `slice(0, 5)` showed the five children that finished FIRST and hid
   // everything still working behind `+N more` - at exactly the fan-out widths
   // the requirement permits.
-  const { visible, hiddenTotal, hiddenRunning } = selectPanelRows(
-    snapshot.runs,
-    TEAM_LIMITS.panelMaxRows,
-  );
+  const { visible, hiddenTotal, hiddenRunning } = projection;
 
   return (
     <Box flexDirection="column" flexShrink={0}>
@@ -220,7 +222,9 @@ export function TeamPanel({
             */}
             <Box flexGrow={1} flexShrink={1} overflow="hidden">
               <Text wrap="truncate" color={theme.muted}>
-                {run.description}
+                {/* Truncation preserves explicit newlines; the shared budget
+                    reserves one row, so normalize only the display copy. */}
+                {run.description.replace(/\s+/g, ' ')}
               </Text>
             </Box>
             {/*
@@ -254,7 +258,7 @@ export function TeamPanel({
         <Text wrap="truncate" color={theme.muted}>
           {' '}
           {glyphs.teamMail} {snapshot.lastMessage.from} {glyphs.arrowRight} {snapshot.lastMessage.to}
-          : {snapshot.lastMessage.subject}
+          : {snapshot.lastMessage.subject.replace(/\s+/g, ' ')}
         </Text>
       )}
     </Box>

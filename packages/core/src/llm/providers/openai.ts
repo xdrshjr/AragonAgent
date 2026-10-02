@@ -18,7 +18,6 @@ import type {
   Message,
   ModelInfo,
   StreamEvent,
-  TextBlock,
   ToolCallBlock,
   TokenUsage,
   ToolDefinition,
@@ -42,6 +41,8 @@ import { consumeStream } from '../stream-utils.js';
 // ---------------------------------------------------------------------------
 
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
+
+export const OPENAI_TERMINAL_DRAIN_MS = 750;
 
 /** Reasoning-family models reject `max_tokens` in favour of `max_completion_tokens`. */
 const REASONING_MODEL_PATTERN = /^(o1|o3|o4|gpt-5)/;
@@ -110,219 +111,29 @@ export class OpenAIProvider implements LLMProvider {
   // -----------------------------------------------------------------------
 
   async *stream(request: LLMRequest): AsyncIterableIterator<StreamEvent> {
-    const baseUrl = (request.baseUrl || this.defaultBaseUrl).replace(/\/+$/, '');
-    const url = `${baseUrl}/chat/completions`;
-
-    const body = buildRequestBody(request);
-
-    let response: Response;
-    let errorBody = '';
+    if (request.signal?.aborted) return;
+    const scope = new OpenAIRequestScope(request.signal);
     try {
-      const attempt = await sendWithOutputLimitRecovery({
-        providerId: this.id,
-        modelId: request.model,
-        body,
-        tokenField: openAiTokenField(request.model),
-        send: (payload) =>
-          fetch(url, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${request.apiKey}`,
-            },
-            body: JSON.stringify(payload),
-            signal: request.signal,
-          }),
-      });
-      response = attempt.response;
-      errorBody = attempt.bodyText;
+      if (request.signal?.aborted) return;
+      const attempt = await sendOpenAIRequest(request, this.defaultBaseUrl, scope.signal);
+      if (request.signal?.aborted) return;
+      const response = attempt.response;
+      if (!response.ok) {
+        throw classifyHttpError(response.status, attempt.bodyText, this.id, response.headers);
+      }
+      if (!response.body) {
+        throw new LLMError('Response body is null', this.id, 'network_error', true);
+      }
+      for await (const event of readOpenAIResponse(response.body, scope)) {
+        if (request.signal?.aborted) return;
+        yield event;
+        if (request.signal?.aborted) return;
+      }
     } catch (err) {
+      if (request.signal?.aborted) return;
       yield { type: 'error', error: wrapFetchError(err, this.id) };
-      return;
-    }
-
-    if (!response.ok) {
-      // `errorBody` is the ALREADY-CONSUMED body; re-reading it would throw.
-      // `response.headers` carries `Retry-After` / `x-ratelimit-reset-after` out
-      // on `LLMError.retryAfterMs` so a 429 waits as long as the server asked.
-      yield {
-        type: 'error',
-        error: classifyHttpError(response.status, errorBody, this.id, response.headers),
-      };
-      return;
-    }
-
-    if (!response.body) {
-      yield { type: 'error', error: new LLMError('Response body is null', this.id, 'network_error', true) };
-      return;
-    }
-
-    // -- Parse SSE events --
-
-    const usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
-    const contentBlocks: ContentBlock[] = [];
-    let textAccumulator = '';
-    let stopReason: StopReason | undefined;
-
-    // Accumulate tool calls by index
-    const toolAccumulators = new Map<number, ToolCallAccumulator>();
-
-    /**
-     * Whether this stream reached a terminal frame (§4.5a). Unlike Anthropic's
-     * `message_stop`, neither of OpenAI's terminal signals `return`s, so the
-     * absence of a return cannot stand in for the flag.
-     *
-     * TWO SIGNALS, NOT ONE, and the second is not optional. The `[DONE]`
-     * sentinel is the documented terminator, but it is a convention of OpenAI's
-     * own server rather than a property of the wire format: several
-     * OpenAI-compatible endpoints (the ones `--base-url` exists for) close the
-     * connection after the last chunk without sending it. Keying truncation on
-     * `[DONE]` alone would make every request against such a server a retryable
-     * error, i.e. ten retries and then a failure, for a stream that completed
-     * perfectly. A `finish_reason` on any choice is the model's own statement
-     * that it stopped, and a stream cut mid-answer carries neither.
-     */
-    let sawTerminal = false;
-
-    try {
-      for await (const sse of parseSSEStream(response.body, request.signal)) {
-        const raw = sse.data.trim();
-
-        // [DONE] sentinel
-        if (raw === '[DONE]') {
-          sawTerminal = true;
-          break;
-        }
-
-        let data: Record<string, unknown>;
-        try {
-          data = JSON.parse(raw);
-        } catch {
-          continue;
-        }
-
-        // Extract usage if present (some providers include it in the final chunk)
-        const usageData = data.usage as Record<string, number> | undefined;
-        if (usageData) {
-          usage.inputTokens = usageData.prompt_tokens ?? usage.inputTokens;
-          usage.outputTokens = usageData.completion_tokens ?? usage.outputTokens;
-        }
-
-        const choices = data.choices as Array<Record<string, unknown>> | undefined;
-        if (!choices || choices.length === 0) continue;
-
-        const choice = choices[0];
-        const delta = choice.delta as Record<string, unknown> | undefined;
-        const finishReason = choice.finish_reason as string | null;
-
-        if (delta) {
-          // Text content
-          const content = delta.content as string | null;
-          if (content) {
-            textAccumulator += content;
-            yield { type: 'text_delta', delta: content };
-          }
-
-          // Tool calls
-          const toolCalls = delta.tool_calls as Array<Record<string, unknown>> | undefined;
-          if (toolCalls) {
-            for (const tc of toolCalls) {
-              const idx = (tc.index as number) ?? 0;
-              const fn = tc.function as Record<string, unknown> | undefined;
-
-              let acc = toolAccumulators.get(idx);
-              if (!acc) {
-                acc = {
-                  index: idx,
-                  toolCallId: (tc.id as string) || `call_${idx}`,
-                  toolName: fn?.name as string || '',
-                  argsJson: '',
-                  started: false,
-                };
-                toolAccumulators.set(idx, acc);
-              }
-
-              // Update name if present in this chunk
-              if (fn?.name) {
-                acc.toolName = fn.name as string;
-              }
-
-              // Emit tool_call_start on first encounter
-              if (!acc.started && acc.toolName) {
-                acc.started = true;
-                yield { type: 'tool_call_start', toolCallId: acc.toolCallId, toolName: acc.toolName };
-              }
-
-              // Accumulate argument fragments
-              if (fn?.arguments) {
-                const argChunk = fn.arguments as string;
-                acc.argsJson += argChunk;
-                if (acc.started) {
-                  yield { type: 'tool_call_delta', toolCallId: acc.toolCallId, argsDelta: argChunk };
-                }
-              }
-            }
-          }
-        }
-
-        // Finish reason handling
-        if (finishReason) {
-          sawTerminal = true;
-          stopReason = mapFinishReason(finishReason);
-        }
-      }
-
-      // ---- The terminal-sentinel contract (§4.5a) -------------------------
-      //
-      // An abort is NOT a truncation: `parseSSEStream` `break`s on
-      // `signal.aborted`, which lands on exactly this path, and turning that into
-      // a retryable `network_error` would re-create the trap `isRetryableError`
-      // check 1 exists to close (constraint 1 / R-17). The signal is therefore
-      // tested FIRST and that path keeps yielding `done`.
-      if (!sawTerminal && !request.signal?.aborted) {
-        yield {
-          type: 'error',
-          error: new LLMError(
-            `${this.id} stream truncated before a terminal chunk`,
-            this.id,
-            'network_error',
-            true,
-          ),
-        };
-        return;
-      }
-
-      // Flush text block
-      if (textAccumulator) {
-        contentBlocks.push({ type: 'text', text: textAccumulator } satisfies TextBlock);
-      }
-
-      // Flush tool calls — parse accumulated args JSON
-      for (const acc of toolAccumulators.values()) {
-        let args: Record<string, unknown> = {};
-        try {
-          args = acc.argsJson ? JSON.parse(acc.argsJson) : {};
-        } catch {
-          args = { __raw: acc.argsJson };
-        }
-        contentBlocks.push({
-          type: 'tool_call',
-          toolCallId: acc.toolCallId,
-          toolName: acc.toolName,
-          args,
-        } satisfies ToolCallBlock);
-        yield { type: 'tool_call_end', toolCallId: acc.toolCallId, toolName: acc.toolName, args };
-      }
-
-      const message: AssistantMessage = {
-        role: 'assistant',
-        content: contentBlocks,
-        usage,
-        stopReason,
-      };
-      yield { type: 'done', message, usage };
-    } catch (err) {
-      yield { type: 'error', error: wrapFetchError(err, this.id) };
+    } finally {
+      scope.dispose();
     }
   }
 
@@ -374,6 +185,186 @@ export class OpenAIProvider implements LLMProvider {
     } catch {
       return [];
     }
+  }
+}
+
+/** Owns the request signal and the absolute, non-renewable terminal deadline. */
+class OpenAIRequestScope {
+  private readonly controller = new AbortController();
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private cancelCause: 'caller' | 'terminal-drain' | null = null;
+  private readonly onCallerAbort = (): void => {
+    this.cancelCause = 'caller';
+    this.controller.abort();
+  };
+
+  constructor(private readonly caller?: AbortSignal) {
+    caller?.addEventListener('abort', this.onCallerAbort, { once: true });
+    if (caller?.aborted) this.onCallerAbort();
+  }
+
+  get signal(): AbortSignal { return this.controller.signal; }
+  get callerAborted(): boolean { return this.caller?.aborted === true; }
+  get terminalDrainExpired(): boolean { return this.cancelCause === 'terminal-drain'; }
+
+  startDrain(): void {
+    if (this.timer !== undefined || this.cancelCause !== null) return;
+    this.timer = setTimeout(() => {
+      if (this.callerAborted) { this.onCallerAbort(); return; }
+      this.cancelCause = 'terminal-drain';
+      this.controller.abort();
+    }, OPENAI_TERMINAL_DRAIN_MS);
+  }
+
+  dispose(): void {
+    if (this.timer !== undefined) clearTimeout(this.timer);
+    this.caller?.removeEventListener('abort', this.onCallerAbort);
+  }
+}
+
+function sendOpenAIRequest(request: LLMRequest, defaultBaseUrl: string, signal: AbortSignal) {
+  const baseUrl = (request.baseUrl || defaultBaseUrl).replace(/\/+$/, '');
+  return sendWithOutputLimitRecovery({
+    providerId: 'openai',
+    modelId: request.model,
+    body: buildRequestBody(request),
+    tokenField: openAiTokenField(request.model),
+    send: (payload) => fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${request.apiKey}`,
+      },
+      body: JSON.stringify(payload),
+      signal,
+    }),
+  });
+}
+
+async function* readOpenAIResponse(
+  body: ReadableStream<Uint8Array>,
+  scope: OpenAIRequestScope,
+): AsyncIterableIterator<StreamEvent> {
+  const state = new OpenAIStreamState();
+  try {
+    for await (const sse of parseSSEStream(body, scope.signal)) {
+      if (scope.callerAborted) return;
+      const raw = sse.data.trim();
+      if (raw === '[DONE]') { state.sawTerminal = true; break; }
+      for (const event of state.consume(raw, scope)) {
+        if (scope.callerAborted) return;
+        yield event;
+        if (scope.callerAborted) return;
+      }
+    }
+  } catch (err) {
+    if (scope.callerAborted) return;
+    if (!scope.terminalDrainExpired || !state.sawTerminal) throw err;
+  }
+  if (scope.callerAborted) return;
+  if (!state.sawTerminal) {
+    throw new LLMError(
+      'openai stream truncated before a terminal chunk', 'openai', 'network_error', true,
+    );
+  }
+  for (const event of state.finish()) {
+    if (scope.callerAborted) return;
+    yield event;
+    if (scope.callerAborted) return;
+  }
+}
+
+class OpenAIStreamState {
+  readonly usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
+  sawTerminal = false;
+  private text = '';
+  private thinking = '';
+  private stopReason: StopReason | undefined;
+  private readonly tools = new Map<number, ToolCallAccumulator>();
+
+  *consume(raw: string, scope: OpenAIRequestScope): IterableIterator<StreamEvent> {
+    let chunk: Record<string, unknown> | null;
+    try { chunk = JSON.parse(raw); } catch { return; }
+    if (!chunk || typeof chunk !== 'object') return;
+    const usage = chunk.usage as Record<string, number> | undefined;
+    if (usage) {
+      this.usage.inputTokens = usage.prompt_tokens ?? this.usage.inputTokens;
+      this.usage.outputTokens = usage.completion_tokens ?? this.usage.outputTokens;
+    }
+    if (this.sawTerminal) return;
+    const choices = chunk.choices as Array<Record<string, unknown>> | undefined;
+    if (!Array.isArray(choices) || choices.length === 0) return;
+    const choice = choices.find((candidate) => candidate.index === 0)
+      ?? (choices[0].index === undefined ? choices[0] : undefined);
+    if (!choice) return;
+    if (typeof choice.finish_reason === 'string' && choice.finish_reason.length > 0) {
+      this.sawTerminal = true;
+      this.stopReason = mapFinishReason(choice.finish_reason);
+      // Start at receipt, including when a consumer pauses on this frame's delta.
+      scope.startDrain();
+    }
+    const delta = choice.delta as Record<string, unknown> | undefined;
+    if (delta) yield* this.consumeDelta(delta);
+  }
+
+  private *consumeDelta(delta: Record<string, unknown>): IterableIterator<StreamEvent> {
+    const reasoning = delta.reasoning_content;
+    if (typeof reasoning === 'string' && reasoning.length > 0) {
+      if (this.thinking.length === 0) yield { type: 'thinking_start' };
+      this.thinking += reasoning;
+      yield { type: 'thinking_delta', delta: reasoning };
+    }
+    if (typeof delta.content === 'string' && delta.content.length > 0) {
+      this.text += delta.content;
+      yield { type: 'text_delta', delta: delta.content };
+    }
+    const tools = delta.tool_calls as Array<Record<string, unknown>> | undefined;
+    if (Array.isArray(tools)) {
+      for (const tool of tools) yield* this.consumeTool(tool);
+    }
+  }
+
+  private *consumeTool(tool: Record<string, unknown>): IterableIterator<StreamEvent> {
+    const index = (tool.index as number) ?? 0;
+    const fn = tool.function as Record<string, unknown> | undefined;
+    let acc = this.tools.get(index);
+    if (!acc) {
+      acc = {
+        index, toolCallId: (tool.id as string) || `call_${index}`,
+        toolName: (fn?.name as string) || '', argsJson: '', started: false,
+      };
+      this.tools.set(index, acc);
+    }
+    if (fn?.name) acc.toolName = fn.name as string;
+    if (!acc.started && acc.toolName) {
+      acc.started = true;
+      yield { type: 'tool_call_start', toolCallId: acc.toolCallId, toolName: acc.toolName };
+    }
+    if (typeof fn?.arguments === 'string' && fn.arguments.length > 0) {
+      acc.argsJson += fn.arguments;
+      if (acc.started) {
+        yield { type: 'tool_call_delta', toolCallId: acc.toolCallId, argsDelta: fn.arguments };
+      }
+    }
+  }
+
+  *finish(): IterableIterator<StreamEvent> {
+    const content: ContentBlock[] = [];
+    if (this.thinking) content.push({ type: 'thinking', text: this.thinking });
+    if (this.text) content.push({ type: 'text', text: this.text });
+    for (const acc of this.tools.values()) {
+      let args: Record<string, unknown> = {};
+      try { args = acc.argsJson ? JSON.parse(acc.argsJson) : {}; }
+      catch { args = { __raw: acc.argsJson }; }
+      content.push({
+        type: 'tool_call', toolCallId: acc.toolCallId, toolName: acc.toolName, args,
+      });
+      yield { type: 'tool_call_end', toolCallId: acc.toolCallId, toolName: acc.toolName, args };
+    }
+    const message: AssistantMessage = {
+      role: 'assistant', content, usage: this.usage, stopReason: this.stopReason,
+    };
+    yield { type: 'done', message, usage: this.usage };
   }
 }
 

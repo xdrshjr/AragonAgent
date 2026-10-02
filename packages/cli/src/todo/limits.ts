@@ -33,13 +33,10 @@ export const TODO_LIMITS = {
    * there (§3.3 step 2).
    */
   minFreshItems: 2,
-  /** Rows the in-progress row may wrap to. Every other row truncates. */
-  activeWrapRows: 2,
-  /**
-   * Below this many AVAILABLE rail rows (`todoRailRows`, NOT `viewportBudget`)
-   * the rail is not mounted at all.
-   */
-  panelMinRows: 6,
+  /** Minimum shared middle rows for the compact rail. */
+  panelMinRows: 3,
+  /** Full rail includes a blank separator and separate overflow markers. */
+  panelFullRows: 6,
   /** Below this many terminal columns the status-bar counter degrades to `[3/7]`. */
   statusCompactCols: 100,
   /**
@@ -52,16 +49,6 @@ export const TODO_LIMITS = {
    * component was a third policy or a typo for one of them.
    */
   stripDoneCols: 80,
-  /**
-   * Rows `todoRailRows()` subtracts while a team dispatch is live (§3.9 / P1-3).
-   *
-   * `TEAM_LIMITS.panelMaxRows` (5) + header + `+N more` + the mail line = 8, and
-   * this is deliberately the FULL worst case rather than a measurement: an
-   * over-subtraction costs one item row, an under-subtraction eats the `+N
-   * below` marker - the one row whose absence is indistinguishable from "the
-   * list is short" - and those two mistakes are not equally bad.
-   */
-  railReservedRows: 8,
   /**
    * Consecutive user turns an UNFINISHED list survives without a `todo_write`
    * before `beginUserTurn()` drops it (§3.2 / P1-7). Three keeps the common

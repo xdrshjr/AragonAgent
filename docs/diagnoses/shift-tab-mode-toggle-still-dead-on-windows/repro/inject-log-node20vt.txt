@@ -1,0 +1,13 @@
+﻿[    4ms] node_exe=C:\Users\jdqqj\AppData\Local\Temp\claude\M--takoAI-JRAgentMesh-aragon-agent-core\16b45c69-21b1-4c8d-86f6-3930b467cb31\scratchpad\n20\node-v20.19.0-win-x64\node.exe
+[   35ms] before_probe mode=0x01F7 VT_INPUT=False WINDOW_INPUT=False MOUSE_INPUT=True
+[ 1574ms] during_rawmode mode=0x0008 VT_INPUT=False WINDOW_INPUT=True MOUSE_INPUT=False
+[ 1650ms] inject Shift+Tab#1_baseline ok=True written=2
+[ 2279ms] FORCE SetConsoleMode(0x0208) ok=True lastErr=0
+[ 2280ms] after_force mode=0x0208 VT_INPUT=True WINDOW_INPUT=True MOUSE_INPUT=False
+[ 2595ms] inject Shift+Tab#2_DECISIVE ok=True written=2
+[ 3224ms] inject WheelUp ok=True written=1
+[ 3477ms] inject WheelDown ok=True written=1
+[ 5797ms] after_probe_rawmode_toggle mode=0x0008 VT_INPUT=False WINDOW_INPUT=True MOUSE_INPUT=False
+[ 6109ms] inject Shift+Tab#3_after_toggle ok=True written=2
+[ 9163ms] after_probe_exit mode=0x0008 VT_INPUT=False WINDOW_INPUT=True MOUSE_INPUT=False
+[ 9165ms] done

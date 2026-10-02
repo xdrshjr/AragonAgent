@@ -12,17 +12,15 @@ import {
   TODO_RAIL_MAX_COLS,
   TODO_RAIL_MIN_COLS,
   TODO_RAIL_MIN_TOTAL_COLS,
-  todoRailRows,
   todoRailWidth,
 } from '../ui/layout/rail.js';
-import { TODO_LIMITS } from '../todo/limits.js';
 
 describe('todoRailWidth', () => {
-  it('AC-20: 0 below 80 columns, 18 at 80, 24 at 120, 36 at 200', () => {
-    expect(todoRailWidth(79)).toBe(0);
-    expect(todoRailWidth(TODO_RAIL_MIN_TOTAL_COLS)).toBe(18);
-    expect(todoRailWidth(120)).toBe(24);
-    expect(todoRailWidth(200)).toBe(TODO_RAIL_MAX_COLS);
+  it('按十五个百分点分配并保留正文下限', () => {
+    for (const [cols, expected] of [[75, 0], [76, 14], [80, 14], [100, 15],
+      [120, 18], [160, 24], [200, 30], [240, 36], [300, 36], [75.9, 0]]) {
+      expect(todoRailWidth(cols!)).toBe(expected);
+    }
   });
 
   it('AC-19: non-decreasing across [40, 300]', () => {
@@ -44,8 +42,8 @@ describe('todoRailWidth', () => {
     }
   });
 
-  it('clamps at both ends rather than taking a literal 20%', () => {
-    // Unclamped, 20% is an unreadable strip at the bottom and 40 columns of
+  it('clamps at both ends rather than taking a literal 15%', () => {
+    // Unclamped, 15% is an unreadable strip at the bottom and 40 columns of
     // whitespace at the top (D-8).
     expect(todoRailWidth(85)).toBe(TODO_RAIL_MIN_COLS);
     expect(todoRailWidth(1000)).toBe(TODO_RAIL_MAX_COLS);
@@ -54,29 +52,5 @@ describe('todoRailWidth', () => {
   it('treats a missing or nonsense width as "no rail" rather than throwing', () => {
     expect(todoRailWidth(Number.NaN)).toBe(0);
     expect(todoRailWidth(Number.POSITIVE_INFINITY)).toBe(0);
-  });
-});
-
-describe('todoRailRows (AC-39)', () => {
-  it('subtracts the team roster worst case, and only when a dispatch is live', () => {
-    // IT IS NOT `viewportBudget` (P1-3). `viewportRows()` subtracts the STATIC
-    // chrome only; the live roster costs up to 8 rows inside `AppShell`'s
-    // measured bottom box that the budget knows nothing about. Ink clips from
-    // the bottom, so over-requesting silently eats the `+N below` marker.
-    expect(todoRailRows(20, false)).toBe(20);
-    expect(todoRailRows(20, true)).toBe(20 - TODO_LIMITS.railReservedRows);
-  });
-
-  it('floors at zero rather than going negative', () => {
-    expect(todoRailRows(3, true)).toBe(0);
-    expect(todoRailRows(0, false)).toBe(0);
-    expect(todoRailRows(Number.NaN, false)).toBe(0);
-  });
-
-  it('reserves the FULL worst case rather than a measurement (D-23)', () => {
-    // Over-subtracting costs one item row; under-subtracting costs the overflow
-    // marker, whose absence is indistinguishable from "the list is short". Those
-    // two mistakes are not equally bad.
-    expect(TODO_LIMITS.railReservedRows).toBeGreaterThanOrEqual(8);
   });
 });

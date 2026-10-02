@@ -20,6 +20,7 @@ import type {
   TokenUsage,
 } from '@aragon-agent/core';
 import { Compactor, type CompactorDeps } from '../compaction/compactor.js';
+import { ContextMeter } from '../compaction/meter.js';
 import { COMPACTION_LIMITS } from '../compaction/limits.js';
 import { isPriorSummaryBlock } from '../compaction/digest.js';
 import { isTaggedAnchor, countProtectedPrefix } from '../compaction/summary-prompt.js';
@@ -101,14 +102,33 @@ function harness(opts: HarnessOpts = {}) {
   const requests: LLMRequest[] = [];
   const answers = [...(opts.answers ?? ['## Task\nthe summary'])];
 
+  // MUTABLE, because the meter reads the LIVE history rather than accepting one
+  // as an argument (context-usage-gauge-accuracy W1). A `turn_end` records the
+  // prefix the history had AT THAT MOMENT, so a test that wants a non-empty
+  // delta has to move the history between the two calls - exactly as the loop
+  // does when it pushes tool results after the turn boundary.
+  let messages: readonly Message[] = opts.messages ?? [];
+  const setMessages = (next: readonly Message[]): void => {
+    messages = next;
+  };
+
+  const meter = new ContextMeter({
+    getMessages: () => messages,
+    getSystemPrompt: () => '',
+    getModelInfo: () => MODEL,
+    isWindowKnown: () => opts.priced !== false,
+    getWindowOverride: () => null,
+  });
+
   const deps: CompactorDeps = {
     getConfig: () => config,
     hasKey: () => opts.hasKey !== false,
     getApiKey: () => (opts.hasKey === false ? undefined : 'k'),
     getModelInfoFor: () => MODEL,
     isPricedModel: () => opts.priced !== false,
-    getMessages: () => opts.messages ?? [],
+    getMessages: () => messages,
     getSystemPrompt: () => '',
+    meter,
     complete: async (_providerId: string, request: LLMRequest): Promise<AssistantMessage> => {
       requests.push(request);
       const next = answers.length > 0 ? answers.shift()! : '## Task\nthe summary';
@@ -131,6 +151,8 @@ function harness(opts: HarnessOpts = {}) {
     notices,
     requests,
     pressures,
+    meter,
+    setMessages,
   };
 }
 
@@ -753,20 +775,28 @@ function appendedToolResults(): Message[] {
 }
 
 describe('the recorded measurement prefix (hardening §3.2.3 / W1)', () => {
-  it('onTurnEnd records the length; invalidateMeasurement clears it', () => {
+  it('onTurnEnd records the length; a history reset clears it', () => {
     const measured: Message[] = [user('turn 12'), user('the assistant turn')];
     const history = [...measured, ...appendedToolResults()];
-    const { compactor } = harness({ messages: history });
+    const { compactor, meter, setMessages } = harness({ messages: history });
 
     // Nothing recorded yet: the delta is absent and the number is round 1's.
     compactor.measure({ lastUsage: { inputTokens: 152_000, outputTokens: 0 }, messages: history });
     expect(compactor.lastMeasured()?.deltaTokens).toBe(0);
 
+    // The turn boundary sees a SHORTER history than the checkpoint that follows
+    // it, because the loop pushes the tool results afterwards. The meter reads
+    // the live array (context-usage-gauge-accuracy W1), so the test moves it.
+    setMessages(measured.slice(0, 1));
     compactor.onTurnEnd({ inputTokens: 152_000, outputTokens: 0 }, measured.slice(0, 1), '');
+    setMessages(history);
     compactor.measure({ lastUsage: { inputTokens: 152_000, outputTokens: 0 }, messages: history });
     expect(compactor.lastMeasured()!.deltaTokens).toBeGreaterThan(40_000);
 
-    compactor.invalidateMeasurement();
+    // `invalidateMeasurement()` USED TO BE HERE. It is gone: its two production
+    // callers wanted OPPOSITE reset depths, so each now names the one it means
+    // on the meter (I-8 / I-9). This is the DEEP one.
+    meter.onHistoryReplaced();
     compactor.measure({ lastUsage: { inputTokens: 152_000, outputTokens: 0 }, messages: history });
     expect(compactor.lastMeasured()!.deltaTokens).toBe(0);
   });
@@ -780,7 +810,7 @@ describe('the recorded measurement prefix (hardening §3.2.3 / W1)', () => {
   it('a 76 %-measured history with 49 k of appended tool results TRIGGERS', () => {
     const measured: Message[] = [user('turn 12'), user('the assistant turn')];
     const history = [...measured, ...appendedToolResults()];
-    const { compactor } = harness({ messages: history });
+    const { compactor, meter, setMessages } = harness({ messages: history });
     const probe = {
       messageCount: history.length,
       turnIndex: 5,
@@ -788,13 +818,50 @@ describe('the recorded measurement prefix (hardening §3.2.3 / W1)', () => {
       lastUsage: { inputTokens: 152_000, outputTokens: 0 },
     };
 
+    setMessages(measured.slice(0, 1));
     compactor.onTurnEnd(probe.lastUsage, measured.slice(0, 1), '');
+    setMessages(history);
     expect(compactor.shouldCompact(probe)).toBe(true);
 
     // And the same history with the prefix invalidated does NOT - which is
     // exactly the pre-fix behaviour, asserted so a revert is visible.
-    compactor.invalidateMeasurement();
+    meter.onHistoryReplaced();
     expect(compactor.shouldCompact(probe)).toBe(false);
+  });
+});
+
+describe('lastMeasured() is the ACCOUNTING read (context-usage-gauge-accuracy I-10)', () => {
+  /**
+   * MUTATION-VERIFIED, AND THE MUTATION IS `lastMeasured() -> meter.current()`.
+   *
+   * IT HAS TO BE ASSERTED HERE RATHER THAN END TO END. `settlePending` overrides
+   * `record.tokensBefore` from CORE's own estimator on both the in-loop and the
+   * idle path (`wiring.ts`), so an end-to-end "reclaimed > 0" row is answered by
+   * that override and stays green against the wrong forwarder. What the wrong
+   * forwarder actually breaks is the SEAM: an accounting read starts measuring
+   * and, worse, starts PUBLISHING - moving the user's gauge as a side effect of
+   * building a record. Both halves are asserted below and both go red under the
+   * mutation.
+   */
+  it('answers with the pre-splice figure and publishes nothing', () => {
+    const measured: Message[] = [user('turn 12'), user('the assistant turn')];
+    const { compactor, meter, setMessages } = harness({ messages: measured });
+    const published: number[] = [];
+    meter.subscribe((u) => published.push(u.occupied));
+
+    compactor.onTurnEnd({ inputTokens: 150_000, outputTokens: 0 }, measured, '');
+    const before = compactor.lastMeasured()!.occupied;
+    expect(before).toBe(150_000);
+
+    // The splice: a much shorter history, and the meter told about it.
+    setMessages([user('the summary')]);
+    meter.onHistorySpliced();
+    published.length = 0;
+
+    // `finish()` reads this for `tokensBefore`, which is the card's
+    // "reclaimed N tokens" and `/compact status`'s running total.
+    expect(compactor.lastMeasured()!.occupied).toBe(before);
+    expect(published).toEqual([]);
   });
 });
 

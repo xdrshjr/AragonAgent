@@ -415,3 +415,31 @@ describe('isApproximate (hardening §6.3)', () => {
     ).toBe(true);
   });
 });
+
+describe('T19 - `windowOverridden` is a pure pass-through (context-usage-gauge-accuracy)', () => {
+  const p = (over: Partial<Parameters<typeof computePressure>[0]> = {}) =>
+    computePressure({
+      messages: [user('a')],
+      systemPrompt: '',
+      contextWindow: 200_000,
+      windowKnown: true,
+      ...over,
+    });
+
+  it('defaults to false, so every pre-existing construction site is unchanged', () => {
+    expect(p().windowOverridden).toBe(false);
+  });
+
+  it('is carried, never derived', () => {
+    // THE ARITHMETIC IN THIS FILE IS UNTOUCHED BY THAT FEATURE. The flag travels
+    // with the number so `/context` can name the denominator`s source (I-6); it
+    // must not become an input to anything computed here.
+    const plain = p();
+    const flagged = p({ windowOverridden: true });
+    expect(flagged.windowOverridden).toBe(true);
+    expect(flagged.occupied).toBe(plain.occupied);
+    expect(flagged.ratio).toBe(plain.ratio);
+    expect(flagged.headroom).toBe(plain.headroom);
+    expect(flagged.windowKnown).toBe(plain.windowKnown);
+  });
+});

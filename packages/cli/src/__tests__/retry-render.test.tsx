@@ -230,10 +230,16 @@ describe('StatusBar retry chip (AC-28)', () => {
       <StatusBar
         model="claude-sonnet-4-5"
         provider="anthropic"
-        usageTotal={{ inputTokens: 10, outputTokens: 5, costUsd: 0.24 }}
-        contextTokens={1000}
-        contextWindow={200_000}
-        contextWindowKnown
+        usageTotal={{ inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.24 }}
+        context={{
+          occupied: 1000,
+          window: 200_000,
+          pct: 1,
+          source: 'usage',
+          deltaTokens: 0,
+          windowKnown: true,
+          windowOverridden: false,
+        }}
         status="running"
         elapsedMs={1000}
         thinkingLevel="off"

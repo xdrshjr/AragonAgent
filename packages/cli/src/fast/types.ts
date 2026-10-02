@@ -74,6 +74,21 @@ export interface FastReview {
 export interface FastSnapshot {
   /** The tier resolved AND the live switch is on. */
   live: boolean;
+  /**
+   * The reviewer switched ITSELF off after `maxConsecutiveFailures` in a row
+   * (`FastReviewer.onReviewFailure`).
+   *
+   * ORTHOGONAL TO `live`, AND NEITHER IMPLIES THE OTHER. `live` answers "did
+   * this tier resolve at all" and is `registered && enabled && tier.ok`; the
+   * self-disable touches none of those three, so `live` stays `true` after it.
+   * A consumer that wants to report "the fast reviews stopped happening" MUST
+   * read this field: deriving it as `live === false` is a predicate that can
+   * never be true, and a hand-written fixture makes its test green for ever.
+   *
+   * `available()` is deliberately NOT widened to include it — see the note on
+   * `FastWiring.available`.
+   */
+  selfDisabled: boolean;
   model: string;
   sameAsMain: boolean;
   reviews: number;

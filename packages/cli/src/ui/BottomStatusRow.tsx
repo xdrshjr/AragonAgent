@@ -11,7 +11,7 @@
  * box is its only `flexShrink={1}` child — so an extra chrome row does not make
  * the frame taller, Yoga takes the row out of the TRANSCRIPT. Meanwhile
  * `viewportRows()` keeps returning the old number to `ScrollViewport`,
- * `selectWindow`'s spacers, `overlayMaxRows`, `popupMaxRows` and `todoRailRows`.
+ * `selectWindow`'s spacers, `overlayMaxRows`, `popupMaxRows` and `buildTodoRailLayout`.
  * The transcript would draw one row shorter than every consumer believes, ONLY
  * WHILE A RUN IS IN FLIGHT, so the layout would shift on submit and shift back on
  * `agent_end`.

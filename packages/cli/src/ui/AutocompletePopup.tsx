@@ -9,6 +9,7 @@ import { Box, Text } from 'ink';
 import type { Theme } from './theme.js';
 import type { TermCapabilities } from './capabilities.js';
 import { pickGlyphs } from './glyphs.js';
+import { buildAutocompleteLayout, type AutocompleteLayout } from './layout/autocomplete.js';
 
 export interface Suggestion {
   label: string;
@@ -21,29 +22,27 @@ interface AutocompletePopupProps {
   theme: Theme;
   caps: TermCapabilities;
   maxRows?: number;
+  layout?: AutocompleteLayout;
 }
-
-const DEFAULT_MAX_ROWS = 6;
 
 export function AutocompletePopup({
   items,
   selected,
   theme,
   caps,
-  maxRows = DEFAULT_MAX_ROWS,
+  maxRows,
+  layout,
 }: AutocompletePopupProps): React.ReactElement | null {
-  if (items.length === 0) return null;
+  const projection = layout ?? buildAutocompleteLayout({ itemCount: items.length, selected, maxRows });
+  if (projection.rowCount === 0) return null;
   const glyphs = pickGlyphs(caps);
-
-  // Keep the highlighted row within a window of `maxRows`.
-  const start = Math.max(0, Math.min(selected - maxRows + 1, items.length - maxRows));
-  const windowStart = Math.max(0, start);
-  const visible = items.slice(windowStart, windowStart + maxRows);
-  const moreBelow = items.length - (windowStart + visible.length);
+  const { start: windowStart, count, moreBelow, showMore } = projection;
+  const visible = items.slice(windowStart, windowStart + count);
 
   return (
     <Box
       flexDirection="column"
+      flexShrink={0}
       borderStyle={glyphs.boxStyle}
       borderColor={theme.border}
       paddingX={1}
@@ -52,13 +51,13 @@ export function AutocompletePopup({
         const idx = windowStart + i;
         const active = idx === selected;
         return (
-          <Text key={item.label} inverse={active}>
-            <Text color={active ? undefined : theme.primary}>{item.label}</Text>
-            {item.hint ? <Text color={theme.muted}>  {item.hint}</Text> : null}
+          <Text key={idx} inverse={active} wrap="truncate">
+            <Text color={active ? undefined : theme.primary}>{item.label.replace(/\s+/g, ' ')}</Text>
+            {item.hint ? <Text color={theme.muted}>  {item.hint.replace(/\s+/g, ' ')}</Text> : null}
           </Text>
         );
       })}
-      {moreBelow > 0 && <Text color={theme.muted}>  +{moreBelow} more</Text>}
+      {showMore && <Text wrap="truncate" color={theme.muted}>  +{moreBelow} more</Text>}
     </Box>
   );
 }

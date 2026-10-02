@@ -255,7 +255,7 @@ describe('turnEnd settles to recovered (AC-23)', () => {
     const withRetry = apply(midTurn(), scheduled(1), { type: 'turnEnd', usage, costDelta: 1.5 });
     const without = apply(midTurn(), { type: 'turnEnd', usage, costDelta: 1.5 });
     expect(withRetry.usageTotal).toEqual(without.usageTotal);
-    expect(withRetry.contextTokens).toEqual(without.contextTokens);
+    expect(withRetry.context).toEqual(without.context);
     expect(withRetry.turnProduced).toBe(true);
   });
 });

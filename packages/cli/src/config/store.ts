@@ -27,6 +27,7 @@ import {
   clampSkillsConfig,
   clampTeamConfig,
   clampTodoConfig,
+  clampContextWindow,
   clampUpdateConfig,
   isAutoToken,
   stripLegacyStateKeys,
@@ -46,6 +47,21 @@ function normalizeMaxTokens(v: unknown): number | null {
   if (v === undefined) return DEFAULT_CONFIG.maxTokens;
   if (v === null || isAutoToken(v)) return null;
   return clampMaxTokens(v) ?? null;
+}
+
+/**
+ * Normalize `contextWindow` for both directions of the config file.
+ *
+ * THE SAME TRI-STATE DISCIPLINE AS `maxTokens` ABOVE, and for the same reason:
+ * hardening only the read path leaves a bad value on disk that reverts on every
+ * launch and presents as "my setting won't stick". `null` is AUTO and survives
+ * untouched; `auto` / `0` / an empty string mean AUTO too; a number is clamped;
+ * anything else on a hand-edited file becomes AUTO rather than a silent default.
+ */
+function normalizeContextWindow(v: unknown): number | null {
+  if (v === undefined) return DEFAULT_CONFIG.contextWindow;
+  if (v === null || isAutoToken(v)) return null;
+  return clampContextWindow(v, null);
 }
 
 // Re-exported so the many existing importers of `store.js` keep working; the
@@ -146,6 +162,11 @@ export function loadPersistedConfig(): PersistedConfig {
     maxTokens: Object.prototype.hasOwnProperty.call(partial, 'maxTokens')
       ? normalizeMaxTokens(partial.maxTokens)
       : DEFAULT_CONFIG.maxTokens,
+    // Own-property aware for the reason its neighbour records: `null` is AUTO
+    // and a spread cannot tell it from an absent key.
+    contextWindow: Object.prototype.hasOwnProperty.call(partial, 'contextWindow')
+      ? normalizeContextWindow(partial.contextWindow)
+      : DEFAULT_CONFIG.contextWindow,
     apiKeys: { ...DEFAULT_CONFIG.apiKeys, ...(partial.apiKeys ?? {}) },
     // `skills` is the second nested object in this file and needs the same
     // treatment `apiKeys` gets — see the note on updatePersistedConfig below.
@@ -232,6 +253,11 @@ export function updatePersistedConfig(patch: Partial<PersistedConfig>): Persiste
     maxTokens: Object.prototype.hasOwnProperty.call(patch, 'maxTokens')
       ? normalizeMaxTokens(patch.maxTokens)
       : current.maxTokens,
+    // The write half of the same gate: without it `config set contextWindow
+    // 99999999` puts a number on disk that the read path silently rewrites.
+    contextWindow: Object.prototype.hasOwnProperty.call(patch, 'contextWindow')
+      ? normalizeContextWindow(patch.contextWindow)
+      : current.contextWindow,
     apiKeys: { ...current.apiKeys, ...(patch.apiKeys ?? {}) },
     skills: clampSkillsConfig({ ...current.skills, ...(patch.skills ?? {}) }),
     // Without this line, changing the log level from the settings screen would

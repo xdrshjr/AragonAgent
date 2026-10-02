@@ -66,9 +66,14 @@ import { makeBashKill, makeBashOutput } from '../tools/proc-tools.js';
 import { addSignalHook } from '../logging/install.js';
 import { describeFastTierProblem, fastProviderOf, resolveFastTier } from '../fast/resolve.js';
 import { FastWiring, offFastStatus, type FastStatus } from '../fast/wiring.js';
-import type { FastEventListener } from '../fast/types.js';
+import type { FastEventListener, FastSnapshot } from '../fast/types.js';
 import { CompactionWiring, offCompactionSnapshot } from '../compaction/wiring.js';
-import type { CompactionEventListener, CompactionSnapshot } from '../compaction/types.js';
+import { ContextMeter, type ContextUsageListener } from '../compaction/meter.js';
+import type {
+  CompactionEventListener,
+  CompactionSnapshot,
+  ContextUsageSnapshot,
+} from '../compaction/types.js';
 import { TodoStore } from '../todo/store.js';
 import { createTodoTool } from '../todo/todo-tool.js';
 import { buildTodoBlock } from '../todo/prompt.js';
@@ -337,6 +342,25 @@ export class AgentController {
   // -----------------------------------------------------------------------
 
   private readonly compaction: CompactionWiring | null;
+
+  // -----------------------------------------------------------------------
+  // Context occupancy (context-usage-gauge-accuracy §3.2 / W1)
+  //
+  // CONSTRUCTED UNCONDITIONALLY, unlike its neighbour, and that asymmetry IS the
+  // feature. `compaction` above is `null` for a session started with
+  // `--no-compaction` - and before this field existed, that took the only
+  // measuring code in the process with it: such a session's gauge had exactly
+  // one sample per turn (the provider's `turn_end` usage) and read `0 %` after a
+  // `/resume`. Occupancy is not a compaction concern; it is what compaction
+  // READS.
+  //
+  // IT COSTS A HEADLESS HOST NOTHING (I-11). `aragon exec` builds an
+  // `AgentController` too, and nothing there reads this number; the meter arms
+  // no timer while it has no subscribers, so the extra object is a few scalars
+  // and a `Set`.
+  // -----------------------------------------------------------------------
+
+  private readonly contextMeter: ContextMeter;
 
   // -----------------------------------------------------------------------
   // Background services (background-service-supervision §3.3 / §3.6)
@@ -664,6 +688,29 @@ export class AgentController {
       ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
     };
 
+    // --- Context occupancy, part 1: BEFORE the Agent, UNCONDITIONALLY ------
+    //
+    // Built here for the same C-12 reason the wiring is - lazy `getMessages` /
+    // `getSystemPrompt` closures, `attach` after `new Agent` - and built for
+    // EVERY session, including one with compaction off, because that is the one
+    // whose gauge was broken (P1-4 / P0-2).
+    this.contextMeter = new ContextMeter({
+      getMessages: () => this.agent.state.messages,
+      getSystemPrompt: () => this.agent.state.systemPrompt,
+      getModelInfo: () => this.getModelInfo(),
+      // ONE PREDICATE FOR "IS THE DENOMINATOR REAL". `isPricedModel` is
+      // `modelRegistry.getModel(...) !== undefined`, and `getModelInfoFor` falls
+      // back to `buildRuntimeModel` - a 128k placeholder AND a zero cost table -
+      // for exactly the models it answers `false` for. The two are the same
+      // question about the same static table, not a coincidence.
+      isWindowKnown: () => this.isPricedModel({
+        providerId: this.config.provider,
+        modelId: this.config.model,
+      }),
+      // LIVE, so a settings-screen edit moves the denominator without a relaunch.
+      getWindowOverride: () => this.config.contextWindow,
+    });
+
     // --- Context compaction, part 1: BEFORE the Agent ----------------------
     //
     // It needs no agent reference to EXIST — only live config, the key
@@ -681,6 +728,9 @@ export class AgentController {
           getMessages: () => this.agent.state.messages,
           getSystemPrompt: () => this.agent.state.systemPrompt,
           notify: (level, text) => deps.notify?.(level, text),
+          // ONE METER PER PROCESS (R-1). The wiring forwards it to the compactor,
+          // so the trigger and the gauge cannot read two different numbers.
+          meter: this.contextMeter,
         })
       : null;
 
@@ -733,6 +783,16 @@ export class AgentController {
     // subscribed could not run before `new Agent(...)`, and the port has to be
     // inside its constructor argument (C-12 / P0-2).
     this.compaction?.attach((listener) => this.agent.subscribe(listener));
+
+    // --- Context occupancy, part 2: after the Agent exists -----------------
+    //
+    // ORDER RELATIVE TO THE LINE ABOVE IS DELIBERATELY IRRELEVANT (I-9 / T7).
+    // The append direction is order-free because the meter marks itself dirty
+    // and re-measures on read; the replace direction is order-free because the
+    // splice is announced from `settlePending`'s own synchronous code rather
+    // than from a listener. If a future change makes this ordering matter, the
+    // fix is at those two sites, not here.
+    this.contextMeter.attach((listener) => this.agent.subscribe(listener));
 
     // --- Fast tier, part 2: after the Agent exists --------------------------
     //
@@ -1421,6 +1481,7 @@ export class AgentController {
     this.teamRuntime?.dispose();
     this.fast?.dispose();
     this.compaction?.dispose();
+    this.contextMeter.dispose();
     // REAP BEFORE RELEASING THE HOOK, in that order: disposal is a teardown, and
     // a service that outlives it has nothing left that could ever stop it.
     this.procs.reapSync();
@@ -1565,6 +1626,13 @@ export class AgentController {
     // so the snapshot the chip and `/compact status` read has to be refreshed
     // for the same reason and at the same moments (the RV-3 lesson).
     this.compaction?.onConfigChanged();
+    // THE DENOMINATOR MOVED, NOT THE HISTORY (context-usage-gauge-accuracy §3.4).
+    // A re-measure, deliberately NOT a reset: the measured base is still a true
+    // statement about the messages, and throwing it away would swap a correct
+    // numerator for a whole-history estimate on a common operation. The
+    // numerator's calibration is one turn stale until the next `turn_end`
+    // (RV-13), which is the trade this call names.
+    this.contextMeter.onWindowChanged();
   }
 
   setThinkingLevel(level: ThinkingLevel): void {
@@ -1668,7 +1736,14 @@ export class AgentController {
     // INVALIDATION SITE 3 (context-auto-compaction-hardening §3.2.3). The history
     // was CLEARED, not appended to, so the prefix length the last measurement
     // covered indexes an array that no longer exists.
+    //
+    // BOTH LINES, AND THE SECOND IS NOT REDUNDANT (context-usage-gauge-accuracy
+    // I-9). The wiring is `null` for a `--no-compaction` session, so it is the
+    // meter call that guarantees a re-measure - deleting it "to de-duplicate"
+    // reintroduces P0-2 for exactly the sessions this feature was written for. A
+    // deep reset is idempotent, so both firing costs nothing.
     this.compaction?.onHistoryReplaced();
+    this.contextMeter.onHistoryReplaced();
     // A new conversation has no loaded skills, so the "already loaded earlier
     // in this conversation" hint would otherwise start lying (P2-9).
     this.skills.getRegistry().clearActive();
@@ -1690,7 +1765,15 @@ export class AgentController {
     // INVALIDATION SITE 4 (§3.2.3) - `/resume`, and any future host-side rewrite.
     // `estimateAppendedTokens` bounds-checks as well, so a MISSED site costs
     // accuracy and never correctness; that belt does not make this call optional.
+    //
+    // THE SECOND LINE IS THE P0-2 FIX. Before it, `/resume` of a 180k-token
+    // session left the gauge and `/compact status` reading 0 %: nothing
+    // re-measured and nothing published, so the mount-time "empty history"
+    // reading stood until the next completed turn. The DEEP reset also drops
+    // `estimateOffset`, because `/resume` can change the model in the same
+    // breath (I-8).
     this.compaction?.onHistoryReplaced();
+    this.contextMeter.onHistoryReplaced();
   }
 
   getMessages(): Message[] {
@@ -1820,6 +1903,61 @@ export class AgentController {
   subscribeFast(listener: FastEventListener): () => void {
     if (!this.fast) return () => {};
     return this.fast.subscribe(listener);
+  }
+
+  /**
+   * The FIFTH thin forwarder: the current fast-tier snapshot, or `null` when
+   * this session never registered a tier at all
+   * (web-use-tier-cooperation-and-control-closure §4.2.1).
+   *
+   * `null` and "a snapshot with `live: false`" are different answers and callers
+   * depend on the difference: the first means "there is no tier here", the
+   * second means "there is one and it is not usable right now".
+   *
+   * Deliberately NOT folded into the existing `review_end` event: that shape is
+   * consumed by `App` too, and this round promised to be purely additive.
+   */
+  fastSnapshot(): FastSnapshot | null {
+    return this.fast?.snapshot() ?? null;
+  }
+
+  // -----------------------------------------------------------------------
+  // Context occupancy (context-usage-gauge-accuracy §4.2) — THREE FORWARDERS
+  //
+  // ALL THREE ARE AVAILABLE UNCONDITIONALLY, which is the whole difference
+  // between this block and the compaction one below it: there is no
+  // `?? offSomething()` fallback here, because the meter always exists.
+  // -----------------------------------------------------------------------
+
+  /**
+   * Subscribe to occupancy publications. Returns an unsubscribe function.
+   *
+   * THE SOLE UPSTREAM OF `ViewState.context` (I-1). The gauge used to have two
+   * writers - `turnEnd` and a `contextTokensEstimated` dispatch fired from two
+   * places in `App` - which is the entire cause of P0-1: both wrote in the same
+   * synchronous fan-out and the second one won, restoring the pre-compaction
+   * figure one statement after the bar had correctly fallen. One writer makes
+   * that class of bug unrepresentable rather than merely fixed.
+   */
+  subscribeContextUsage(listener: ContextUsageListener): () => void {
+    return this.contextMeter.subscribe(listener);
+  }
+
+  /**
+   * Occupancy right now, re-measuring if the history has moved.
+   *
+   * `/context` READS THIS AND NOT `getCompactionSnapshot().pressure` (RV-8). The
+   * latter returns `offCompactionSnapshot()`'s hardcoded zero pressure when
+   * compaction was never registered, so a report built on it would read 0 % for
+   * precisely the sessions this feature exists to fix.
+   */
+  getContextUsage(): ContextUsageSnapshot {
+    return this.contextMeter.currentUsage();
+  }
+
+  /** The meter itself, for the wiring's single-instance assertion and tests. */
+  getContextMeter(): ContextMeter {
+    return this.contextMeter;
   }
 
   // -----------------------------------------------------------------------

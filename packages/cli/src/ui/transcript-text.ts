@@ -8,7 +8,7 @@
  */
 
 import type { Entry, UsageTotal } from '../agent/reducer.js';
-import { formatCost, formatDuration, formatTokens } from '../agent/usage.js';
+import { formatCost, formatDuration, formatTokens, promptTokensOf } from '../agent/usage.js';
 import { formatRetryLine } from '../agent/retry-view.js';
 import type { Glyphs } from './glyphs.js';
 // TYPE-ONLY: this module stays free of React, ink and the supervisor itself.
@@ -239,7 +239,11 @@ function renderEntry(entry: Entry, glyphs: Glyphs): string[] {
 export function renderTranscriptText(entries: Entry[], opts: TranscriptTextOptions): string {
   const turns = entries.filter((e) => e.kind === 'user').length;
   const g = opts.glyphs;
-  const tokens = `${formatTokens(opts.usageTotal.inputTokens)}${g.arrowUp} ${formatTokens(
+  // THE SAME PROMPT-SIDE TOTAL THE STATUS BAR SHOWS (context-usage-gauge-accuracy
+  // §3.6). This line is what a user compares against the bar they were watching a
+  // second earlier, so a different unit here would look like the exit summary
+  // losing tokens.
+  const tokens = `${formatTokens(promptTokensOf(opts.usageTotal))}${g.arrowUp} ${formatTokens(
     opts.usageTotal.outputTokens,
   )}${g.arrowDown}`;
   const summary = [

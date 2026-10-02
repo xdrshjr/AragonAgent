@@ -19,7 +19,7 @@
  * rather than from a key.
  */
 
-import React, { useEffect, useReducer, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import { glob as tinyGlob } from 'tinyglobby';
 import type { Theme } from './theme.js';
@@ -27,6 +27,7 @@ import type { TermCapabilities } from './capabilities.js';
 import { pickGlyphs } from './glyphs.js';
 import { recognize, type EditIntent, type KeyState } from '../input/keymap.js';
 import { AutocompletePopup, type Suggestion } from './AutocompletePopup.js';
+import { buildAutocompleteLayout } from './layout/autocomplete.js';
 import {
   editorReducer,
   INITIAL_EDITOR_STATE,
@@ -67,6 +68,9 @@ interface PromptInputProps {
    * `App` derives this from `budget.ts` so the popup shrinks instead.
    */
   popupMaxRows?: number;
+  /** Total menu rows, including borders and the overflow hint. */
+  popupMaxHeight?: number;
+  onPopupRowsChange?: (rows: number) => void;
   onSubmit: (text: string) => void;
   onHelp?: () => void;
   /**
@@ -394,6 +398,8 @@ export function PromptInput({
   theme,
   caps,
   popupMaxRows,
+  popupMaxHeight,
+  onPopupRowsChange,
   agentMode,
   onSubmit,
   onHelp,
@@ -421,6 +427,19 @@ export function PromptInput({
       ? fileMatches.map((p) => ({ label: p }))
       : [];
   const clampedSel = popupItems.length > 0 ? Math.min(sel, popupItems.length - 1) : 0;
+  const popupLayout = buildAutocompleteLayout({
+    itemCount: isActive ? popupItems.length : 0,
+    selected: clampedSel,
+    maxRows: popupMaxRows,
+    maxHeight: popupMaxHeight,
+  });
+  const popupVisible = isActive && popupLayout.rowCount > 0;
+  // Report on every mount, including zero. Cleanup belongs to a separate
+  // effect so changing height does not publish an intermediate zero budget.
+  useLayoutEffect(() => {
+    onPopupRowsChange?.(popupLayout.rowCount);
+  }, [onPopupRowsChange, popupLayout.rowCount]);
+  useLayoutEffect(() => () => onPopupRowsChange?.(0), [onPopupRowsChange]);
 
   // --- Debounced `@file` scan. ---------------------------------------------
   useEffect(() => {
@@ -588,7 +607,7 @@ export function PromptInput({
       if (key.tab && key.shift) return;
 
       // Popup navigation owns Up/Down/Tab/→/Enter/Esc while it is open.
-      if (popupItems.length > 0) {
+      if (popupVisible) {
         if (key.upArrow) {
           dispatch({ type: 'select', sel: Math.max(0, clampedSel - 1) });
           return;
@@ -741,7 +760,7 @@ export function PromptInput({
       */}
       <Box flexDirection="column" flexGrow={1} flexShrink={1}>
         {buffer.length === 0 ? (
-          <Text color={theme.muted}>{placeholder}</Text>
+          <Text wrap="truncate" color={theme.muted}>{placeholder}</Text>
         ) : (
           rowNodes.map((node, i) =>
             overflow && i === rowNodes.length - 1 ? (
@@ -791,13 +810,14 @@ export function PromptInput({
 
   return (
     <Box flexDirection="column" flexShrink={0}>
-      {popupItems.length > 0 && (
+      {popupVisible && (
         <AutocompletePopup
           items={popupItems}
           selected={clampedSel}
           theme={theme}
           caps={caps}
           maxRows={popupMaxRows}
+          layout={popupLayout}
         />
       )}
       {bordered ? (

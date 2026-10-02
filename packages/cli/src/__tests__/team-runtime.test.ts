@@ -38,6 +38,7 @@ function config(team: Partial<TeamConfig> = {}): CliConfig {
     thinkingLevel: 'off',
     showThinking: false,
     liveToolOutput: false,
+    contextWindow: null,
     theme: 'auto',
     reducedMotion: false,
     exitTranscript: true,

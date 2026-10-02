@@ -28,10 +28,6 @@ function detectColorLevel(env: EnvLike): 0 | 1 | 2 | 3 {
   if (env.NO_COLOR !== undefined) return 0;
   if (env.TERM === 'dumb') return 0;
 
-  // A truecolor-capable terminal advertises itself.
-  const colorterm = env.COLORTERM?.toLowerCase();
-  if (colorterm === 'truecolor' || colorterm === '24bit') return 3;
-
   // FORCE_COLOR is an explicit override of the auto-detected depth.
   const force = env.FORCE_COLOR;
   if (force !== undefined) {
@@ -40,6 +36,10 @@ function detectColorLevel(env: EnvLike): 0 | 1 | 2 | 3 {
     if (force === '3') return 3;
     return 1; // '1' | 'true' | '' → at least basic color
   }
+
+  // A truecolor-capable terminal advertises itself.
+  const colorterm = env.COLORTERM?.toLowerCase();
+  if (colorterm === 'truecolor' || colorterm === '24bit') return 3;
 
   // Fall back to chalk's own platform detection.
   const level = chalk.level;
@@ -52,7 +52,7 @@ function detectUnicode(env: EnvLike): boolean {
   if (locale.includes('UTF')) return true;
   if (env.WT_SESSION) return true; // Windows Terminal
   const program = env.TERM_PROGRAM;
-  if (program === 'vscode' || program === 'iTerm.app' || program === 'Apple_Terminal') return true;
+  if (program === 'aragonmesh' || program === 'vscode' || program === 'iTerm.app' || program === 'Apple_Terminal') return true;
   // Legacy cmd.exe (no TERM, no WT_SESSION) and unknown terminals fall back to ASCII.
   return false;
 }

@@ -57,6 +57,7 @@ export class GoogleProvider implements LLMProvider {
   // -----------------------------------------------------------------------
 
   async *stream(request: LLMRequest): AsyncIterableIterator<StreamEvent> {
+    if (request.signal?.aborted) return;
     const baseUrl = (request.baseUrl || this.defaultBaseUrl).replace(/\/+$/, '');
     const url =
       `${baseUrl}/v1beta/models/${request.model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(request.apiKey)}`;
@@ -82,10 +83,12 @@ export class GoogleProvider implements LLMProvider {
       response = attempt.response;
       errorBody = attempt.bodyText;
     } catch (err) {
+      if (request.signal?.aborted) return;
       yield { type: 'error', error: wrapFetchError(err, this.id) };
       return;
     }
 
+    if (request.signal?.aborted) return;
     if (!response.ok) {
       // `errorBody` is the ALREADY-CONSUMED body; re-reading it would throw.
       // `response.headers` carries `Retry-After` out on `LLMError.retryAfterMs`
@@ -121,6 +124,7 @@ export class GoogleProvider implements LLMProvider {
 
     try {
       for await (const sse of parseSSEStream(response.body, request.signal)) {
+        if (request.signal?.aborted) return;
         const raw = sse.data.trim();
         if (!raw) continue;
 
@@ -158,12 +162,14 @@ export class GoogleProvider implements LLMProvider {
         if (!parts) continue;
 
         for (const part of parts) {
+          if (request.signal?.aborted) return;
           // Text part
           if (typeof part.text === 'string') {
             textAccumulator += part.text;
             yield { type: 'text_delta', delta: part.text };
           }
 
+          if (request.signal?.aborted) return;
           // Function call — arrives complete in a single chunk
           const functionCall = part.functionCall as Record<string, unknown> | undefined;
           if (functionCall) {
@@ -171,8 +177,11 @@ export class GoogleProvider implements LLMProvider {
             const args = (functionCall.args as Record<string, unknown>) || {};
             const toolCallId = `call_${randomUUID().slice(0, 8)}`;
 
+            if (request.signal?.aborted) return;
             yield { type: 'tool_call_start', toolCallId, toolName };
+            if (request.signal?.aborted) return;
             yield { type: 'tool_call_end', toolCallId, toolName, args };
+            if (request.signal?.aborted) return;
 
             contentBlocks.push({
               type: 'tool_call',
@@ -184,13 +193,9 @@ export class GoogleProvider implements LLMProvider {
         }
       }
 
-      // ---- The terminal-sentinel contract (§4.5a) -------------------------
-      //
-      // An abort is NOT a truncation: `parseSSEStream` `break`s on
-      // `signal.aborted` and lands here, and reporting that as a retryable
-      // `network_error` would re-create the trap `isRetryableError` check 1
-      // closes (constraint 1 / R-17). Signal first; that path yields `done`.
-      if (!sawTerminal && !request.signal?.aborted) {
+      // A caller abort is silent; only an incomplete transport EOF is retried.
+      if (request.signal?.aborted) return;
+      if (!sawTerminal) {
         yield {
           type: 'error',
           error: new LLMError(
@@ -208,6 +213,7 @@ export class GoogleProvider implements LLMProvider {
         contentBlocks.push({ type: 'text', text: textAccumulator } satisfies TextBlock);
       }
 
+      if (request.signal?.aborted) return;
       const message: AssistantMessage = {
         role: 'assistant',
         content: contentBlocks,
@@ -216,6 +222,7 @@ export class GoogleProvider implements LLMProvider {
       };
       yield { type: 'done', message, usage };
     } catch (err) {
+      if (request.signal?.aborted) return;
       yield { type: 'error', error: wrapFetchError(err, this.id) };
     }
   }

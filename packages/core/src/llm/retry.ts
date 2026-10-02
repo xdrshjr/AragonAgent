@@ -484,6 +484,7 @@ export async function* withRetry(
   let retryIndex = 0;
 
   for (;;) {
+    if (Boolean(signal?.aborted)) return;
     let committed = false;
     const toolCallIds: string[] = [];
     let sawDone = false;
@@ -504,6 +505,7 @@ export async function* withRetry(
       yield event;
     }
 
+    if (Boolean(signal?.aborted)) return;
     if (sawDone) return; // success; the hot path ends here
 
     if (terminalError === undefined) {

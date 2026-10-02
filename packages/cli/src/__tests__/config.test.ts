@@ -15,9 +15,15 @@ const { loadConfig, makeGetApiKey } = await import('../config/load.js');
 const { updatePersistedConfig, loadPersistedConfig, getConfigPath, readConfigFile } = await import(
   '../config/store.js'
 );
-const { maskSecret, clampDensity, DEFAULT_CONFIG, DEFAULT_LOG_CONFIG } = await import(
-  '../config/schema.js'
-);
+const {
+  maskSecret,
+  clampDensity,
+  clampContextWindow,
+  DEFAULT_CONFIG,
+  DEFAULT_LOG_CONFIG,
+  MAX_CONTEXT_WINDOW,
+  MIN_CONTEXT_WINDOW,
+} = await import('../config/schema.js');
 const { Logger, setActiveLogger, resetLoggerForTest } = await import('../logging/logger.js');
 const { currentLogFileName } = await import('../logging/file-sink.js');
 
@@ -766,5 +772,75 @@ describe('paste (tui-paste-handling section 7)', () => {
     expect(source).toContain("--no-paste");
     expect(source).toMatch(/paste: opts\.paste,/);
     expect(source).toMatch(/case 'paste':\s*\r?\n\s*patch\.paste = /);
+  });
+});
+
+/**
+ * T20 - `contextWindow` (context-usage-gauge-accuracy §3.6 / RV-12).
+ *
+ * THE TRI-STATE IS THE WHOLE POINT, and it is copied from `maxTokens` above
+ * rather than invented: `null` means AUTO, a number is clamped, and garbage
+ * falls through to the layer underneath instead of silently becoming AUTO.
+ */
+describe('contextWindow: AUTO, precedence, and the single clamp gate', () => {
+  it('defaults to AUTO, because a default number would be the invented denominator this key exists to correct', () => {
+    expect(DEFAULT_CONFIG.contextWindow).toBeNull();
+    expect(loadConfig({ cwd: CWD }).contextWindow).toBeNull();
+  });
+
+  it('`null` PASSES STRAIGHT THROUGH the clamp (RV-12)', () => {
+    // Clamping AUTO into `[8000, ...]` yields 8000, which removes "auto" from
+    // the config permanently - and the symptom is an 8k denominator with a
+    // permanently red bar and no visible source.
+    expect(clampContextWindow(null, 200_000)).toBeNull();
+    expect(clampContextWindow(null, null)).toBeNull();
+  });
+
+  it('clamps both bounds, and falls back rather than inventing a number', () => {
+    expect(clampContextWindow(1_000, null)).toBe(MIN_CONTEXT_WINDOW);
+    expect(clampContextWindow(99_999_999, null)).toBe(MAX_CONTEXT_WINDOW);
+    expect(clampContextWindow(1_000_000, null)).toBe(1_000_000);
+    expect(clampContextWindow('nonsense', 128_000)).toBe(128_000);
+    expect(clampContextWindow(undefined, 128_000)).toBe(128_000);
+  });
+
+  it('reads a number from the config file', () => {
+    writeFileSync(getConfigPath(), JSON.stringify({ version: 1, contextWindow: 1_000_000 }), 'utf8');
+    expect(loadConfig({ cwd: CWD }).contextWindow).toBe(1_000_000);
+  });
+
+  it('ARAGON_CONTEXT_WINDOW accepts auto and ignores garbage', () => {
+    writeFileSync(getConfigPath(), JSON.stringify({ version: 1, contextWindow: 1_000_000 }), 'utf8');
+
+    process.env.ARAGON_CONTEXT_WINDOW = 'auto';
+    expect(loadConfig({ cwd: CWD }).contextWindow).toBeNull();
+
+    // Garbage falls THROUGH to the file - a typo in an env var must not discard
+    // the configured number.
+    process.env.ARAGON_CONTEXT_WINDOW = 'abc';
+    expect(loadConfig({ cwd: CWD }).contextWindow).toBe(1_000_000);
+
+    process.env.ARAGON_CONTEXT_WINDOW = '400000';
+    expect(loadConfig({ cwd: CWD }).contextWindow).toBe(400_000);
+  });
+
+  it('the same clamp gate applies on read AND on write', () => {
+    writeFileSync(getConfigPath(), JSON.stringify({ version: 1, contextWindow: 99_999_999 }), 'utf8');
+    expect(loadConfig({ cwd: CWD }).contextWindow).toBe(MAX_CONTEXT_WINDOW);
+
+    const merged = updatePersistedConfig({ contextWindow: 99_999_999 });
+    expect(merged.contextWindow).toBe(MAX_CONTEXT_WINDOW);
+    expect(JSON.parse(readFileSync(getConfigPath(), 'utf8')).contextWindow).toBe(MAX_CONTEXT_WINDOW);
+  });
+
+  it('writes null through unchanged, because null is a setting', () => {
+    const merged = updatePersistedConfig({ contextWindow: null });
+    expect(merged.contextWindow).toBeNull();
+    expect(loadPersistedConfig().contextWindow).toBeNull();
+  });
+
+  it('leaves the stored value alone when a patch omits the key', () => {
+    updatePersistedConfig({ contextWindow: 400_000 });
+    expect(updatePersistedConfig({ model: 'other-model' }).contextWindow).toBe(400_000);
   });
 });

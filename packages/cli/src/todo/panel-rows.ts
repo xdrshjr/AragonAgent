@@ -70,18 +70,15 @@ function windowFor(
 
 /**
  * @param maxRows Rows available for the item rows AND the two overflow markers
- *                together. `todoRailRows()` upstream is what makes this number
- *                honest while a team dispatch is live (I-10 / P1-3).
+ *                together. The shared layout subtracts actual team/menu rows.
  *
  * THE ANCHOR IS ALWAYS VISIBLE, and that beats the row bound when the two
  * conflict. They can only conflict below `maxRows` 3 with overflow on BOTH
  * sides — one item plus two markers is three rows — where this returns the
  * anchor and lets the caller's `overflow="hidden"` clip a marker. Hiding the
  * one row the user is watching in order to keep a `+N above` would be the wrong
- * trade. `TODO_LIMITS.panelMinRows` (6) gates the mount and leaves `TodoPanel`
- * at least 4 item rows, so the case is unreachable from the rail; a future
- * caller with a smaller budget should read this paragraph before assuming
- * otherwise.
+ * trade. The full rail has at least four item rows. The compact rail uses
+ * `selectCompactTodoRows` with a single merged footer instead.
  */
 export function selectTodoRows(items: TodoItem[], maxRows: number): TodoRowSelection {
   const count = items.length;
@@ -113,4 +110,21 @@ export function selectTodoRows(items: TodoItem[], maxRows: number): TodoRowSelec
   for (let i = start; i < end; i += 1) visible.push({ item: items[i]!, index: i });
 
   return { visible, hiddenAbove: start, hiddenBelow: count - end };
+}
+
+/** Select an anchored contiguous window without reserving overflow-marker rows.
+ * maxItemRows is a row count; invalid/nonpositive values return an empty window
+ * with every item counted below it. Does not mutate the list or throw.
+ */
+export function selectCompactTodoRows(items: TodoItem[], maxItemRows: number): TodoRowSelection {
+  const slots = Number.isFinite(maxItemRows) ? Math.max(0, Math.floor(maxItemRows)) : 0;
+  if (slots === 0 || items.length === 0) {
+    return { visible: [], hiddenAbove: 0, hiddenBelow: items.length };
+  }
+  const { start, end } = windowFor(items.length, todoAnchorIndex(items), slots);
+  return {
+    visible: items.slice(start, end).map((item, offset) => ({ item, index: start + offset })),
+    hiddenAbove: start,
+    hiddenBelow: items.length - end,
+  };
 }

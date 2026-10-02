@@ -17,6 +17,7 @@ import React from 'react';
 import type { AgentEvent } from '@aragon-agent/core';
 import { App } from '../ui/App.js';
 import type { AgentController } from '../agent/controller.js';
+import type { ContextUsageSnapshot } from '../compaction/types.js';
 import { hintTextForTest } from '../ui/Composer.js';
 import { pickGlyphs } from '../ui/glyphs.js';
 import {
@@ -270,6 +271,31 @@ class LadderController {
   }
   isCompactionRegistered(): boolean {
     return false;
+  }
+  isCompactionEnabled(): boolean {
+    return false;
+  }
+  /**
+   * Context occupancy (context-usage-gauge-accuracy §4.2). The App subscribes on
+   * mount and seeds from `getContextUsage()`, so a stub without both throws
+   * before the first frame - the same TypeScript blindness the note above
+   * records, since this class is handed over as `... as unknown as AgentController`.
+   */
+  contextUsageListeners = new Set<(u: ContextUsageSnapshot) => void>();
+  subscribeContextUsage(l: (u: ContextUsageSnapshot) => void): () => void {
+    this.contextUsageListeners.add(l);
+    return () => this.contextUsageListeners.delete(l);
+  }
+  getContextUsage(): ContextUsageSnapshot {
+    return {
+      occupied: 0,
+      window: 200_000,
+      pct: 0,
+      source: 'estimate',
+      deltaTokens: 0,
+      windowKnown: true,
+      windowOverridden: false,
+    };
   }
   getModelInfoFor() {
     return { contextWindow: 200_000, cost: undefined, maxOutputTokens: 8192 };

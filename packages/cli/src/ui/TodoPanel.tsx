@@ -14,19 +14,19 @@
  * stop being a rail and start eating viewport height, growing and shrinking the
  * transcript every time the list changed length.
  *
- * WIDTH IS MEASURED IN COLUMNS, NEVER IN CODE UNITS (P2-3). This rail is 18-36
+ * WIDTH IS MEASURED IN COLUMNS, NEVER IN CODE UNITS (P2-3). This rail is 14-36
  * columns wide and the system prompt's last line is "Respond in the language the
  * user writes in", so CJK item text in an 18-column rail is the NORMAL case
  * rather than the edge case. Every text cell is `wrap="truncate"` and Ink's
  * truncation is display-width aware, so nothing can overflow the box — and NO
- * ARITHMETIC HERE MAY BUDGET USER TEXT BY `.length`. The `padEnd(3)` /
- * `padStart(2)` cells below are ASCII markers and indices, which is why they are
+ * ARITHMETIC HERE MAY BUDGET USER TEXT BY `.length`. The count string and
+ * `padStart(2)` cells below are ASCII counts and indices, which is why they are
  * safe; a "characters that fit" calculation over `content` would not be. That is
  * the whole of the lesson `TeamPanel`'s `WIDE_CHAR_ALLOWANCE` records at length,
  * and the mitigation here is to have no such budget at all.
  */
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Box, Text } from 'ink';
 import Spinner from 'ink-spinner';
 import type { Theme } from './theme.js';
@@ -36,7 +36,7 @@ import { buildGauge } from './gauge.js';
 import { railBorderProps } from './layout/Gutter.js';
 import { TODO_RAIL_INDEX_MIN_COLS } from './layout/rail.js';
 import { TODO_LIMITS } from '../todo/limits.js';
-import { selectTodoRows } from '../todo/panel-rows.js';
+import { selectCompactTodoRows, selectTodoRows } from '../todo/panel-rows.js';
 import type { TodoItem, TodoSnapshot } from '../todo/types.js';
 
 export interface TodoPanelProps {
@@ -44,7 +44,7 @@ export interface TodoPanelProps {
   /** From `todoRailWidth(cols)`. The rail's whole column budget, separator included. */
   width: number;
   /**
-   * From `todoRailRows(viewportBudget, teamActive)` — NOT `viewportBudget`
+   * From `buildTodoRailLayout` after actual team/menu rows are subtracted.
    * (I-10 / P1-3). The gate that mounts this component and the number it lays
    * out against are ONE value computed once in `App`: a panel that mounts on one
    * number and lays out against another renders nothing and reports nothing.
@@ -70,7 +70,11 @@ const MARKER_COLS = 3;
 const INDEX_COLS = 3;
 
 function marker(item: TodoItem, glyphs: Glyphs): string {
-  if (item.status === 'completed') return glyphs.todoDone;
+  // Ink's tokenizer otherwise treats the bare emoji-capable check as one cell,
+  // while string-width counts two, adding an extra visible space to each row.
+  if (item.status === 'completed') {
+    return glyphs.todoDone.length === 1 ? `${glyphs.todoDone}\uFE0F` : glyphs.todoDone;
+  }
   if (item.status === 'in_progress') return glyphs.todoActive;
   return glyphs.todoPending;
 }
@@ -89,17 +93,30 @@ export function TodoPanel({
   reducedMotion,
   theme,
   caps,
-}: TodoPanelProps): React.ReactElement {
+}: TodoPanelProps): React.ReactElement | null {
   const glyphs = pickGlyphs(caps);
+  // Ink reapplies all four Yoga borders when the borderStyle object changes,
+  // but unchanged borderTop/Bottom=false props are not reapplied on that update.
+  const border = useMemo(() => railBorderProps(glyphs.railVertical), [glyphs.railVertical]);
+  if (snapshot.items.length === 0 || rows < TODO_LIMITS.panelMinRows) return null;
+  const compact = rows < TODO_LIMITS.panelFullRows;
   const showGauge = width >= GAUGE_MIN_COLS && rows >= GAUGE_MIN_ROWS;
-  const showIndex = width >= TODO_RAIL_INDEX_MIN_COLS;
-  const itemRows = Math.max(1, rows - FIXED_ROWS - (showGauge ? 1 : 0));
-  const { visible, hiddenAbove, hiddenBelow } = selectTodoRows(snapshot.items, itemRows);
+  const showIndex = !compact && width >= TODO_RAIL_INDEX_MIN_COLS;
+  const compactFooter = compact && snapshot.items.length > rows - 1;
+  const itemRows = compact ? rows - 1 - Number(compactFooter)
+    : rows - FIXED_ROWS - Number(showGauge);
+  const { visible, hiddenAbove, hiddenBelow } = compact
+    ? selectCompactTodoRows(snapshot.items, itemRows)
+    : selectTodoRows(snapshot.items, itemRows);
 
   const pct =
     snapshot.total > 0 ? Math.round((snapshot.doneCount / snapshot.total) * 100) : 0;
   const gauge = buildGauge(pct, Math.max(4, width - CHROME_COLS - 2), theme, caps);
   const complete = snapshot.doneCount === snapshot.total;
+  const countText = `${snapshot.doneCount}/${snapshot.total}`;
+  const showDone = complete
+    && width - CHROME_COLS >= 'TODO '.length + countText.length + ' done'.length;
+  const count = `${countText}${showDone ? ' done' : ''}`;
 
   return (
     // `flexShrink={0}` IS LOAD-BEARING (P1-4). Ink's `Box.defaultProps` is
@@ -107,24 +124,26 @@ export function TodoPanel({
     // a `width={n}` box inside a shrinking row is SQUEEZED under pressure — and
     // every piece of arithmetic in `rail.ts` silently becomes a suggestion at
     // exactly the narrow widths where the guarantee matters. `ScrollIndicator`
-    // spells the same pair one level down. Cross-axis height needs no prop:
-    // `alignItems` is unset in this tree and yoga's default is `stretch`.
+    // spells the same pair one level down. Height uses the same row budget as
+    // selection, so content cannot silently enlarge the middle band.
     <Box
+      key={glyphs.railVertical}
       flexDirection="column"
       flexShrink={0}
       width={width}
+      height={rows}
       overflow="hidden"
       paddingLeft={1}
-      {...railBorderProps(glyphs.railVertical, theme.border)}
+      {...border}
+      borderColor={theme.border}
     >
       <Box flexDirection="row" justifyContent="space-between">
-        <Text wrap="truncate" color={theme.accent} bold>
-          TODO
-        </Text>
-        <Text wrap="truncate" color={complete ? theme.toolDone : theme.muted}>
-          {snapshot.doneCount}/{snapshot.total}
-          {complete ? ' done' : ''}
-        </Text>
+        <Box flexGrow={1} flexShrink={1} overflow="hidden">
+          <Text wrap="truncate" color={theme.accent} bold>TODO</Text>
+        </Box>
+        <Box width={count.length} flexShrink={0}>
+          <Text wrap="truncate" color={complete ? theme.toolDone : theme.muted}>{count}</Text>
+        </Box>
       </Box>
 
       {showGauge && (
@@ -134,9 +153,9 @@ export function TodoPanel({
         </Text>
       )}
 
-      <Text> </Text>
+      {!compact && <Text> </Text>}
 
-      {hiddenAbove > 0 && (
+      {!compact && hiddenAbove > 0 && (
         <Text wrap="truncate" color={theme.muted}>
           {'   '}+{hiddenAbove} above
         </Text>
@@ -172,45 +191,33 @@ export function TodoPanel({
               </Box>
             )}
             {/*
-              THE IN-PROGRESS ROW IS THE ONLY ONE ALLOWED TO WRAP, up to
-              `activeWrapRows`. The wrapping budget of a narrow column is a
-              scarce resource and it belongs to the step the user is watching.
+              Every item occupies one row so the anchor and overflow markers
+              fit the shared budget. The transcript card retains full text.
               No `strikethrough` on completed items: `chalk` emits SGR 9, which
               legacy `conhost` does not implement and can leak as raw bytes —
               muted colour carries the same meaning with none of the risk (D-17).
             */}
             <Box flexGrow={1} flexShrink={1} overflow="hidden">
               <Text
-                wrap={active ? 'wrap' : 'truncate'}
+                wrap="truncate"
                 color={rowColor(item, theme)}
                 bold={active}
               >
-                {active ? clampWrapped(item.activeForm, width) : item.content}
+                {active ? item.activeForm : item.content}
               </Text>
             </Box>
           </Box>
         );
       })}
 
-      {hiddenBelow > 0 && (
+      {compactFooter && (
+        <Text wrap="truncate" color={theme.muted}>-{hiddenAbove} +{hiddenBelow}</Text>
+      )}
+      {!compact && hiddenBelow > 0 && (
         <Text wrap="truncate" color={theme.muted}>
           {'   '}+{hiddenBelow} more
         </Text>
       )}
     </Box>
   );
-}
-
-/**
- * Keep the wrapping row inside `TODO_LIMITS.activeWrapRows`.
- *
- * A CHARACTER BUDGET IS NOT A COLUMN BUDGET (P2-3), so this is deliberately
- * generous rather than exact: it exists to stop a maximum-length `activeForm`
- * from claiming five rows of an 18-column rail, and Ink's display-width-aware
- * truncation is what actually keeps the row inside the box. Erring long costs
- * nothing — the surrounding `overflow="hidden"` clips it.
- */
-function clampWrapped(text: string, width: number): string {
-  const budget = Math.max(1, width - CHROME_COLS) * TODO_LIMITS.activeWrapRows;
-  return text.length > budget ? text.slice(0, budget) : text;
 }

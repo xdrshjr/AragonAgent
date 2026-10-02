@@ -76,7 +76,11 @@ import type {
 } from '../update/types.js';
 import { offFastStatus, type FastStatus } from '../fast/wiring.js';
 import { offCompactionSnapshot } from '../compaction/wiring.js';
-import type { CompactionEvent, CompactionSnapshot } from '../compaction/types.js';
+import type {
+  CompactionEvent,
+  CompactionSnapshot,
+  ContextUsageSnapshot,
+} from '../compaction/types.js';
 import type { FastEvent } from '../fast/types.js';
 import type {
   ToolOutputEvent,
@@ -118,6 +122,7 @@ const CONFIG: CliConfig = {
   thinkingLevel: 'off',
   showThinking: false,
   liveToolOutput: false,
+  contextWindow: null,
   maxTokens: undefined,
   theme: 'auto',
   reducedMotion: false,
@@ -237,6 +242,31 @@ class FakeController {
    */
   isCompactionRegistered(): boolean {
     return false;
+  }
+  isCompactionEnabled(): boolean {
+    return false;
+  }
+  /**
+   * Context occupancy (context-usage-gauge-accuracy §4.2). The App subscribes on
+   * mount and seeds from `getContextUsage()`, so a stub without both throws
+   * before the first frame - the same TypeScript blindness the note above
+   * records, since this class is handed over as `... as unknown as AgentController`.
+   */
+  contextUsageListeners = new Set<(u: ContextUsageSnapshot) => void>();
+  subscribeContextUsage(l: (u: ContextUsageSnapshot) => void): () => void {
+    this.contextUsageListeners.add(l);
+    return () => this.contextUsageListeners.delete(l);
+  }
+  getContextUsage(): ContextUsageSnapshot {
+    return {
+      occupied: 0,
+      window: 200_000,
+      pct: 0,
+      source: 'estimate',
+      deltaTokens: 0,
+      windowKnown: true,
+      windowOverridden: false,
+    };
   }
   getCompactionSnapshot(): CompactionSnapshot {
     return offCompactionSnapshot();

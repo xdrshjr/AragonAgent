@@ -413,6 +413,7 @@ signal ends the run (`130` SIGINT, `143` SIGTERM, `129` SIGHUP).
 | `/retry [show\|on\|off\|max <n>]` | API retry: the effective ladder, the on/off switch, the retry count. Takes effect **in the running session**, children included |
 | `/fast [on\|off\|model <id>\|provider <id>\|same\|review <n\|off>\|delegate on\|off]` | Fast model tier: status and this session's totals, the on/off switch, which model, the review cadence |
 | `/compact [status\|on\|off\|threshold <n>\|keep <n>\|history\|show <n>\|<instructions>]` | Context compaction: occupancy and this session's totals, the on/off switch, when it fires, how much it keeps. With free text, compacts now and tells the summarizer what to pay attention to |
+| `/context` | What the context gauge is showing: occupancy split into measured and estimated, the window and **where it came from**, how stale the measurement is, compaction's actual state, and what the session-spend readout includes |
 | `/bg [list\|logs <id> [n]\|stop <id\|all>\|status]` | Background services: what is running, its log tail, and how to stop it. `list` is the default |
 | `/update [status\|now\|skip\|off]` | Auto-update: what is running, what is available, where it came from, when it looks again. `now` forces a check past the throttle; `skip` declines the offered version until a newer one appears |
 | `/theme <auto\|warm\|cool\|light>` | Switch the color theme live (persisted) |
@@ -799,7 +800,8 @@ ask — and the agent writes the finished plan as its final message in markdown.
 For work with three or more distinct steps the agent keeps a **visible plan**:
 it writes a checklist with the `todo_write` tool, marks exactly one item as in
 progress, and ticks it off before starting the next. In full-screen mode that
-list is rendered as a right-hand rail, about a fifth of the terminal wide.
+list is rendered as a right-hand rail, targeting 15% of the terminal width
+(14–36 columns, including its separator and padding).
 
 ```
   transcript ...                            | TODO             2/7
@@ -807,8 +809,7 @@ list is rendered as a right-hand rail, about a fifth of the terminal wide.
                                             |
                                             | v  1 Read the reducer
                                             | v  2 Design the store
-                                            | >  3 Wiring the rail into
-                                            |      AppShell
+                                            | >  3 Wiring the rail...
                                             | o  4 Add the panel-rows test
                                             | o  5 Update the README
                                             |      +2 more
@@ -832,7 +833,7 @@ not also tell the model may change it — except you, saying so:
   conversation has just been replaced.
 - A finished plan is dropped at the START of your next message, so you still get
   to see `7/7 done`. An unfinished one survives "continue" / "now do the rest",
-  and is dropped after three unrelated turns rather than holding a fifth of the
+  and is dropped after three unrelated turns rather than holding part of the
   screen for the rest of the session.
 
 ### When a run ends with steps left
@@ -888,11 +889,19 @@ planning discipline and hides the column — which is what you want with a scree
 reader, and what `--no-todo-panel` does for a whole session. Under `-p` the plan
 is written to stderr as `[todo] 3/7 <step>` lines, suppressed by `--quiet`.
 
-The rail is not mounted below 80 columns, while an overlay is open, in inline
-mode, or when the viewport is too short to say anything useful; the transcript
-keeps at least 62 columns at every width. In those cases the counter appears in
-the status bar instead, and the checklist is still written into the transcript
-as one card per turn.
+右栏从 76 列开始显示，正文至少保留 62 列；100 列终端使用 15 列右栏。
+已有任务时，团队面板按实际行数占用空间，补全菜单的边框和提示也计入预算。
+例如 100×20、团队占 8 行时，TODO 仍以 4 行紧凑视图显示。
+
+剩余 3–5 行时保留标题、完成计数、当前任务与合并提示 `-A +B`：
+`-9 +10` 表示上方隐藏 9 项、下方隐藏 10 项。6 行起使用常规视图；
+所有任务各占一行，全文仍可在正文任务卡片中查看。进度条需要至少 20 列、8 行。
+输入增长导致空间不足时团队先折叠为摘要；菜单不足 3 行时隐藏，其候选不会拦截输入。
+
+低于 76 列、共享区域不足 3 行、打开 overlay、显式关闭面板、没有任务或
+inline 模式时不显示右栏。低于 12 行使用原有小终端提示；扩大窗口后自动恢复。
+inline 仍使用上文的单行任务条。`/todo status` 中的 `Panel: on` 仅表示配置开启，
+实际可见性还取决于数据和窗口空间；可以通过该命令区分未生成计划与暂时隐藏。
 
 ## Built-in tools
 
@@ -1211,6 +1220,84 @@ it for a background advisory is how an unrequested call ends up competing with
 you for a rate-limited provider's quota. The review's own wall-clock bound is
 20 s.
 
+## The context gauge
+
+The right end of the status bar answers one question: **how full is the context,
+out of how much.**
+
+```
+[####----] 43%  86.0k/200.0k   total 1.2M^ 48.0k v   $3.21   12 tok/s  1m02s
+            ^        ^         ^
+            |        |         +-- session spend, prompt side / output side
+            |        +-- occupied / window
+            +-- the two together, as a percentage
+```
+
+The readouts drop as the terminal narrows, in that order of priority:
+
+| Columns | Right cluster |
+|---|---|
+| >= 96 | `[####----] 43%  86.0k/200.0k  total 1.2M^ 48.0k v  $3.21` |
+| 72-95 | `[####----] 43%  86.0k/200.0k  $3.21` |
+| 60-71 | `[####----] 43%  $3.21` |
+| < 60 | `43%  $3.21` |
+
+**Two different markers, because there are two different things to doubt.**
+
+- `~` sits on the **percentage** and means the *numerator* is partly a guess:
+  either no completed turn has reported usage yet (right after `/resume`, or
+  right after a compaction), or tool results have been appended since the last
+  measurement and their size is estimated.
+- `?` sits on the **window** and means the *denominator* is a guess: the model is
+  not in the built-in table, so a flat 128 000 was substituted. See
+  `contextWindow` below.
+
+**The percentage keeps moving during a turn.** Every tool result nudges it,
+whether or not compaction is enabled — it is not a compaction feature, and a
+session started with `--no-compaction` gets the same live reading. After
+`/resume` the gauge shows the restored session's real occupancy immediately,
+without sending anything.
+
+### `/context`
+
+The gauge is a bar and a rounded percentage; `/context` is the full answer, at
+any width, in any mode:
+
+```
+Context
+  Occupancy      43%   86.2k of 200.0k   [measured 85.1k + 1.1k estimated]
+  Window         200000   from the model table
+  Since measured 1.1k estimated tokens appended since the last provider-reported usage
+  Compaction     on - triggers at 90% (amber at 75%), 2 this session, 118.0k reclaimed
+  Session spend  1.2M in (incl. 940.0k cache read, 12.0k cache write) / 48.2k out, $3.21
+                 includes subagent, fast-tier and compaction spend,
+                 not just this conversation
+```
+
+Two lines are worth reading closely. **`Window`** always names where the number
+came from — the model table, your own `contextWindow`, or the invented
+placeholder — because those are indistinguishable everywhere else. And
+**`Compaction`** reports what is actually true of this session, including
+`off - not registered for this session (started with --no-compaction)`; it never
+promises a threshold that nothing will act on.
+
+### `contextWindow`
+
+When the model is not in the built-in table — a custom `baseUrl`, a self-hosted
+id, something released last week — the denominator is a **fabricated** 128 000
+and the percentage is meaningless. Correct it:
+
+```bash
+aragon config set contextWindow 1000000   # persisted; prints "Set contextWindow = 1000000"
+aragon config set contextWindow auto      # back to the model table / placeholder
+ARAGON_CONTEXT_WINDOW=1000000 aragon      # one session
+```
+
+Values are clamped to `[8000, 5000000]`; `auto` (the default) is stored as
+`null`. Setting it removes the `?` marker, because you have asserted the number —
+and `/context` still shows that it came from you, which is what makes a wrong
+value findable.
+
 ## Context compaction
 
 A long agentic run fills the model's context window. Before this existed, the
@@ -1307,7 +1394,10 @@ Three surfaces, each answering something the others cannot:
 - **As state** — a `compacting` chip in the status bar, and the context gauge's
   colours aligned to your own thresholds. The gauge **falls immediately** after a
   compaction rather than waiting for the next turn, with a `~` while the value is
-  derived rather than measured.
+  derived rather than measured. The colours follow your configured thresholds
+  whenever compaction is **enabled**, even if no summarizer model currently
+  resolves; after `/compact off` they fall back to the generic 60 / 85, because
+  colouring by a rescue that is not coming is worse than not colouring at all.
 - **As a record** — a transcript card with the before/after message and token
   counts, the summarizer, the duration, and the summary itself. `Ctrl+O` expands
   it.
@@ -1320,7 +1410,9 @@ self-disabled, or the ladder ran out.
 
 `/compact status` is the guaranteed surface: the chip drops on a narrow terminal
 and the card scrolls away, but the command answers at any width, in any mode,
-after the fact.
+after the fact. For the gauge specifically, [`/context`](#the-context-gauge) is
+the equivalent — and it works in a session that never registered compaction at
+all.
 
 ### When the RECENT turns are what does not fit
 
@@ -1701,6 +1793,8 @@ env / `.env` → CLI flags**.
   reasoning blocks), `ARAGON_LIVE_TOOL_OUTPUT` (`0` keeps a running tool card to
   one line),
   `ARAGON_MAX_TOKENS` (a number, or `auto` / `0` for the per-model ceiling),
+  `ARAGON_CONTEXT_WINDOW` (a number, or `auto`; the denominator the context
+  gauge measures against),
   `ARAGON_THEME`,
   `ARAGON_FULLSCREEN`, `ARAGON_PLAN` (`1` starts in plan mode),
   `ARAGON_TEAM` (`0` disables team subagents), `ARAGON_TEAM_MAX` (fan-out width),
@@ -1728,6 +1822,7 @@ env / `.env` → CLI flags**.
 | Config key | Default | Meaning |
 | --- | --- | --- |
 | `maxTokens` | `64000` | Output token cap, clamped to `[256, 200000]`. `null` means **auto** — use each model's own ceiling, never above 64000. Absent means the default. See [Output token limits](#output-token-limits). |
+| `contextWindow` | `null` | The window the context gauge measures against, clamped to `[8000, 5000000]`. `null` means **auto** — the built-in model table, or a fabricated 128000 for a model it has never seen. Set it when the gauge shows `?` on the denominator. See [The context gauge](#the-context-gauge). |
 | `showThinking` | `false` | Draw the reasoning the model returns. `thinkingLevel` is the effort the provider is asked to **spend**; this is whether the terminal **shows** it. Off by default: a settled turn that thought leaves one muted `thought for 12s` row in its place, so nothing is hidden silently. |
 | `liveToolOutput` | `true` | Draw up to eight sanitised rows of a **running** tool's output on its card, plus a `no output for Ns` row when the child goes quiet. On by default, unlike `showThinking`: this ADDS the information a long `bash` call otherwise hides, and its cost is bounded by construction — eight rows per call, sixteen calls, whatever the command emits. Turn it off and the card is a single `running` row again, with no store allocated and no recorder attached. |
 | `fullscreen` | `true` | Use the full-screen TUI (still subject to the automatic downgrades). Setting it to `false` opts out permanently; leaving it `true` is *not* a force — only `--fullscreen` / `ARAGON_FULLSCREEN=1` override the heuristics. |
@@ -1805,6 +1900,8 @@ ARAGON_MAX_TOKENS=32000 aragon       # env layer, between the flag and the file
 aragon config set maxTokens 32000    # persisted; prints "Set maxTokens = 32000"
 aragon config set maxTokens auto     # persisted as null
 aragon config set maxTokens default  # back to 64000
+aragon config set contextWindow 1000000  # the gauge's denominator
+aragon config set contextWindow auto     # back to the model table
 aragon config get maxTokens          # "64000" | "auto"
 ```
 

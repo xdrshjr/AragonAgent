@@ -107,7 +107,19 @@ export async function runExec(
   const plan = planSession(options, cwd, err);
   if (!plan) return 2;
 
-  const prompts = resolvePromptSource(options, promptArg, ctx, err);
+  /**
+   * Late-bound interrupt hook (see `resolvePromptSource` and `execute`).
+   *
+   * The stdin stream is built - and already reading - about eighty lines before
+   * the runner exists, so the frame handler cannot close over the runner
+   * directly. The box starts as a no-op and is filled in AFTER
+   * `runner.attach(controller)`; during that gap an interrupt does nothing at
+   * all, which is the honest outcome (the user simply presses it again). See
+   * `execute` for why "does nothing" beats "does half of it".
+   */
+  const interrupt: InterruptHook = { fire: () => {} };
+
+  const prompts = resolvePromptSource(options, promptArg, ctx, err, interrupt);
   if (!prompts) return 2;
 
   const lock = plan.saving ? tryAcquireSessionLock(plan.id) : null;
@@ -120,7 +132,7 @@ export async function runExec(
   }
 
   try {
-    return await execute({ flags, options, plan, prompts, ctx, out, err, now, appended });
+    return await execute({ flags, options, plan, prompts, ctx, out, err, now, appended, interrupt });
   } finally {
     lock?.release();
   }
@@ -140,10 +152,16 @@ interface ExecuteInput {
   err: NodeJS.WritableStream;
   now: () => number;
   appended: string;
+  interrupt: InterruptHook;
+}
+
+/** A one-field mutable box; see where it is created in `runExec`. */
+interface InterruptHook {
+  fire(): void;
 }
 
 async function execute(input: ExecuteInput): Promise<number> {
-  const { options, plan, ctx, out, err, now } = input;
+  const { options, plan, ctx, out, err, now, interrupt } = input;
   const startedAt = now();
   const permission = resolvePermission({
     mode: options.permissionMode,
@@ -188,9 +206,30 @@ async function execute(input: ExecuteInput): Promise<number> {
     permissionMode: options.permissionMode,
     tools: controller.listTools().map((t) => t.name),
     resumed: plan.saved !== null,
+    // W2 - where this run's conversation lives, so a wrapper can check on disk
+    // whether it is still resumable rather than re-deriving the sessions dir.
+    //
+    // `plan.id`, NEVER `options.resume`. The flag accepts `<id|path>`, and
+    // `planSession` runs the caller's string through `resumedSessionId()` to
+    // decide what the file is actually named - so "the file the caller pointed
+    // at" and "the file this run writes" are routinely two different paths. The
+    // question a wrapper is asking ("what can I reattach to next time") is
+    // answered by the second one.
+    //
+    // `!plan.saving` is `--no-save-session`: nothing is written, so there will
+    // be nothing to reattach to, and `null` says that outright.
+    sessionFile: plan.saving ? sessionPathFor(plan.id) : null,
   });
 
   runner.attach(controller);
+  // AFTER `attach`, never before. The terminator closure ends on
+  // `this.controller?.abort()`, so before `attach` the controller is still
+  // `undefined` and that last statement is a silent no-op - while the SAME
+  // closure has already written `lastSignalAt` and `stopReason = 'interrupted'`.
+  // A real interrupt arriving within the next two seconds would then be judged a
+  // SECOND signal and take `signals.exit(128 + signo)`: a hard exit, no persist,
+  // no `result` - exactly the outcome the caller was trying to avoid.
+  interrupt.fire = () => runner.requestInterrupt();
 
   const pre = controller.preflight();
   if (!pre.ok) {
@@ -362,6 +401,7 @@ function resolvePromptSource(
   promptArg: string | undefined,
   ctx: RunExecContext,
   err: NodeJS.WritableStream,
+  interrupt: InterruptHook,
 ): ExecPromptSource | null {
   const stdin = ctx.stdin ?? process.stdin;
   const opening: string[] = [];
@@ -383,8 +423,13 @@ function resolvePromptSource(
         // line is skipped either way, which is the property AC-20 pins.
         onBadLine: (message) => err.write(`${message}\n`),
         // The runner installs the signal terminator; a caller-requested
-        // interrupt is the same intent arriving through a different channel.
-        onInterrupt: () => process.kill(process.pid, 'SIGINT'),
+        // interrupt is the same intent arriving through a different channel -
+        // so it now calls the runner DIRECTLY rather than raising a signal at
+        // ourselves. `process.kill(process.pid, 'SIGINT')` does not reach this
+        // process's own handlers on Windows: it terminates with exit code 1,
+        // skipping the settle path, `persist()` and the `result` event. See
+        // `ExecRunner.requestInterrupt`.
+        onInterrupt: () => interrupt.fire(),
       }),
     );
   }

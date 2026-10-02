@@ -60,6 +60,7 @@ function config(overrides: Partial<CliConfig> = {}): CliConfig {
     thinkingLevel: 'off',
     showThinking: false,
     liveToolOutput: false,
+    contextWindow: null,
     theme: 'auto',
     reducedMotion: false,
     exitTranscript: true,

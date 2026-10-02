@@ -1,0 +1,6 @@
+{"t":0,"event":"start","node":"v20.19.0","uv":"1.46.0","stdinIsTTY":true}
+{"t":1516,"event":"data","hex":"09","text":"\"\\t\""}
+{"t":3009,"event":"helper_spawn_begin"}
+{"t":3731,"event":"helper_exit","code":0,"elapsedMs":722}
+{"t":5742,"event":"data","hex":"1b5b5a","text":"\"\\u001b[Z\""}
+{"t":9008,"event":"stop"}

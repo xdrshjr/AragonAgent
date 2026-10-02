@@ -39,6 +39,7 @@ import dotenv from 'dotenv';
 import { registerSecretsFrom } from '../logging/secret-registry.js';
 import { clampLogLevel } from '../logging/levels.js';
 import {
+  clampContextWindow,
   clampMaxTokens,
   clampTheme,
   clampThinkingLevel,
@@ -131,6 +132,19 @@ export function readEnvConfig(): EnvConfig {
     } else {
       const clamped = clampMaxTokens(maxTokens);
       if (clamped !== undefined) partial.maxTokens = clamped;
+    }
+  }
+
+  // `auto` / `0` mean AUTO (`null`); a number is clamped. Anything else is LEFT
+  // ABSENT rather than written as `null`, the rule `ARAGON_MAX_TOKENS` states one
+  // block up: a typo must not silently discard the number in the config file.
+  const contextWindow = process.env.ARAGON_CONTEXT_WINDOW?.trim();
+  if (contextWindow !== undefined && contextWindow.length > 0) {
+    if (isAutoToken(contextWindow)) {
+      partial.contextWindow = null;
+    } else {
+      const clamped = clampContextWindow(contextWindow, null);
+      if (clamped !== null) partial.contextWindow = clamped;
     }
   }
 

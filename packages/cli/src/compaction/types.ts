@@ -65,6 +65,18 @@ export interface Pressure {
   /** False when the window came from `buildRuntimeModel`'s 128k placeholder. */
   windowKnown: boolean;
   /**
+   * Whether the denominator came from the user's `contextWindow` override
+   * (context-usage-gauge-accuracy I-6).
+   *
+   * SEPARATE FROM `windowKnown` RATHER THAN FOLDED INTO IT. An override makes
+   * the window KNOWN - the user asserted it, so the `~` has no business staying
+   * on the percentage - but `/context` still has to be able to say WHO supplied
+   * the number. Collapsing the two into one boolean makes "found in the model
+   * table" and "typed by hand" indistinguishable in the report, and the second
+   * one being wrong is exactly the case that most needs to be visible.
+   */
+  windowOverridden: boolean;
+  /**
    * `occupiedTokens(lastUsage) - estimateOf(the history that produced it)`,
    * clamped to `>= 0`, or `undefined` before the first `turn_end`.
    *
@@ -92,6 +104,36 @@ export interface Pressure {
    * happened, and this is a guess about messages no request has yet carried.
    */
   deltaTokens: number;
+}
+
+/**
+ * The ONE occupancy projection the status bar and `/context` read
+ * (context-usage-gauge-accuracy §4.1).
+ *
+ * DELIBERATELY CARRIES NO TIMESTAMP. Its only consumer is the reducer's identity
+ * short-circuit (§5.2), and a field that changes on every tick would make that
+ * short-circuit never hold - turning a permanently visible row into a 2.5 Hz
+ * re-render source and pushing the render governor up its ladder for nothing.
+ *
+ * `Pressure` is the compaction subsystem's shape and carries a headroom and a
+ * ratio the UI does not want; this is the projection of it that crosses into
+ * view state, and `toContextUsage` in `meter.ts` is the ONLY converter.
+ */
+export interface ContextUsageSnapshot {
+  /** Occupied tokens (measured, plus an estimate of anything appended since). */
+  occupied: number;
+  /** The denominator actually used. */
+  window: number;
+  /** `occupied / window` as a percentage, clamped to [0, 100] and rounded. */
+  pct: number;
+  /** Where the BASE came from. */
+  source: PressureSource;
+  /** How much of `occupied` is an estimate of appended messages; `> 0` means approximate. */
+  deltaTokens: number;
+  /** Whether the denominator is trustworthy (in the model table, or overridden). */
+  windowKnown: boolean;
+  /** Whether the denominator came from the user's `contextWindow` (I-6). */
+  windowOverridden: boolean;
 }
 
 /** One compaction, in whatever state it reached. Rendered by `CompactionCard`. */

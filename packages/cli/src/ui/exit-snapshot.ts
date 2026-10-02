@@ -16,6 +16,15 @@ import type { Entry, UsageTotal } from '../agent/reducer.js';
 
 export interface ExitSnapshot {
   entries: Entry[];
+  /**
+   * The session total, FORWARDED not copied.
+   *
+   * It gained `cacheReadTokens` / `cacheWriteTokens`
+   * (context-usage-gauge-accuracy §3.6) and this file needed no change for it,
+   * which is the point of referencing the reducer's type rather than restating
+   * its fields: `renderTranscriptText` reads the total through `promptTokensOf`,
+   * so the exit summary and the status bar cannot drift apart.
+   */
   usageTotal: UsageTotal;
   provider: string;
   model: string;

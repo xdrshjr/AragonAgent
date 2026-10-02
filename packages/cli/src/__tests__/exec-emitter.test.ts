@@ -75,6 +75,9 @@ describe('AC-4 / AC-5: stream-json framing', () => {
       permissionMode: 'auto',
     });
     expect(parsed[0]?.tools).toEqual(['read_file', 'bash']);
+    expect(parsed[0]?.capabilities).toEqual([
+      'interrupt', 'fast-policy', 'fast-tier-events', 'session-file', 'turn-lifecycle', 'execution-progress',
+    ]);
     expect(parsed[1]?.type).toBe('user');
     expect(parsed[2]?.type).toBe('result');
   });

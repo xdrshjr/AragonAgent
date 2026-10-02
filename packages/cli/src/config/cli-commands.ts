@@ -469,6 +469,10 @@ function maskConfig(config: PersistedConfig): Record<string, unknown> {
  */
 function displayOverride(key: string, value: unknown): string | undefined {
   if (key === 'maxTokens' && value === null) return 'auto';
+  // The SECOND tri-state key, and it needs this for the same reason (§4.5):
+  // `contextWindow: null` is AUTO ("use the model table"), not "unset", and a
+  // bare `null` sends the user looking for a bug that is not there.
+  if (key === 'contextWindow' && value === null) return 'auto';
   return undefined;
 }
 

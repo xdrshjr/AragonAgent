@@ -7,7 +7,7 @@ import {
 import type { Entry } from '../agent/reducer.js';
 
 const entry = (id: string): Entry => ({ id, kind: 'user', text: id });
-const usage = { inputTokens: 1, outputTokens: 2, costUsd: 0.5 };
+const usage = { inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.5 };
 
 beforeEach(() => clearExitSnapshot());
 

@@ -113,6 +113,9 @@ export function offFastStatus(): FastStatus {
     tier: { ok: false, reason: 'disabled' },
     snapshot: {
       live: false,
+      // A tier that never existed was never switched off by its reviewer, so
+      // `false` here is the truth and not a placeholder.
+      selfDisabled: false,
       model: '',
       sameAsMain: false,
       reviews: 0,
@@ -176,6 +179,9 @@ export class FastWiring {
       available: () => this.available(),
       getApiKey: deps.getApiKey,
       emit: (event) => this.emit(event),
+      // The reviewer announces its own self-disable with a `tier_changed`, and
+      // only the wiring can build the snapshot that carries it.
+      snapshot: () => this.snapshot(),
       notify: deps.notify,
     });
   }
@@ -227,7 +233,16 @@ export class FastWiring {
     return this.enabled;
   }
 
-  /** §3.3's live predicate. THE THIRD TERM IS THE POINT - see the header. */
+  /**
+   * §3.3's live predicate. THE THIRD TERM IS THE POINT - see the header.
+   *
+   * `FastReviewer.isSelfDisabled()` is DELIBERATELY NOT a fourth term. Folding
+   * it in would look tidier and would break something else: `delegationAvailable()`
+   * is `available() && config.fast.delegate === true`, so three consecutive
+   * REVIEW failures would silently switch DELEGATION off as well - turning a
+   * diagnostic signal into a behaviour change for every user. The two facts are
+   * reported separately on `FastSnapshot` instead (`live` / `selfDisabled`).
+   */
   available(): boolean {
     return this.registered && this.enabled && this.tier.ok;
   }
@@ -356,6 +371,8 @@ export class FastWiring {
     const ref = this.tier.ok ? this.tier.ref : null;
     return {
       live: this.available(),
+      // ORTHOGONAL TO `live`, never derivable from it (see `FastSnapshot`).
+      selfDisabled: this.reviewer.isSelfDisabled(),
       model: ref ? ref.modelId : '',
       sameAsMain: this.tier.ok ? this.tier.sameAsMain : false,
       // THE NUMERATOR, THE DENOMINATOR AND THE FLAG ARE READ IN ONE EXPRESSION,

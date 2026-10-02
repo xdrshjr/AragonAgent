@@ -161,19 +161,28 @@ describe('the reducer keeps the live card and the panel in step (§5.3)', () => 
     expect(entry.durationMs).toBe(84_200);
   });
 
-  it('AC-15: teamUsage touches usageTotal and NOT contextTokens', () => {
-    // `contextTokens` shows the LEAD's context occupancy against the model's
-    // window; folding five children into it would read 180% on a perfectly
-    // healthy session. Child spend is real money, and it belongs in the cost
-    // readout instead.
-    const before = { ...initialViewState(), contextTokens: 4200 };
+  it('AC-15: teamUsage touches usageTotal and NOT the context gauge', () => {
+    // `context` shows the LEAD's context occupancy against the model's window;
+    // folding five children into it would read 180% on a perfectly healthy
+    // session. Child spend is real money, and it belongs in the cost readout
+    // instead.
+    const before = {
+      ...initialViewState(),
+      context: { ...initialViewState().context, occupied: 4200, pct: 2 },
+    };
     const after = viewReducer(before, {
       type: 'teamUsage',
       usage: { inputTokens: 900, outputTokens: 300 },
       costDelta: 0.25,
     });
-    expect(after.usageTotal).toEqual({ inputTokens: 900, outputTokens: 300, costUsd: 0.25 });
-    expect(after.contextTokens).toBe(4200);
+    expect(after.usageTotal).toEqual({
+      inputTokens: 900,
+      outputTokens: 300,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      costUsd: 0.25,
+    });
+    expect(after.context).toBe(before.context);
   });
 
   it('drops the live entry pointer when the transcript is cleared', () => {

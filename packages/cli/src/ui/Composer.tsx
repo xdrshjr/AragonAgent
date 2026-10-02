@@ -54,6 +54,8 @@ export interface ComposerProps {
    */
   modeToggleKey?: string;
   popupMaxRows?: number;
+  popupMaxHeight?: number;
+  onPopupRowsChange?: (rows: number) => void;
   /**
    * Rows of newer output below the viewport, forwarded to the input row's chip
    * (tui-selection-and-scroll-follow §4.2 / G7).
@@ -184,6 +186,8 @@ export function Composer({
   services = 0,
   modeToggleKey = MODE_TOGGLE_KEYS.primary,
   popupMaxRows,
+  popupMaxHeight,
+  onPopupRowsChange,
   scrolledLines = 0,
   onDraftRows,
   onNotice,
@@ -228,6 +232,8 @@ export function Composer({
         theme={theme}
         caps={caps}
         popupMaxRows={popupMaxRows}
+        popupMaxHeight={popupMaxHeight}
+        onPopupRowsChange={onPopupRowsChange}
         onSubmit={onSubmit}
         onHelp={onHelp}
         agentMode={agentMode}
