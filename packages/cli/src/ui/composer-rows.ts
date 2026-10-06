@@ -85,6 +85,30 @@ export function displayWidth(text: string): number {
   return w;
 }
 
+/** Normalize only the visual projection; the editor keeps its UTF-16 index. */
+function visualCursor(buffer: string, cursor: number): number {
+  let index = Math.max(0, Math.min(buffer.length, cursor));
+  const code = buffer.charCodeAt(index);
+  const previous = buffer.charCodeAt(index - 1);
+  if (code >= 0xdc00 && code <= 0xdfff && previous >= 0xd800 && previous <= 0xdbff) index -= 1;
+  if (index === buffer.length || buffer[index] === '\n') return index;
+  const ch = String.fromCodePoint(buffer.codePointAt(index)!);
+  if (ch === '\t' || charWidth(ch) > 0) return index;
+
+  const start = buffer.lastIndexOf('\n', index - 1) + 1;
+  let nearest = -1;
+  let i = start;
+  while (i < buffer.length && buffer[i] !== '\n') {
+    const point = String.fromCodePoint(buffer.codePointAt(i)!);
+    if (point === '\t' || charWidth(point) > 0) {
+      if (i > index) return nearest >= 0 ? nearest : i;
+      nearest = i;
+    }
+    i += point.length;
+  }
+  return nearest >= 0 ? nearest : i;
+}
+
 /**
  * Wrap `buffer` into rows, locate the caret, and select a window of at most
  * `maxRows` rows that contains it.
@@ -95,7 +119,8 @@ export function displayWidth(text: string): number {
  * to live in the reducer and would then need its own invalidation rules.
  */
 export function layoutComposer(input: ComposerLayoutInput): ComposerLayout {
-  const { buffer, cursor, active } = input;
+  const { buffer, active } = input;
+  const cursor = visualCursor(buffer, input.cursor);
   const cols = Math.max(1, Math.floor(input.cols));
   const maxRows = input.maxRows >= 1 ? Math.floor(input.maxRows) : 1;
 
@@ -144,6 +169,7 @@ export function layoutComposer(input: ComposerLayoutInput): ComposerLayout {
     const ch = String.fromCodePoint(buffer.codePointAt(i)!);
     if (ch === '\n') {
       if (atCursor) {
+        ensureRoom(1);
         cursorRowAbs = rows.length;
         cursorCol = col;
       }
@@ -223,19 +249,27 @@ export function splitRowAtColumn(row: ComposerRow, column: number): RowSplit {
     else list.push({ text, kind });
   };
 
+  const cells: ComposerSegment[] = [];
+  let leading = '';
   for (const segment of row.segments) {
-    if (at !== null) {
-      push(after, segment.text, segment.kind);
-      continue;
-    }
     for (const ch of segment.text) {
-      if (at === null && x === column) {
-        at = { text: ch, kind: segment.kind };
+      if (charWidth(ch) === 0) {
+        const last = cells[cells.length - 1];
+        if (last) cells[cells.length - 1] = { ...last, text: last.text + ch };
+        else leading += ch;
       } else {
-        push(at === null ? before : after, ch, segment.kind);
+        cells.push({ text: leading + ch, kind: segment.kind });
+        leading = '';
       }
-      x += charWidth(ch);
     }
+  }
+  // A zero-width-only row keeps its text before the explicitly budgeted space.
+  if (leading) push(before, leading, row.segments[0]?.kind ?? 'text');
+  for (const cell of cells) {
+    const width = displayWidth(cell.text);
+    if (at === null && column >= x && column < x + width) at = cell;
+    else push(at === null ? before : after, cell.text, cell.kind);
+    x += width;
   }
   return { before, at, after };
 }

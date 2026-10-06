@@ -56,11 +56,9 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import type { Theme } from './theme.js';
 import type { Toast } from '../agent/reducer.js';
-import type { RenderMode } from './layout/frame.js';
 import { ToastStack } from './ToastStack.js';
 
 export interface BottomStatusRowProps {
-  mode: RenderMode;
   toasts: Toast[];
   /** `<ActivityLine>` while a run owns the screen, else `null`. */
   activity: React.ReactNode;
@@ -100,7 +98,6 @@ export interface BottomStatusRowProps {
 }
 
 export function BottomStatusRow({
-  mode,
   toasts,
   activity,
   activityGlyph,
@@ -112,8 +109,7 @@ export function BottomStatusRow({
     const spinner = activity ? activityGlyph : null;
     // Byte-identical to the old branch whenever there is no live spinner to
     // carry: no run, an ASCII terminal, or `reducedMotion`.
-    if (!spinner) return <ToastStack toasts={toasts} theme={theme} mode={mode} />;
-    const fullscreen = mode === 'fullscreen';
+    if (!spinner) return <ToastStack toasts={toasts} theme={theme} />;
     return (
       // `flexDirection` SPELLED OUT even though `row` is Yoga's default: it is
       // what keeps two children on ONE row, and the header above turns on that
@@ -122,18 +118,10 @@ export function BottomStatusRow({
       // that doubles the row, takes it from the transcript, and desynchronises
       // every `viewportRows()` consumer without failing a type or a lint.
       <Box flexDirection="row" flexShrink={0}>
-        {/*
-          `ToastStack` opens its FULL-SCREEN row with a leading space and its
-          INLINE rows without one, and it indents the inline stack by a blank
-          row (`marginTop`). The prefix mirrors both, so each mode's toast keeps
-          the left edge and the vertical position it already had and only gains
-          ` ⠋ ` in front of its glyph.
-        */}
-        <Box flexShrink={0} marginTop={fullscreen ? 0 : 1}>
+        <Box flexShrink={0}>
           <Text color={theme.thinking}>
-            {fullscreen ? ' ' : ''}
+            {' '}
             {spinner}
-            {fullscreen ? '' : ' '}
           </Text>
         </Box>
         {/*
@@ -148,16 +136,13 @@ export function BottomStatusRow({
           which is what `wrap="truncate"` reads.
         */}
         <Box flexDirection="column" flexGrow={1} flexShrink={1} overflow="hidden">
-          <ToastStack toasts={toasts} theme={theme} mode={mode} />
+          <ToastStack toasts={toasts} theme={theme} />
         </Box>
       </Box>
     );
   }
-  // Inline has no frame and therefore nothing to protect: `ToastStack`'s inline
-  // branch is already a conditional 0-3 row stack, and these are simply one more
-  // conditional row above it.
   if (activity) return <Box flexShrink={0}>{activity}</Box>;
   if (update) return <Box flexShrink={0}>{update}</Box>;
   // The blank full-screen row that IS the budget must keep being emitted.
-  return <ToastStack toasts={toasts} theme={theme} mode={mode} />;
+  return <ToastStack toasts={toasts} theme={theme} />;
 }

@@ -125,7 +125,7 @@ describe('OverlayFrame scroll clamping', () => {
     unmount();
   });
 
-  it('pulls an inline (unbounded) overlay back to zero rather than scrolling it', async () => {
+  it('clamps an unbounded overlay offset back to zero', async () => {
     // `maxRows = Infinity` renders everything, so any non-zero offset is stale.
     const onScrollClamp = vi.fn();
     const { lastFrame, unmount } = render(

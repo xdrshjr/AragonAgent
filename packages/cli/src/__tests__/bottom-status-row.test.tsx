@@ -23,7 +23,6 @@ import { ACTIVITY_PHRASES } from '../ui/activity-phrases.js';
 import { getTheme } from '../ui/theme.js';
 import { chromeBudget, viewportRows } from '../ui/layout/budget.js';
 import type { Toast } from '../agent/reducer.js';
-import type { RenderMode } from '../ui/layout/frame.js';
 import type { TermCapabilities } from '../ui/capabilities.js';
 
 const CAPS: TermCapabilities = { colorLevel: 3, unicode: true };
@@ -46,10 +45,9 @@ function activityNode(): React.ReactElement {
   );
 }
 
-function frameOf(mode: RenderMode, toasts: Toast[], running: boolean): string {
+function frameOf(toasts: Toast[], running: boolean): string {
   const { lastFrame, unmount } = render(
     <BottomStatusRow
-      mode={mode}
       toasts={toasts}
       activity={running ? activityNode() : null}
       theme={THEME}
@@ -69,7 +67,7 @@ describe('BottomStatusRow — full-screen is ALWAYS exactly one row', () => {
       ['toast while running', [TOAST], true],
     ];
     for (const [label, toasts, running] of states) {
-      const frame = frameOf('fullscreen', toasts, running);
+      const frame = frameOf(toasts, running);
       expect(frame.split('\n'), label).toHaveLength(1);
     }
   });
@@ -77,23 +75,13 @@ describe('BottomStatusRow — full-screen is ALWAYS exactly one row', () => {
   it('gives the row to the toast when both want it', () => {
     // A transient ack is a RESPONSE TO THE USER, and the row nearest the input
     // belongs to it.
-    const frame = frameOf('fullscreen', [TOAST], true);
+    const frame = frameOf([TOAST], true);
     expect(frame).toContain('Thinking shown.');
     expect(hasPhrase(frame)).toBe(false);
   });
 
   it('shows the activity line when the row is free', () => {
-    expect(hasPhrase(frameOf('fullscreen', [], true))).toBe(true);
-  });
-});
-
-describe('BottomStatusRow — inline keeps the conditional stack', () => {
-  it('draws nothing when there is neither a toast nor a run', () => {
-    expect(frameOf('inline', [], false).trim()).toBe('');
-  });
-
-  it('draws the activity line alone when a run is in flight', () => {
-    expect(hasPhrase(frameOf('inline', [], true))).toBe(true);
+    expect(hasPhrase(frameOf([], true))).toBe(true);
   });
 });
 
@@ -114,6 +102,6 @@ describe('the frame budget is unchanged by this round (AC-8a / DoD #8)', () => {
     const budget = chromeBudget(24);
     expect(Object.keys(budget).sort()).toEqual(['composer', 'header', 'status', 'toast']);
     expect(budget.toast).toBe(1);
-    expect(viewportRows(24)).toBe(16);
+    expect(viewportRows(24)).toBe(20);
   });
 });

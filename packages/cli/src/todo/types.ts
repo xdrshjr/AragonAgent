@@ -50,7 +50,8 @@ export interface TodoSnapshot {
  *   `user`  - `/todo clear`, or `/clear`. Both are an explicit user instruction,
  *             which is I-2's standing exception; neither touches `messages`.
  *   `reset` - `/reset`, or a `/resume` whose file carried no list (§3.13).
- *   `turn`  - every item was completed when the next user turn started.
+ *   `turn`  - a new TUI task started, or a legacy caller began a turn after
+ *             every item was completed.
  *   `stale` - unfinished, and unwritten for more than `TODO_LIMITS.staleTurns`
  *             consecutive turns (§3.2 / P1-7).
  */

@@ -226,7 +226,7 @@ describe('additive config keys (R-12: no migration, no version bump)', () => {
     const cfg = loadConfig({ cwd: CWD });
     expect(cfg.model).toBe('legacy-model');
     // Absent ⇒ no explicit opinion, so the auto-downgrade heuristics stay live.
-    expect(cfg.fullscreen).toBeUndefined();
+    expect(cfg).not.toHaveProperty('fullscreen');
     expect(cfg.exitTranscript).toBe(true);
     // Raised 300 -> 1000 by tui-render-performance: the horizon is no longer a
     // rendering budget, because the viewport is virtualised (L3).
@@ -236,22 +236,14 @@ describe('additive config keys (R-12: no migration, no version bump)', () => {
     expect(cfg.maxRenderIntervalMs).toBe(320);
   });
 
-  it('treats a persisted `fullscreen: true` as the default, not as a force', () => {
-    updatePersistedConfig({ fullscreen: true });
-    expect(loadConfig({ cwd: CWD }).fullscreen).toBeUndefined();
-  });
-
-  it('honors an opt-out from the config file and a force from the flag', () => {
-    updatePersistedConfig({ fullscreen: false });
-    expect(loadConfig({ cwd: CWD }).fullscreen).toBe(false);
-    expect(loadConfig({ cwd: CWD, fullscreen: true }).fullscreen).toBe(true);
-  });
-
-  it('lets ARAGON_FULLSCREEN override the file but lose to the flag', () => {
-    updatePersistedConfig({ fullscreen: false });
-    process.env.ARAGON_FULLSCREEN = '1';
-    expect(loadConfig({ cwd: CWD }).fullscreen).toBe(true);
-    expect(loadConfig({ cwd: CWD, fullscreen: false }).fullscreen).toBe(false);
+  it.each([true, false])('discards the retired fullscreen setting (%s)', (fullscreen) => {
+    writeFileSync(getConfigPath(), JSON.stringify({ fullscreen, model: 'saved-model' }));
+    process.env.ARAGON_FULLSCREEN = fullscreen ? '0' : '1';
+    expect(loadConfig({ cwd: CWD })).not.toHaveProperty('fullscreen');
+    expect(loadPersistedConfig()).not.toHaveProperty('fullscreen');
+    expect(loadPersistedConfig().model).toBe('saved-model');
+    updatePersistedConfig({ theme: 'cool' });
+    expect(JSON.parse(readFileSync(getConfigPath(), 'utf8'))).not.toHaveProperty('fullscreen');
   });
 
   it('clamps transcriptWindow into [50, 20000]', () => {

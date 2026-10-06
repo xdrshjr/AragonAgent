@@ -17,6 +17,7 @@
  */
 
 import type { FrameWriterStats } from '../ui/frame-differ.js';
+import type { ScrollbarBridge } from '../ui/scrollbar-controller.js';
 import { clearRenderCaches, renderCacheStats } from '../ui/render-cache.js';
 import type { SlashCommand } from './registry.js';
 
@@ -36,9 +37,51 @@ export interface PerfSnapshot {
   heightsEstimated: number;
   cols: number;
   /** Geometry. */
-  mode: 'fullscreen' | 'inline';
+  mode: 'fullscreen';
   viewportRows: number;
   offset: number;
+  /** Right-edge scrollbar diagnostics; read lazily so it reflects the live bridge. */
+  scrollbar?: ScrollbarPerf;
+}
+
+/**
+ * Why the right-edge scrollbar is or is not usable, in one record
+ * (tui-scrollbar-edge-and-run-row section 3.2). "Cannot see it" and "cannot drag
+ * it" had no self-check before; each field below separates one cause.
+ */
+export interface ScrollbarPerf {
+  /** 1-based terminal column of the track, or `null` before the first layout. */
+  trackCol: number | null;
+  trackRows: number | null;
+  /** Mouse capture is on. Off keeps the track visible but not draggable. */
+  mouseOn: boolean;
+  /** A full frame matching the geometry was observed, so pointer hits are trusted. */
+  frameReady: boolean;
+  thumb: { start: number; size: number } | null;
+  unicode: boolean;
+  /** `skipped`: the differ omits CSI K on full-width rows; `n/a`: diff render is off. */
+  edgeEl: 'skipped' | 'always' | 'n/a';
+}
+
+/** Build the diagnostics record from the live bridge (called at `/perf` time). */
+export function readScrollbarPerf(opts: {
+  bridge: ScrollbarBridge | undefined;
+  diffRender: boolean;
+  unicode: boolean;
+}): ScrollbarPerf | undefined {
+  const { bridge, diffRender, unicode } = opts;
+  if (!bridge) return undefined;
+  const geometry = bridge.geometry;
+  return {
+    trackCol: geometry?.trackCol ?? null,
+    trackRows: geometry?.trackRows ?? null,
+    mouseOn: bridge.isEnabled(),
+    frameReady: bridge.frameReady,
+    thumb: geometry?.thumb ? { start: geometry.thumb.start, size: geometry.thumb.size } : null,
+    unicode,
+    // `cli.tsx` always wires `cols` when it builds the differ.
+    edgeEl: diffRender ? 'skipped' : 'n/a',
+  };
 }
 
 /** Cleared on unmount, so `/perf` in a torn-down tree says so instead of lying. */
@@ -69,7 +112,7 @@ export function setPerfResetHook(fn: (() => void) | null): void {
  * render — so routing them through a 1900-line component's props would buy
  * nothing and cost `App.tsx` plus `app.test.tsx` churn (P1-2).
  *
- * `null` means the writer was never built — `--no-diff-render`, inline mode, or
+ * `null` means the writer was never built — `--no-diff-render` or
  * a non-interactive path. `/perf` says so in words, so "the flag is off" and
  * "the writer crashed" never look alike.
  */
@@ -112,11 +155,24 @@ function formatWriterLine(): string {
   );
 }
 
-/** Format a snapshot as the six-line block documented in §5.4. */
+function formatScrollbarLine(bar: ScrollbarPerf): string {
+  const thumb = bar.thumb ? `${bar.thumb.start}+${bar.thumb.size}` : 'none';
+  const line =
+    `scrollbar  col=${bar.trackCol ?? '-'} rows=${bar.trackRows ?? '-'} ` +
+    `mouse=${bar.mouseOn ? 'on' : 'off'} frameReady=${bar.frameReady ? 'yes' : 'no'} ` +
+    `thumb=${thumb} glyphs=${bar.unicode ? 'unicode' : 'ascii'} edge-el=${bar.edgeEl}`;
+  if (!bar.mouseOn || bar.frameReady) return line;
+  const size = bar.trackCol !== null && bar.trackRows !== null
+    ? `${bar.trackCol}x${bar.trackRows + 4}` : 'the terminal size';
+  return `${line}\n           waiting for a full frame matching ${size}`;
+}
+
+/** Format a snapshot as the six-line block documented in §5.4 (plus the scrollbar line). */
 export function formatPerfReport(snap: PerfSnapshot): string {
   const caches = renderCacheStats();
   const eco = snap.rung > 0 ? '  -  eco' : '';
   const governor = snap.governorEnabled ? '' : '  -  governor off';
+  const scrollbar = snap.scrollbar ? [formatScrollbarLine(snap.scrollbar)] : [];
   return [
     `render     rung ${snap.rung}  -  interval ${snap.intervalMs}ms  -  last commit ` +
       `${Math.round(snap.lastCommitMs)}ms${eco}${governor}`,
@@ -129,6 +185,7 @@ export function formatPerfReport(snap: PerfSnapshot): string {
       `lines ${caches.lineEntries}`,
     `mode       ${snap.mode}  -  viewport ${snap.viewportRows} rows  -  offset ${snap.offset}`,
     formatWriterLine(),
+    ...scrollbar,
   ].join('\n');
 }
 

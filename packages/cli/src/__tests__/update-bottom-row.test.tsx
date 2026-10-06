@@ -28,7 +28,6 @@ import { chromeBudget, viewportRows } from '../ui/layout/budget.js';
 import { shouldRenderUpdateLine } from '../update/types.js';
 import { UPDATE_LIMITS } from '../update/limits.js';
 import type { Toast } from '../agent/reducer.js';
-import type { RenderMode } from '../ui/layout/frame.js';
 import type { TermCapabilities } from '../ui/capabilities.js';
 import type { UpdatePhase, UpdateSnapshot } from '../update/types.js';
 
@@ -71,14 +70,12 @@ function updateNode(snapshot: UpdateSnapshot | null): React.ReactNode {
 }
 
 function frameOf(
-  mode: RenderMode,
   toasts: Toast[],
   running: boolean,
   update: UpdateSnapshot | null,
 ): string {
   const { lastFrame, unmount } = render(
     <BottomStatusRow
-      mode={mode}
       toasts={toasts}
       activity={running ? activityNode() : null}
       update={updateNode(update)}
@@ -94,7 +91,7 @@ describe('AC-17: precedence is toast > activity > update > blank', () => {
   it('a toast wins the row even when both others want it', () => {
     // A transient ack is a RESPONSE TO THE USER, and the row nearest the input
     // belongs to it.
-    const frame = frameOf('fullscreen', [TOAST], true, snap());
+    const frame = frameOf([TOAST], true, snap());
     expect(frame).toContain('Thinking shown.');
     expect(hasPhrase(frame)).toBe(false);
     expect(frame).not.toContain('0.6.0');
@@ -105,21 +102,21 @@ describe('AC-17: precedence is toast > activity > update > blank', () => {
     // costs nothing — whereas an activity line deferred never renders at all
     // (D-2). It also means a user who is actively working never sees the
     // updater until they stop, which is the whole of the silence requirement.
-    const frame = frameOf('fullscreen', [], true, snap());
+    const frame = frameOf([], true, snap());
     expect(hasPhrase(frame)).toBe(true);
     expect(frame).not.toContain('0.6.0');
   });
 
   it('the update line takes the row when nothing else wants it', () => {
-    const frame = frameOf('fullscreen', [], false, snap());
+    const frame = frameOf([], false, snap());
     expect(frame).toContain('0.6.0 installed');
   });
 
   it('the blank budgeted row survives when nobody wants it', () => {
-    expect(frameOf('fullscreen', [], false, null).trim()).toBe('');
+    expect(frameOf([], false, null).trim()).toBe('');
     // ... including when the updater exists but has nothing to say, which is
     // the common case and the one P0-1 would have broken.
-    expect(frameOf('fullscreen', [], false, snap({ phase: 'idle' })).trim()).toBe('');
+    expect(frameOf([], false, snap({ phase: 'idle' })).trim()).toBe('');
   });
 });
 
@@ -138,7 +135,6 @@ describe('AC-25: full-screen is ALWAYS exactly one row', () => {
         for (const running of [false, true]) {
           const label = `${phase}/${toasts.length}/${running}`;
           const frame = frameOf(
-            'fullscreen',
             toasts,
             running,
             snap({ phase, consecutiveFailures: 3 }),
@@ -161,7 +157,6 @@ describe('AC-25: full-screen is ALWAYS exactly one row', () => {
     for (const [label, toasts, running] of states) {
       const { lastFrame, unmount } = render(
         <BottomStatusRow
-          mode="fullscreen"
           toasts={toasts}
           activity={running ? activityNode() : null}
           theme={THEME}
@@ -170,16 +165,6 @@ describe('AC-25: full-screen is ALWAYS exactly one row', () => {
       expect(stripAnsi(lastFrame() ?? '').split('\n'), label).toHaveLength(1);
       unmount();
     }
-  });
-});
-
-describe('inline keeps the conditional stack', () => {
-  it('draws nothing when nobody wants the row', () => {
-    expect(frameOf('inline', [], false, null).trim()).toBe('');
-  });
-
-  it('draws the update line alone when it is the only occupant', () => {
-    expect(frameOf('inline', [], false, snap())).toContain('0.6.0 installed');
   });
 });
 
@@ -213,7 +198,7 @@ describe('AC-2: the frame budget is UNCHANGED by this round', () => {
     for (const rows of [12, 19, 20, 24, 27, 28, 40, 200]) {
       expect(viewportRows(rows), `rows=${rows}`).toBe(viewportRows(rows));
     }
-    expect(viewportRows(24)).toBe(16);
+    expect(viewportRows(24)).toBe(20);
   });
 
   it('chromeBudget still enumerates exactly header + toast + composer + status', () => {

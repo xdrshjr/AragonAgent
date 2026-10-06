@@ -46,7 +46,9 @@ const OVERLAY_LINES_PER_NOTCH = 3;
 const WHEEL_COALESCE_MS = 16;
 
 export interface WheelRoutingOptions {
-  /** Absent when mouse support is off, in inline mode, or on a non-TTY. */
+  isPointerCaptured?: () => boolean;
+  isActive?: () => boolean;
+  /** Absent when mouse support is off, or on a non-TTY. */
   mouseSource?: MouseSource;
   /** Read at EVENT time for the routing branch, and again at FLUSH time (P1-3). */
   getOverlay: () => Overlay | null;
@@ -93,6 +95,7 @@ export function useWheelRouting(options: WheelRoutingOptions): WheelRouting {
     const pending = accumulator.current;
     accumulator.current = null;
     if (!pending) return;
+    if (optionsRef.current.isPointerCaptured?.() || optionsRef.current.isActive?.() === false) return;
     // P1-3: THE DECISION BELONGS AT FLUSH TIME, not at event time, because the
     // event-time decision is the one that goes stale. `App` swaps
     // `ScrollViewport` out for an overlay, and 16 ms is more than wide enough
@@ -128,6 +131,10 @@ export function useWheelRouting(options: WheelRoutingOptions): WheelRouting {
       // the price of that.
       if (event.kind !== 'wheel') return;
       const current = optionsRef.current;
+      if (current.isPointerCaptured?.() || current.isActive?.() === false) {
+        clearCoalescer();
+        return;
+      }
       const overlay = current.getOverlay();
 
       // THE OVERLAY BRANCH IS EVALUATED FIRST AND RETURNS FOR EVERY OVERLAY IT

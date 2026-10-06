@@ -5,6 +5,8 @@
  *   0 = success, 1 = agent error (incl. a silently-swallowed throw), 2 = config.
  */
 
+import type { PromptOutcome } from './prompt-options.js';
+
 import type { AgentEvent, ModelInfo, TokenUsage } from '@aragon-agent/core';
 import { formatCost, formatTokens, formatDuration, computeCost } from './usage.js';
 import { formatStreamError } from './reducer.js';
@@ -24,7 +26,7 @@ import {
 export interface HeadlessController {
   preflight(): PreflightResult;
   subscribe(listener: (event: AgentEvent) => void): () => void;
-  prompt(text: string): Promise<void>;
+  prompt(text: string): Promise<void | PromptOutcome>;
   getModelInfo(): ModelInfo;
   /**
    * The CLI-local team stream — OPTIONAL, deliberately (team-subagents §3.12 /

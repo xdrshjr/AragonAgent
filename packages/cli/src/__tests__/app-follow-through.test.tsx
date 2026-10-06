@@ -13,6 +13,7 @@
  * quadruple its wall time for every unrelated change.
  */
 
+import type { PromptOptions, PromptOutcome } from '../agent/prompt-options.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
 import { render } from 'ink-testing-library';
@@ -282,8 +283,11 @@ class FakeController {
     this.aborted = true;
   }
   steer(): void {}
-  prompt(text: string): Promise<void> {
-    return this.onPrompt ? this.onPrompt(text) : Promise.resolve();
+  promptOptions: PromptOptions[] = [];
+  async prompt(text: string, options: PromptOptions = {}): Promise<PromptOutcome> {
+    this.promptOptions.push(options);
+    await this.onPrompt?.(text);
+    return { status: 'finished' };
   }
   isRunning(): boolean {
     return this.running;
@@ -414,7 +418,6 @@ function mount(fc: FakeController, extra: { initialPrompt?: string } = {}) {
     <App
       controller={fc as unknown as AgentController}
       version="0.0.0"
-      mode="inline"
       initialPrompt={extra.initialPrompt}
     />,
   );
@@ -525,7 +528,9 @@ describe('the decision reaches the transcript', () => {
     };
     const { lastFrame, stdin, unmount } = mount(fc, { initialPrompt: 'go' });
     await delay(150);
-    // Esc while running: `controller.abort()` + `abortMark` + the ref.
+    stdin.write(ESC);
+    await delay(40);
+    expect(fc.aborted).toBe(false);
     stdin.write(ESC);
     await delay(60);
     expect(fc.aborted).toBe(true);
@@ -533,7 +538,7 @@ describe('the decision reaches the transcript', () => {
     fc.emit({ type: 'agent_end', messages: [] } as AgentEvent);
     await delay(150);
     const frame = stripAnsi(lastFrame() ?? '');
-    expect(frame).toContain('Run aborted.');
+    expect(frame).toContain('Interrupt requested.');
     expect(frame).not.toContain('unfinished');
     expect(frame).not.toContain('Continuing with');
     unmount();
@@ -554,6 +559,9 @@ describe('arming, firing and cancelling', () => {
     // effects are the history append and the `submitCount` bump. Only the user's
     // own 'go' is recorded.
     expect(promptHistoryMock.entries).toEqual(['go']);
+    expect(fc.promptOptions).toEqual([
+      { todoPolicy: 'new-task' }, { todoPolicy: 'continue' },
+    ]);
     unmount();
   }, 15_000);
 

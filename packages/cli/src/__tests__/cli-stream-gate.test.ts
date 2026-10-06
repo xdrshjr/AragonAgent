@@ -52,7 +52,7 @@ function fakeStdout() {
  * `cli.tsx` verbatim, and the source assertions at the bottom of this file are
  * what stop the copy drifting from the original.
  */
-function gate(opts: { wantMouse: boolean; configPaste: boolean; mode: 'fullscreen' | 'inline' }) {
+function gate(opts: { wantMouse: boolean; configPaste: boolean; }) {
   const real = fakeStdin();
   const wantPaste = opts.configPaste && !!real.isTTY;
   const filter =
@@ -67,13 +67,11 @@ function gate(opts: { wantMouse: boolean; configPaste: boolean; mode: 'fullscree
 
   const { stdout, all } = fakeStdout();
   const screen =
-    opts.mode === 'fullscreen'
-      ? enterAltScreen(stdout, {
+    enterAltScreen(stdout, {
           mouse: mouseOn,
           motion: wantSelect,
-          bracketedPaste: pasteOn && opts.mode === 'fullscreen',
-        })
-      : null;
+          bracketedPaste: pasteOn,
+        });
 
   const result = {
     filterBuilt: filter !== null,
@@ -97,7 +95,7 @@ describe('T-29: the (mouse, paste) gate matrix', () => {
   it('(mouse: false, paste: true) builds a filter and STILL writes no mouse byte', () => {
     // THE LOAD-BEARING ROW (P0-1). Asserting only that a filter exists is what
     // would let the regression through.
-    const g = gate({ wantMouse: false, configPaste: true, mode: 'fullscreen' });
+    const g = gate({ wantMouse: false, configPaste: true });
 
     expect(g.filterBuilt).toBe(true);
     for (const byte of [...MOUSE_ON_BYTES, MOTION_BYTE]) {
@@ -112,7 +110,7 @@ describe('T-29: the (mouse, paste) gate matrix', () => {
   });
 
   it('(mouse: true, paste: false) is the v0.6.3 session, byte for byte', () => {
-    const g = gate({ wantMouse: true, configPaste: false, mode: 'fullscreen' });
+    const g = gate({ wantMouse: true, configPaste: false });
 
     expect(g.filterBuilt).toBe(true);
     for (const byte of MOUSE_ON_BYTES) expect(g.bytes).toContain(byte);
@@ -124,7 +122,7 @@ describe('T-29: the (mouse, paste) gate matrix', () => {
   });
 
   it('(mouse: true, paste: true) turns both on and neither off', () => {
-    const g = gate({ wantMouse: true, configPaste: true, mode: 'fullscreen' });
+    const g = gate({ wantMouse: true, configPaste: true });
 
     for (const byte of [...MOUSE_ON_BYTES, MOTION_BYTE, PASTE_ON_BYTE]) {
       expect(g.bytes).toContain(byte);
@@ -136,7 +134,7 @@ describe('T-29: the (mouse, paste) gate matrix', () => {
     // AC-6 / I-10: with every stream feature off, nothing is wrapped — and that
     // stays a statement about the code rather than about behaviour only while
     // this identity holds.
-    const g = gate({ wantMouse: false, configPaste: false, mode: 'fullscreen' });
+    const g = gate({ wantMouse: false, configPaste: false });
 
     expect(g.filterBuilt).toBe(false);
     expect(g.inkStdin).toBe(g.realStdin);
@@ -144,15 +142,6 @@ describe('T-29: the (mouse, paste) gate matrix', () => {
     for (const byte of [...MOUSE_ON_BYTES, MOTION_BYTE, PASTE_ON_BYTE]) {
       expect(g.bytes).not.toContain(byte);
     }
-  });
-
-  it('inline mode never asks for bracketed paste, even with paste on (D-6 / N5)', () => {
-    // `?2004h` left set after a `kill` makes every subsequent paste in the shell
-    // arrive as a literal `[200~`. Inline mode has no `screen.ts` handle on the
-    // four exit paths, so it does not get to ask.
-    const g = gate({ wantMouse: false, configPaste: true, mode: 'inline' });
-    expect(g.filterBuilt).toBe(true);
-    expect(g.bytes).toBe('');
   });
 });
 
@@ -183,8 +172,8 @@ describe('I-11: `filter !== null` answers exactly one question in cli.tsx', () =
     expect(code.split('filter !== null').length - 1).toBe(2);
   });
 
-  it('gates `?2004h` on `pasteOn` and full-screen, never on the handle', () => {
-    expect(CLI_SOURCE).toMatch(/bracketedPaste: pasteOn && mode === 'fullscreen',/);
+  it('gates `?2004h` on `pasteOn`, never on the handle', () => {
+    expect(CLI_SOURCE).toMatch(/bracketedPaste: pasteOn,/);
   });
 
   it('still hands the STREAM question to the handle', () => {

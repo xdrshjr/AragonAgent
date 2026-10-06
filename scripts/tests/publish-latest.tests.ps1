@@ -302,6 +302,7 @@ try {
   Assert-Command $patchCommands 'install --include=dev --ignore-scripts'
   Assert-Command $patchCommands 'test'
   Assert-Command $patchCommands 'run build'
+  Assert-True ([array]::IndexOf($patchCommands, 'run build') -lt [array]::IndexOf($patchCommands, 'test')) 'release must build before tests inspect dist'
   Assert-Command $patchCommands 'run verify:dist -w packages/core'
   # The brand gate is the machine form of "no legacy brand ships"; asserting it in
   # both dry-run scenarios is what stops it from being quietly lifted back out of
@@ -531,6 +532,10 @@ try {
 } finally {
   foreach ($fixture in $fixtures) {
     if ($fixture -and (Test-Path -LiteralPath $fixture.Base)) {
+      $resolvedBase = (Resolve-Path -LiteralPath $fixture.Base).Path
+      $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+      Assert-True ($resolvedBase.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -and
+        [IO.Path]::GetFileName($resolvedBase) -match '^aragon release test [0-9a-f]{32}$') 'refusing to remove a path outside the release fixtures'
       Remove-Item -LiteralPath $fixture.Base -Recurse -Force
     }
   }

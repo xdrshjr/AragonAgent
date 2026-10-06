@@ -21,7 +21,7 @@ export const LOGO_ART: readonly string[] = [
 
 export const LOGO_ART_WIDTH = 52;
 
-export type HeaderVariant = 'art' | 'banner' | 'bar' | 'mini';
+export type HeaderVariant = 'bar' | 'mini';
 /** How the one-off opening wordmark renders inside the viewport (§4.2). */
 export type OpenerVariant = 'art' | 'banner' | 'none';
 
@@ -37,22 +37,6 @@ const ART_MIN_COLS = LOGO_ART_WIDTH + 4;
 const BANNER_MIN_COLS = 48;
 const BAR_MIN_COLS = 40;
 
-/**
- * Pick the header tier (spec §4.2).
- *
- * `cols` is the only input, and that is the point. The old signature also took
- * `empty` and `rows` and could return `art`, so the brand region was 8 rows tall
- * on an empty session and 1 row afterwards: sending the first message made the
- * viewport jump by 7 rows, and widening a 27-row terminal to 28 rows made the
- * visible content SHRINK. A constant-height brand bar removes both, which is
- * what lets `budget.ts::viewportRows` be monotonic (A-3/A-4/A-9).
- *
- * The wordmark did not disappear — it moved into the viewport as
- * `SessionOpener`, where it scrolls away like any other content.
- *
- * NOTE: `Header` still renders `banner`; the inline path picks it directly at
- * `App.tsx` and does not call this function.
- */
 export function pickHeaderVariant(cols: number): HeaderVariant {
   return cols >= BAR_MIN_COLS ? 'bar' : 'mini';
 }

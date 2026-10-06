@@ -63,3 +63,12 @@ describe('thumbRange', () => {
     expect(low.start + low.size).toBe(10);
   });
 });
+
+
+describe('draggable thumb geometry', () => {
+  it('retains both endpoints at the one-row overflow boundary', () => {
+    expect(thumbRange(20, 21, 1, true)).toEqual({ start: 0, size: 19 });
+    expect(thumbRange(20, 21, 0, true)).toEqual({ start: 1, size: 19 });
+    expect(thumbRange(1, 2, 0, true)).toEqual({ start: 0, size: 1 });
+  });
+});

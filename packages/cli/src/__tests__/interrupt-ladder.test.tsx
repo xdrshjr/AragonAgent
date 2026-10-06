@@ -7,10 +7,11 @@
  * whatever the services flag says, and a user who turned background services off
  * has not asked for a less interruptible agent. A build that constructed the
  * supervisor only when the flag was on passes the `true` half and fails the
- * `false` half at rung two - which is exactly the shape of bug this parameter
+ * `false` half at the force-stop rung - which is exactly the shape of bug this parameter
  * exists to catch.
  */
 
+import type { PromptOptions, PromptOutcome } from '../agent/prompt-options.js';
 import { describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import React from 'react';
@@ -102,7 +103,7 @@ function snapshot(over: Partial<ServiceSnapshot> = {}): ServiceSnapshot {
 /**
  * The smallest controller `App` can mount against.
  *
- * `forceStop` DOES NOT EMIT `agent_end`, which is the whole simulation: rung two
+ * `forceStop` DOES NOT EMIT `agent_end`, which is the whole simulation: the force-stop rung
  * exists for a run the engine cannot unwind, so a fake that helpfully ended the
  * run would test the easy case and miss the one the screenshot was taken of.
  */
@@ -188,9 +189,11 @@ class LadderController {
     return Promise.resolve([]);
   }
 
-  prompt(text: string): Promise<void> {
+  promptOptions: PromptOptions[] = [];
+  prompt(text: string, options: PromptOptions = {}): Promise<PromptOutcome> {
+    this.promptOptions.push(options);
     this.promptCalls.push(text);
-    return Promise.resolve();
+    return Promise.resolve({ status: 'finished' });
   }
   steer(): void {}
   isRunning(): boolean {
@@ -323,7 +326,6 @@ function mount(controller: LadderController) {
     <App
       controller={controller as unknown as AgentController}
       version="0.0.0"
-      mode="inline"
       initialPrompt="go"
     />,
   );
@@ -337,7 +339,65 @@ function startWedgedRun(controller: LadderController): void {
 }
 
 describe.each([true, false])('the interrupt ladder (bash.background: %s)', (background) => {
-  it('AC-26: one Esc calls abort ONCE and names the second press', async () => {
+  it.each(['x', '\u001b[D', '\u000c'])('other input cancels confirmation (%s)', async (key) => {
+    const controller = new LadderController(background);
+    const { stdin, unmount } = mount(controller);
+    await delay(40);
+    startWedgedRun(controller);
+    await delay(40);
+    stdin.write(ESC);
+    await delay(20);
+    stdin.write(key);
+    await delay(20);
+    stdin.write(ESC);
+    await delay(40);
+    expect(controller.abortCalls).toBe(0);
+    unmount();
+  });
+
+  it('a slash popup owns its dismissal before the two interrupt events', async () => {
+    const controller = new LadderController(background);
+    const { stdin, unmount } = mount(controller);
+    await delay(40);
+    startWedgedRun(controller);
+    await delay(40);
+    stdin.write('/');
+    await delay(40);
+    stdin.write(ESC);
+    await delay(40);
+    stdin.write(ESC);
+    await delay(40);
+    expect(controller.abortCalls).toBe(0);
+    stdin.write(ESC);
+    await delay(40);
+    expect(controller.abortCalls).toBe(1);
+    expect(controller.forceStopCalls).toBe(0);
+    unmount();
+  });
+
+  it('a synchronous end during abort makes the immediate next ESC inert', async () => {
+    const controller = new LadderController(background);
+    const { stdin, lastFrame, unmount } = mount(controller);
+    await delay(40);
+    startWedgedRun(controller);
+    await delay(40);
+    vi.spyOn(controller, 'abort').mockImplementation(() => {
+      controller.abortCalls++;
+      controller.running = false;
+      controller.emit({ type: 'agent_end', messages: [] } as unknown as AgentEvent);
+    });
+    stdin.write(ESC);
+    await delay(20);
+    stdin.write(ESC);
+    stdin.write(ESC);
+    await delay(40);
+    expect(controller.abortCalls).toBe(1);
+    expect(controller.forceStopCalls).toBe(0);
+    expect(lastFrame()).not.toContain('Interrupt requested.');
+    unmount();
+  });
+
+  it('E-01: one Esc only confirms and names the second press', async () => {
     const controller = new LadderController(background);
     const { stdin, lastFrame, unmount } = mount(controller);
     await delay(40);
@@ -346,13 +406,13 @@ describe.each([true, false])('the interrupt ladder (bash.background: %s)', (back
 
     stdin.write(ESC);
     await delay(40);
-    expect(controller.abortCalls).toBe(1);
+    expect(controller.abortCalls).toBe(0);
     expect(controller.forceStopCalls).toBe(0);
-    expect(lastFrame() ?? '').toContain('Esc again to force-stop');
+    expect(lastFrame() ?? '').toContain('Press Esc again within 1.5s to interrupt');
     unmount();
   });
 
-  it('AC-27: a second Esc force-stops and the view reads `idle` - with NO agent_end', async () => {
+  it('AC-27: a third Esc force-stops and the view reads `idle` - with NO agent_end', async () => {
     // THE WEDGED-ENGINE SIMULATION. `forceStop` on the fake emits nothing, so
     // the only thing that can return the view to idle is the App's own
     // unconditional local `runEnd` - which is the belt-and-braces half of D-10.
@@ -365,6 +425,8 @@ describe.each([true, false])('the interrupt ladder (bash.background: %s)', (back
     stdin.write(ESC);
     await delay(40);
     stdin.write(ESC);
+    await delay(20);
+    stdin.write(ESC);
     await delay(60);
 
     expect(controller.forceStopCalls).toBe(1);
@@ -373,9 +435,8 @@ describe.each([true, false])('the interrupt ladder (bash.background: %s)', (back
   });
 
   it('AC-28: a second Esc AFTER the run ended does not force-stop', async () => {
-    // R-9: rung two only fires while the run is STILL running after rung one,
-    // i.e. only when the first press provably failed. In every healthy run the
-    // second press lands on the idle branch and does nothing.
+    // Natural completion clears confirmation synchronously, so a later Esc
+    // cannot interrupt or force-stop the run that already ended.
     const controller = new LadderController(background);
     const { stdin, unmount } = mount(controller);
     await delay(40);
@@ -414,6 +475,8 @@ describe.each([true, false])('the interrupt ladder (bash.background: %s)', (back
     stdin.write(ESC);
     await delay(20);
     stdin.write(ESC);
+    await delay(20);
+    stdin.write(ESC);
     await delay(60);
 
     stdin.write('next message');
@@ -428,7 +491,7 @@ describe.each([true, false])('the interrupt ladder (bash.background: %s)', (back
   });
 
   it('AC-36 (P1-7): engine events AFTER a force-stop leave the view idle', async () => {
-    // Between rung two and the engine actually unwinding, `turn_start` and
+    // Between force-stop and the engine actually unwinding, `turn_start` and
     // `agent_end` still arrive - and `turnStart` sets `status: 'running'` again,
     // so without the generation guard the view bounces straight back out of the
     // `idle` AC-27 checked one frame earlier.
@@ -437,6 +500,8 @@ describe.each([true, false])('the interrupt ladder (bash.background: %s)', (back
     await delay(40);
     startWedgedRun(controller);
     await delay(40);
+    stdin.write(ESC);
+    await delay(20);
     stdin.write(ESC);
     await delay(20);
     stdin.write(ESC);
@@ -483,7 +548,7 @@ describe.each([true, false])('the interrupt ladder (bash.background: %s)', (back
 describe('AC-43 (P1-4): the hint row never loses its exit affordance', () => {
   const glyphs = pickGlyphs({ colorLevel: 3, unicode: true });
 
-  it('the running row with zero services is byte-identical to today', () => {
+  it('the running row names double-Esc interruption and exit', () => {
     const row = hintTextForTest({
       running: true,
       submitCount: 0,
@@ -493,13 +558,13 @@ describe('AC-43 (P1-4): the hint row never loses its exit affordance', () => {
       services: 0,
     });
     expect(row).toBe(
-      [`${glyphs.enterKey} steer`, 'esc abort', `ctrl+c${glyphs.times}2 exit`].join(
+      [`${glyphs.enterKey} steer`, `esc${glyphs.times}2 interrupt`, `ctrl+c${glyphs.times}2 exit`].join(
         ` ${glyphs.midDot} `,
       ),
     );
   });
 
-  it('the running row with two services names abort, stop AND exit', () => {
+  it('the running row with two services names interrupt, stop AND exit', () => {
     // v1 replaced the exit clause with `ctrl+c stop 2`, deleting the only
     // visible way to quit at exactly the moment Ctrl+C stops meaning "quit" -
     // on the screen a user reaches when something has already gone wrong.
@@ -511,13 +576,10 @@ describe('AC-43 (P1-4): the hint row never loses its exit affordance', () => {
       toggleKey: 'shift+tab',
       services: 2,
     });
-    expect(row).toContain('esc abort');
+    expect(row).toContain(`esc${glyphs.times}2 interrupt`);
     expect(row).toContain('ctrl+c stop 2');
     expect(row).toContain('exit');
-    // Rung two is NAMED: the whole point of the ladder is that the first press
-    // can fail, and a user who does not know there is a second one is left
-    // exactly where the reported screenshot left them.
-    expect(row).toContain('force');
+    expect(row).toContain('interrupt');
   });
 
   it('the idle row gains a leading stop clause and keeps it when FADED', () => {

@@ -51,7 +51,6 @@ function Harness({ entries }: { entries: Entry[] }): React.ReactElement {
         thinkingVisible
         reducedMotion
         density="compact"
-        mode="fullscreen"
         theme={THEME}
         caps={CAPS}
         windowSize={1000}
@@ -104,10 +103,9 @@ describe('the EntryView comparator', () => {
     thinkingVisible: true,
     reducedMotion: false,
     density: 'compact' as const,
-    mode: 'fullscreen' as const,
+
     theme: THEME,
     caps: CAPS,
-    liveClampRows: undefined,
   };
 
   it('skips a re-render when every prop is identical', () => {
@@ -130,10 +128,6 @@ describe('the EntryView comparator', () => {
     expect(compare(base, { ...base, thinkingVisible: false })).toBe(false);
     expect(compare(base, { ...base, reducedMotion: true })).toBe(false);
     expect(compare(base, { ...base, density: 'comfortable' })).toBe(false);
-    // `mode` decides whether the collapsed thinking marker offers `ctrl+t`
-    // (D-16), so it changes rendered output and must break the boundary.
-    expect(compare(base, { ...base, mode: 'inline' })).toBe(false);
-    expect(compare(base, { ...base, liveClampRows: 8 })).toBe(false);
     expect(compare(base, { ...base, theme: getTheme('warm', CAPS) })).toBe(false);
     expect(compare(base, { ...base, caps: { colorLevel: 0, unicode: false } })).toBe(false);
   });

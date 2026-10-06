@@ -11,7 +11,7 @@
 import { describe, expect, it } from 'vitest';
 import React from 'react';
 import { render } from 'ink-testing-library';
-import { Transcript, TranscriptList } from '../ui/Transcript.js';
+import { TranscriptList } from '../ui/Transcript.js';
 import { ViewportGeometryContext } from '../ui/layout/viewport-geometry.js';
 import { STALL_AFTER_MS } from '../tools/tool-output-store.js';
 import { getTheme } from '../ui/theme.js';
@@ -62,7 +62,6 @@ function fullscreen(
         thinkingVisible={false}
         reducedMotion
         density="compact"
-        mode="fullscreen"
         nowSec={opts.nowSec}
         theme={THEME}
         caps={CAPS}
@@ -71,26 +70,6 @@ function fullscreen(
         heights={PASSTHROUGH}
       />
     </ViewportGeometryContext.Provider>,
-  );
-  const frame = strip(lastFrame() ?? '');
-  unmount();
-  return frame;
-}
-
-/** Inline render, which is where `liveClampRows` applies (AC-36). */
-function inline(entries: Entry[], nowSec?: number): string {
-  const { lastFrame, unmount } = render(
-    <Transcript
-      entries={entries}
-      expandedToolIds={{}}
-      thinkingVisible={false}
-      reducedMotion
-      density="compact"
-      mode="inline"
-      nowSec={nowSec}
-      theme={THEME}
-      caps={CAPS}
-    />,
   );
   const frame = strip(lastFrame() ?? '');
   unmount();
@@ -215,39 +194,5 @@ describe('Ctrl+O is inert while live (D-26 / AC-29)', () => {
     expect(frame).toContain('PASS  18 tests');
     expect(frame).not.toContain('a stale row');
     expect(frame).not.toContain('(running)');
-  });
-});
-
-/**
- * AC-36 — inline honours `liveClampRows`, and the card's FLOOR is 2 rows
- * (header + the unconditional footer) rather than 1 (P2-7).
- *
- * The bound still holds for a reason already in the tree: `liveClampRows`
- * subtracts one row per live entry precisely to pay for a marker row, and a
- * clamped preview card already draws its own `+N lines` footer.
- */
-describe('inline mode (AC-36)', () => {
-  it('slices the tail rather than drawing all of it', () => {
-    const entries: Entry[] = [
-      { id: 'e0', kind: 'notice', level: 'info', text: 'settled' },
-      tool({ live: twentyRows, liveSeq: 20 }),
-    ];
-    const frame = inline(entries);
-    // A trailing-digit guard, because `output line 1` is a prefix of
-    // `output line 19` and a plain `includes` would count nine rows for eight.
-    const shown = twentyRows.filter((_, i) => new RegExp(`output line ${i}(?!\\d)`).test(frame));
-    expect(shown.length).toBeGreaterThan(0);
-    expect(shown.length).toBeLessThanOrEqual(8);
-    // Whatever the clamp allows, it is still the LAST rows.
-    expect(frame).toContain('output line 19');
-  });
-
-  it('keeps header and footer even at the tightest clamp', () => {
-    const many: Entry[] = Array.from({ length: 12 }, (_, i) =>
-      tool({ id: `t${i}`, toolCallId: `c${i}`, live: [`row ${i}`], liveSeq: 1 }),
-    );
-    const frame = inline(many);
-    expect(frame).toContain('bash');
-    expect(frame).toContain('(running)');
   });
 });

@@ -362,8 +362,6 @@ below works there too, in either position — `aragon --model m exec "…"` and
 | `--hints` / `--no-hints` | Show or hide the composer hint row |
 | `--show-thinking` / `--no-show-thinking` | Draw the model's reasoning blocks in the transcript. Off by default — see [What you see while it runs](#what-you-see-while-it-runs) |
 | `--live-tool-output` / `--no-live-tool-output` | Show a bounded tail of a running command's output on its card. **On** by default — see [What you see while it runs](#what-you-see-while-it-runs) |
-| `--fullscreen` | Force the full-screen TUI, overriding the automatic downgrades |
-| `--no-fullscreen` | Force the inline renderer (the 0.2.0 behavior) |
 | `--no-exit-transcript` | Do not replay the session summary after exiting |
 | `--plan` / `--no-plan` | Start the session in PLAN mode (read-only research + review) or force BUILD |
 | `--team` / `--no-team` | Enable or disable team subagents. `--no-team` does not register the `task` tool at all |
@@ -438,12 +436,13 @@ completes, `Up` / `Down` moves the selection, `Esc` closes it.
 | `Alt+Enter` / `Shift+Enter` | Insert a newline |
 | `Shift+Tab` | Toggle **plan mode** (`BUILD` <-> `PLAN`). Equivalent: `/plan`. On Windows this needs a console flag Node < 22.17 does not set; aragon sets it at startup — see [Requirements](#requirements) |
 | `Ctrl+P` | The same toggle, over a channel no Windows console can swallow. Use it if `Shift+Tab` does nothing |
-| `Esc` | Abort the run / close an overlay / close a popup |
-| `Esc` ×2 | **Force-stop** a run that did not abort: kills the shell command it is blocked on and returns the view to `idle`. The second press only does anything while the run is *still* running, so in a healthy run it is a no-op |
+| `Esc` | Close an overlay or popup; otherwise ask for interruption confirmation. While idle, cancel pending auto-continuation |
+| `Esc` ×2 | Interrupt the run when pressed within 1.5 seconds. Other keys or closing a menu cancel the first press |
+| `Esc` again after interruption | **Force-stop** a run that is still stopping, kill foreground shell commands and return to `idle`; background services remain running |
 | `Ctrl+C` | Stop the background **services** the agent started, when there are any. It does not arm exit |
 | `Ctrl+C` ×2 | Exit (first press warns), once no services are running |
-| `Ctrl+L` | Redraw the frame (clear the screen in inline mode) |
-| `Ctrl+T` | Show / hide thinking (**off by default**). In inline mode it applies to the live entry and everything drawn after it — settled entries are already in your terminal's scrollback and cannot be repainted |
+| `Ctrl+L` | Redraw the frame |
+| `Ctrl+T` | Show / hide thinking (**off by default**) for the entire session |
 | `Ctrl+O` | Expand / collapse the most recent tool, team, compaction or **service** card — including a diff or a service's log tail |
 | `PgUp` / `PgDn` | Scroll the transcript a page (full-screen mode) |
 | `Shift+↑` / `Shift+↓` | Scroll the transcript a line (full-screen mode) |
@@ -460,10 +459,11 @@ completes, `Up` / `Down` moves the selection, `Esc` closes it.
 In **full-screen mode** the transcript is scrolled by the app itself: `PgUp` /
 `PgDn` and `Shift+↑` / `Shift+↓`. While pinned to the bottom the viewport follows
 new output automatically; once you scroll away the status bar shows `↑N`, a slim
-rail on the right edge shows where you are, and a hint counts the lines below
-you. Submitting a message always re-pins to the newest output. In **inline mode**
-(`--no-fullscreen`) history lives in your terminal's native scrollback, printed
-once via Ink `<Static>`.
+scrollbar occupies the terminal's last column (including 40-column windows). Drag its thumb
+to move through history, or click the track to move one page. Messages, the team panel
+and the input area scroll together; typing or editing returns to the input without
+losing the draft. The fixed status row shows `PgDn down` while reading history.
+`PgDn` moves one page down; editing or submitting returns directly to the end.
 
 **The mouse wheel is a viewport gesture and nothing else.** Wherever the pointer
 happens to be — including right on top of the composer — a notch scrolls the
@@ -474,9 +474,10 @@ open. It never touches your draft, and it never recalls prompt history: that is
 Two things follow from the app owning the mouse, and they are worth knowing
 before you meet them:
 
-- **Selecting text now needs `Shift`+drag** in most terminals. That is the
-  terminal's convention for "an application is tracking the mouse", not
-  something this CLI can opt out of while still reading wheel events.
+- **Dragging text selects and copies it when mouse selection is enabled.**
+  Dragging the last-column scrollbar scrolls instead. `--no-mouse-select` disables
+  text selection while preserving scrollbar dragging. `Shift`+drag uses the
+  terminal's native selection on hosts that support that convention.
 - **`tmux` with `mouse on` keeps the wheel for itself**, so the app never sees
   it. `set -g mouse off` hands it back.
 - **A Windows console on Node below 22.17.0 cannot report the wheel at all**,
@@ -512,7 +513,7 @@ Density and hints are settable the same three ways: `--compact` / `--no-hints`
 for one run, `aragon config set density compact` / `aragon config set hints false`
 to persist. The composer hint row also shortens to `? help` on its own after a
 few sessions — except while a run is in progress, when it always spells out
-`esc abort` in full.
+`esc ×2 interrupt` in full.
 
 ## What you see while it runs
 
@@ -533,18 +534,21 @@ session, `showThinking: true` (or `--show-thinking`, or `ARAGON_SHOW_THINKING=1`
 shows them permanently, and `/settings` has a **Show thinking** row next to
 **Thinking**.
 
-In **inline** mode (`--no-fullscreen`) the marker reads `✱ thought for 12s` with
-no key hint, and the toast on `Ctrl+T` says `Thinking shown for new output.`
-Settled entries there have already been printed into your terminal's own
-scrollback, which cannot be repainted — so the key applies to the live entry and
-to everything drawn after it, and the row does not offer what it cannot deliver.
-
-**There is something to look at while it thinks.** One row above the composer,
-for as long as a run is in flight:
+**There is something to look at while it thinks.** One row directly above the
+input box, for as long as a run is in flight, with the keys that act on the run
+beside it (it takes the place of the idle hint row below the box, so starting a
+run never moves the layout):
 
 ```
-  ⠋ Percolating…
+  ⠋ Percolating… · ⏎ steer · esc×2 interrupt · ctrl+c×2 exit            PLAN
 ```
+
+The row scrolls with the input box. On a narrow terminal whole clauses are dropped
+from the end (`exit` first) and only the phrase is shortened with an ellipsis, so
+`steer` and `interrupt` are never cut mid-word. When you scroll history until the
+input box is out of view, the animation moves to the fixed row at the bottom, so
+there is always exactly one spinner on screen. Terminals shorter than 20 rows, and
+`--no-hints`, keep the animation on that fixed row instead.
 
 The word rotates every four seconds. It carries no clock and no token count on
 purpose: the status bar one row below already has both, under the same
@@ -624,24 +628,39 @@ near-identical added ones.
 
 - Your previous shell output is **covered, not erased**, and returns untouched
   when you exit. Nothing in your scrollback is destroyed.
-- The frame is fixed at `rows - 1` tall, which is what keeps the composer and the
-  status bar at the bottom of the screen even on an empty session.
+- The frame is fixed at `rows - 1` tall. The header, activity row and status bar
+  stay visible. The input belongs to the scrolling document; short sessions fill
+  the space above it, and browsing history moves it out of view.
 
 On exit the session is replayed into the normal buffer as plain text so the
 conversation survives leaving the screen (`--no-exit-transcript` opts out;
 `/save` still exports the full JSON).
 
-It downgrades to the inline renderer automatically when stdout is not a TTY,
-`TERM=dumb`, a CI environment variable is set, or the terminal is under 12 rows
-or 40 columns. `--fullscreen` overrides all of those except the non-TTY check —
-writing screen-control sequences into a pipe or a redirected file is never safe.
-`--no-fullscreen`, `ARAGON_FULLSCREEN=0`, or `aragon config set fullscreen false`
-opt out permanently.
+Interactive sessions always use the full-screen TUI, including under `TERM=dumb`
+or CI. Windows smaller than 40 columns or 12 rows show a size notice and recover
+when enlarged, preserving the session and draft.
 
-The terminal's native scrollback and mouse wheel do not scroll the transcript in
-this mode, and mouse tracking is deliberately left off because enabling it costs
-text selection and copy in most terminals. If a crash ever strands your terminal
-on the alternate screen, `reset` restores it.
+The layout switches `--fullscreen`, `--no-fullscreen`, `ARAGON_FULLSCREEN` and
+`fullscreen` configuration have been removed. Old command-line flags are errors;
+old config fields and environment variables are ignored.
+
+Interactive screens require both stdin and stdout to be TTYs. `aragon config`
+without a TTY exits with code 2; use `aragon config list` or `aragon config set`.
+`-p`, `exec`, piped input and prompt-based redirected output retain their
+headless behavior and never enter the alternate screen.
+
+The alternate screen uses an application scrollbar rather than the terminal's
+native scrollback. Windows Terminal and conhost have different mouse/VT capabilities;
+the PowerShell version alone does not determine dragging support. If the host cannot
+deliver SGR mouse reports, the scrollbar remains visible and keyboard scrolling works.
+The differential renderer never erases the last column: a row that already fills the
+terminal width is repainted without a trailing erase-to-end-of-line, which on Windows
+console hosts would otherwise wipe the scrollbar cell on every redrawn row. `/perf`
+prints a `scrollbar:` line (column, mouse state, whether a full frame was confirmed,
+thumb position, glyph tier) to tell "cannot see it" from "cannot drag it".
+`--no-mouse` provides that keyboard-only path; `--no-diff-render` disables output
+differencing without disabling the scrollbar. A mid-session resize below 40 columns
+or 12 rows displays a size hint and preserves the draft for restoration.
 
 ## Render performance
 
@@ -684,13 +703,6 @@ mode       fullscreen  -  viewport 44 rows  -  offset 0
 rung. `--no-render-governor` (or `renderGovernor: false`, or
 `ARAGON_RENDER_GOVERNOR=0`) turns the adaptation off entirely; the output is
 identical, just heavier under load.
-
-**Inline mode** (`--no-fullscreen`, `TERM=dumb`, CI, a very small terminal) gets
-one extra guarantee. Ink repaints the *entire session history* on every frame
-once a live entry grows taller than the terminal, which is a genuine freeze
-rather than a slowdown. The live region is now clamped to stay below that
-threshold, with a `... N earlier lines` marker naming what is deferred; the
-entry prints **in full** into your scrollback the moment it finishes.
 
 ## Plan mode
 
@@ -742,15 +754,14 @@ assumptions rather than to retry.
 
 **Dismissing a plan is not how you stop.** `Esc` on a plan card asks for a
 *better* plan — the agent is told to refine it and submit again — so a model that
-keeps submitting keeps getting cards. To stop the run itself, **press `Esc`
-twice**: the first closes the card, the second aborts the run. `Ctrl+C` twice
+keeps submitting keeps getting cards. To stop the run itself, close the card with `Esc`, then **press `Esc`
+twice within 1.5 seconds** to interrupt. Closing the card never counts as the first press. `Ctrl+C` twice
 still exits the session outright.
 
 ### Where the mode is shown
 
 The status bar always names a non-default mode (`PLAN`, or `PLAN → BUILD` while
-a switch is pending), including on short terminals, with `--no-hints`, and in
-inline mode. The composer additionally shows a `PLAN` chip on its hint row and
+a switch is pending), including on short terminals and with `--no-hints`. The composer additionally shows a `PLAN` chip on its hint row and
 tints its border, where there is room for it.
 
 ### Switching mid-run
@@ -821,8 +832,8 @@ for a question, or for a search with no work attached — and a one-item list
 against an empty plan is refused outright. A session that never plans has
 byte-identical layout to a build without this feature.
 
-**The list is a projection of what the model believes**, so nothing that does
-not also tell the model may change it — except you, saying so:
+**The list shows the current task's plan.** Starting a new task or explicitly
+clearing the list removes this live view while preserving conversation history:
 
 - `/clear` and `/todo clear` take the plan off the screen. Neither touches the
   conversation, so the model still knows what it was doing and its next update
@@ -831,10 +842,14 @@ not also tell the model may change it — except you, saying so:
 - `/save` writes the list and `/resume` restores it. Resuming a session that has
   no list clears the current one, rather than leaving a plan on screen whose
   conversation has just been replaced.
-- A finished plan is dropped at the START of your next message, so you still get
-  to see `7/7 done`. An unfinished one survives "continue" / "now do the rest",
-  and is dropped after three unrelated turns rather than holding part of the
-  screen for the rest of the session.
+- A normal new task clears the previous plan, including unfinished steps, only
+  when it starts successfully. The completed run keeps its final plan visible.
+  `/todo continue` and automatic continuation preserve the plan and its timestamp;
+  ordinary text such as "continue" starts a new task. Steering keeps the current
+  plan. Until a valid new `todo_write`, the rail and count stay hidden.
+  Startup failure or cancellation keeps the old plan. History cards remain available.
+- During a live run, interrupt before `/reset` or `/resume`. A conversation switch
+  while startup is waiting cancels that pending request and returns the view to idle.
 
 ### When a run ends with steps left
 
@@ -857,7 +872,7 @@ setting:
 
 `Esc` during the grace window cancels; so does typing anything. A run that ended
 with an **error** never auto-continues in any mode — you get a warning instead.
-A run **you** aborted with `Esc` now says nothing at all, where it used to
+A run **you** interrupted with two `Esc` presses now says nothing at all, where it used to
 report what you had just interrupted.
 
 `/todo follow off` is the third mode: no notice, no continuation, silence.
@@ -1007,7 +1022,8 @@ than features. `bash` now always settles: it returns when the process exits
 rather than when its output stream closes, so a command that detaches a
 grandchild can no longer leave the turn pending forever, and it is handed a
 closed stdin so a command that prompts fails instead of blocking on a read
-nobody will answer. And `Esc` twice always force-stops, whatever the flag says.
+nobody will answer. Two `Esc` presses request interruption; another press force-stops a stuck run,
+whatever the flag says.
 
 ## Team subagents
 
@@ -1079,7 +1095,7 @@ children's tokens are folded into the `[usage]` footer.
   `debug`. A `team_send` subject is recorded, never its body; a subagent's brief
   and summary only at `trace`.
 
-**`Esc`** aborts the whole dispatch — every subagent within a couple of seconds
+**Two `Esc` presses within 1.5 seconds** abort the whole dispatch — every subagent within a couple of seconds
 — and the report comes back marked `ABORTED` with whatever was finished.
 
 ## Fast model tier
@@ -1796,7 +1812,7 @@ env / `.env` → CLI flags**.
   `ARAGON_CONTEXT_WINDOW` (a number, or `auto`; the denominator the context
   gauge measures against),
   `ARAGON_THEME`,
-  `ARAGON_FULLSCREEN`, `ARAGON_PLAN` (`1` starts in plan mode),
+  `ARAGON_PLAN` (`1` starts in plan mode),
   `ARAGON_TEAM` (`0` disables team subagents), `ARAGON_TEAM_MAX` (fan-out width),
   `ARAGON_TODO` (`0` disables todo planning entirely),
   `ARAGON_TODO_FOLLOW` (`notify` / `auto` / `off`),
@@ -1825,7 +1841,6 @@ env / `.env` → CLI flags**.
 | `contextWindow` | `null` | The window the context gauge measures against, clamped to `[8000, 5000000]`. `null` means **auto** — the built-in model table, or a fabricated 128000 for a model it has never seen. Set it when the gauge shows `?` on the denominator. See [The context gauge](#the-context-gauge). |
 | `showThinking` | `false` | Draw the reasoning the model returns. `thinkingLevel` is the effort the provider is asked to **spend**; this is whether the terminal **shows** it. Off by default: a settled turn that thought leaves one muted `thought for 12s` row in its place, so nothing is hidden silently. |
 | `liveToolOutput` | `true` | Draw up to eight sanitised rows of a **running** tool's output on its card, plus a `no output for Ns` row when the child goes quiet. On by default, unlike `showThinking`: this ADDS the information a long `bash` call otherwise hides, and its cost is bounded by construction — eight rows per call, sixteen calls, whatever the command emits. Turn it off and the card is a single `running` row again, with no store allocated and no recorder attached. |
-| `fullscreen` | `true` | Use the full-screen TUI (still subject to the automatic downgrades). Setting it to `false` opts out permanently; leaving it `true` is *not* a force — only `--fullscreen` / `ARAGON_FULLSCREEN=1` override the heuristics. |
 | `exitTranscript` | `true` | Replay a plain-text session summary after exiting (full-screen only). |
 | `transcriptWindow` | `1000` | How far back you can scroll, clamped to `[50, 20000]`. Entries beyond it collapse into one line. It is no longer a rendering budget: the viewport is virtualised, so off-screen entries are not laid out at all. |
 | `transcriptRetain` | `1000` | Entries kept in memory, clamped to `[200, 20000]` and raised to `transcriptWindow` if the two conflict — with a startup notice saying so, because retaining less than you can scroll to would otherwise make part of the horizon quietly unreachable. Older entries are dropped, counted, and reported by `/perf` and by the exit replay. |
@@ -1843,7 +1858,7 @@ env / `.env` → CLI flags**.
 | `team.dispatchTimeoutMs` | `900000` | The whole dispatch's wall clock, clamped to `[60000, 3600000]`. |
 | `team.maxTurnsPerSubagent` | `24` | Runaway-loop cap, clamped to `[4, 100]`. A subagent stopped here is reported as `stopped: turn cap reached`, with whatever it had produced. |
 | `todo.enabled` | `true` | Master switch for todo planning. `false` means the `todo_write` tool is never registered — `/todo on` in such a session saves the setting for next launch and says so, rather than advertising a tool that is not there. |
-| `todo.panel` | `true` | Render the right-hand rail (and, in inline mode, the one-row plan strip). Independent of `todo.enabled` on purpose: a screen-reader user wants the planning discipline without the column, and the system prompt varies one sentence accordingly. |
+| `todo.panel` | `true` | Render the right-hand rail. Independent of `todo.enabled` on purpose: a screen-reader user wants the planning discipline without the column, and the system prompt varies one sentence accordingly. |
 | `todo.followThrough` | `"notify"` | What happens when a run ends with steps left. `notify` says so and stops; `auto` continues the plan after a 3-second grace window, bounded by two structural limits (one fruitless attempt, 25 continuations per plan) that are deliberately **not** settings; `off` is silent. An unrecognized value falls back to `notify`. |
 | `retry.enabled` | `true` | Retry a failed provider call at all. Unlike `team.enabled` / `todo.enabled` this decides nothing at construction — the policy lives on the provider registry, so `/retry on` / `/retry off` takes effect **in the running session**, subagents included. |
 | `retry.maxRetries` | `10` | Retries **after** the first attempt, clamped to `[0, 20]`. `0` is the kill switch and is a real value here, not a typo for the default. The 20 is a hard ceiling enforced twice — on the config value and again inside the engine — so hand-editing this file cannot raise it. |
@@ -2234,7 +2249,7 @@ node packages/cli/dist/cli.js --version
   shebang; `node packages/cli/dist/cli.js --version` prints the version.
 - `npm pack -w packages/cli --dry-run --json` lists `dist/cli.js` under `files`.
 - With `ANTHROPIC_API_KEY` set: `aragon` streams a reply, a tool card renders,
-  `Esc` aborts mid-run, `/model` switches models, `/settings` saves a key,
+  `Esc` twice interrupts mid-run, `/model` switches models, `/settings` saves a key,
   `Ctrl+C` twice exits.
 - `echo "list files" | node dist/cli.js -p` prints an answer and exits `0`.
 - A missing/invalid key produces a visible, actionable message (never a blank
@@ -2252,7 +2267,7 @@ node packages/cli/dist/cli.js --version
   nothing is truncated to a single line.
 - `--no-hints` on a 20-row terminal in plan mode - the status bar still says
   `PLAN` with no chip on screen.
-- Dismiss a plan card with `Esc`, let the agent resubmit, then press `Esc` twice:
+- Dismiss a plan card with `Esc`, let the agent resubmit, then close the card and press `Esc` twice within 1.5 seconds:
   the run aborts and the session returns to an idle prompt. Do this one BY HAND
   as well as in a test - the point of the check is whether the exit is findable,
   which no assertion can tell you.
@@ -2260,3 +2275,18 @@ node packages/cli/dist/cli.js --version
 ## License
 
 MIT
+
+
+### 输入光标与任务切换验收
+
+输入获得应用内焦点时，光标每 500 ms 明暗切换；编辑、移动和恢复焦点后立即亮起。
+`reducedMotion` 开启时保持常亮，弹层打开时暂停。fullscreen 和 inline 使用相同规则。
+单色终端用等列宽的下划线标记，原文相同时改用 `^`，零宽附加码点保留以兼容 Ink。
+标记不进入草稿、历史或提交文本；屏幕选择复制会包含当时可见的标记。
+UTF-16 编辑和 ZWJ/组合字形仍有既有限制，本次修复保证视觉光标定位及相位布局稳定。
+
+在 Windows Terminal/PowerShell 与 POSIX TTY 分别验证两种模式，窗口覆盖
+120×30、100×20、80×24、60×16：观察空输入、英文、中文、emoji、多行和组合附加符至少三个周期。
+检查流式输出不阻止闪烁；单 ESC 不停止任务，两击中断，卡住时第三击强停；菜单关闭不计入两击。
+任务结束后保留最终计划，下一条普通消息启动时旧计划消失，新有效计划出现才恢复；显式续跑保留计划。
+强停后立即提交，在等待中双 ESC 取消，旧引擎退出后不得自行执行已取消的消息。

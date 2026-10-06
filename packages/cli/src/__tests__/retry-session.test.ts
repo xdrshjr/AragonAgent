@@ -21,7 +21,6 @@ process.env.ARAGON_HOME = TMP;
 const { saveSession, loadSession, normalizeLoadedEntries } = await import(
   '../session/persist.js'
 );
-const { computeSettledCount } = await import('../ui/Transcript.js');
 type Entry = import('../agent/reducer.js').Entry;
 
 const SESSION = join(TMP, 'retry-session.json');
@@ -86,26 +85,6 @@ describe('a card saved mid-wait resumes as interrupted (AC-26)', () => {
       const [normalized] = normalizeLoadedEntries([original]);
       expect(normalized, phase).toEqual(original);
     }
-  });
-
-  it('the restored transcript does not pin the settled boundary', () => {
-    // The second half of R-10, and the one a user only notices as a session that
-    // gets slower the longer it runs.
-    const entries: Entry[] = [
-      { id: 'e1', kind: 'user', text: 'hello' },
-      card('waiting', 1_700_000_030_000),
-      { id: 'e4', kind: 'notice', level: 'info', text: 'resumed' },
-    ];
-    saveSession(SESSION, {
-      model: { providerId: 'anthropic', modelId: 'claude' },
-      messages: [],
-      entries,
-      todos: [],
-    });
-    const loaded = loadSession(SESSION);
-    const settled = computeSettledCount(loaded.entries, {});
-    // Everything but the live tail is settled, i.e. the card is in `<Static>`.
-    expect(settled).toBe(loaded.entries.length - 1);
   });
 
   it('the card round-trips through JSON without a format change', () => {

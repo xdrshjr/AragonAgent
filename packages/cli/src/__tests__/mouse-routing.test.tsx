@@ -209,11 +209,13 @@ function mountRouter(initialOverlay: Overlay | null = null) {
   const mouse = fakeMouseSource();
   const calls: HostCalls = { scroll: [], overlayScroll: [] };
   let overlay: Overlay | null = initialOverlay;
+  let captured = false;
   let clear = (): void => {};
 
   function Host(): React.ReactElement {
     const routing = useWheelRouting({
       mouseSource: mouse.source,
+      isPointerCaptured: () => captured,
       getOverlay: () => overlay,
       onScroll: (kind, repeat) => calls.scroll.push({ kind, repeat }),
       onOverlayScroll: (delta) => calls.overlayScroll.push(delta),
@@ -228,6 +230,7 @@ function mountRouter(initialOverlay: Overlay | null = null) {
     calls,
     waitUntilSubscribed: () =>
       vi.waitFor(() => expect(mouse.subscriberCount()).toBe(1)),
+    setCaptured: (next: boolean) => { captured = next; },
     setOverlay: (next: Overlay | null) => {
       overlay = next;
     },
@@ -598,6 +601,7 @@ class FakeController {
   }
   abort(): void {}
   steer(): void {}
+  isRunning(): boolean { return false; }
   prompt(text: string): Promise<void> {
     return this.onPrompt ? this.onPrompt(text) : Promise.resolve();
   }
@@ -732,7 +736,6 @@ function mountApp(
     <App
       controller={fc as unknown as AgentController}
       version="0.0.0"
-      mode="fullscreen"
       mouseSource={source}
       initialOverlay={extra.initialOverlay}
       initialPrompt={extra.initialPrompt}
@@ -862,6 +865,9 @@ describe('App (wheel routing end to end)', () => {
     const mouse = fakeMouseSource();
     const { lastFrame, unmount } = mountApp(mouse.source, { initialOverlay: 'help' });
     await delay(60);
+    // The separate interruption instructions push Wheel below the first page.
+    mouse.wheel('down', TRANSCRIPT_ROW);
+    await delay(60);
     expect(stripAnsi(lastFrame() ?? '')).toContain('Wheel');
     unmount();
   });
@@ -940,19 +946,6 @@ describe('first-run selection notice (§6.1)', () => {
     unmount();
   });
 
-  /**
-   * R-1, REACHED FOR THE FIRST TIME.
-   *
-   * §15's IF-9 recorded this suite as covering the notice's absence under
-   * "`--no-mouse`, inline, **or R-1 firing**". The first two were real; the
-   * third never was. `mouseSource` was derived from `wantMouse`, `wantMouse`
-   * never looked at whether the platform could report anything, and
-   * `tryCreateStdinFilter` returns `null` only when construction throws — so on
-   * a console where R-1 fires the source was PRESENT and this block's negative
-   * assertions were vacuous for that branch. The gate closes that: the harness
-   * below is `runInteractive`-shaped, so the case exercises the same expression
-   * `cli.tsx` evaluates rather than a restatement of it.
-   */
   it('never shows it when the platform cannot report at all (R-1 firing)', async () => {
     store.mouseNoticeVersion = 0;
     store.noticeSeenWrites.length = 0;
@@ -972,7 +965,6 @@ describe('first-run selection notice (§6.1)', () => {
         <App
           controller={fc as unknown as AgentController}
           version="0.0.0"
-          mode="fullscreen"
           mouseSource={mouseFilter?.source}
         />,
       );
@@ -1004,9 +996,6 @@ describe('first-run selection notice (§6.1)', () => {
   });
 
   it('never shows it when reporting is not actually in effect', async () => {
-    // Gated on the SOURCE, not on the config: a user on a terminal where R-1
-    // fires must not be told about a mode that is not running. `--no-mouse`
-    // and inline mode reach `App` the same way — with no `mouseSource` at all.
     store.mouseNoticeVersion = 0;
     store.noticeSeenWrites.length = 0;
     try {
@@ -1015,7 +1004,6 @@ describe('first-run selection notice (§6.1)', () => {
         <App
           controller={fc as unknown as AgentController}
           version="0.0.0"
-          mode="fullscreen"
         />,
       );
       await delay(80);
@@ -1050,7 +1038,7 @@ describe('Windows VT-input notice (R-1)', () => {
     // user's draft. A user who is not told that keeps pressing it and keeps
     // losing text. The two workarounds have to be here for the same reason —
     // this notice is the only place the affected user will ever be told them.
-    const text = vtInputDeadNotice('20.19.0', true);
+    const text = vtInputDeadNotice('20.19.0');
     expect(text).toContain('20.19.0'); // the version they are running
     expect(text).toContain('PLAIN TAB'); // what Shift+Tab actually becomes
     expect(text).toContain('draft'); // and what that costs them
@@ -1063,43 +1051,9 @@ describe('Windows VT-input notice (R-1)', () => {
     expect(text).not.toContain('PgUp');
   });
 
-  it('drops the wheel half inline, where the wheel is not ours to lose', () => {
-    // Inline never asks the console to report the wheel — `mode` is a conjunct
-    // of `cli.tsx::wantMouse` — so it keeps scrolling the terminal's own
-    // scrollback, and `Shift+Up` / `Shift+Down` live inside `App`'s
-    // `if (fullscreen)` branch and do nothing here. Saying otherwise would tell
-    // a user their working wheel is dead and then hand them an inert
-    // workaround: the same "advice about a mode that is not running" this
-    // notice exists to end, pointed the other way.
-    const text = vtInputDeadNotice('20.19.0', false);
-    expect(text).not.toContain('wheel');
-    expect(text).not.toContain('Shift+Up');
-    expect(text).not.toContain('Shift+Down');
-    // The half that IS mode-independent stays: the modifier dies inside libuv,
-    // far below anything this app chooses, so inline loses the draft the same
-    // way and needs the same replacement.
-    expect(text).toContain('20.19.0');
-    expect(text).toContain('PLAIN TAB');
-    expect(text).toContain('draft');
-    expect(text).toContain('/plan');
-    expect(text).toContain('22.17.0');
-  });
-
-  /**
-   * G1, the half of this notice that makes it worth replaying at all.
-   *
-   * BOTH BRANCHES, because the fallback key is the one piece of advice that does
-   * not depend on the render mode — and inline is where it matters most: that
-   * path renders no composer hint at all, so without this sentence its only
-   * remaining channel is a `/help` the user has to think to type.
-   *
-   * ORDER IS ASSERTED, not just presence. The key is one keystroke and `/plan`
-   * is four plus a return; a user who reads the first workaround and stops
-   * should have stopped on the cheaper one.
-   */
-  it('names the fallback key ahead of /plan in both branches', () => {
-    for (const fullscreen of [true, false]) {
-      const text = vtInputDeadNotice('20.19.0', fullscreen);
+  it('names the fallback key ahead of /plan', () => {
+    {
+      const text = vtInputDeadNotice('20.19.0');
       expect(text).toContain(MODE_TOGGLE_KEYS.fallback);
       expect(text.indexOf(MODE_TOGGLE_KEYS.fallback)).toBeLessThan(text.indexOf('/plan'));
       // The permanent fix stays alongside the workaround, in both branches.
@@ -1109,14 +1063,12 @@ describe('Windows VT-input notice (R-1)', () => {
 
   function mountWithWarning(
     warning?: { nodeVersion: string },
-    mode: 'fullscreen' | 'inline' = 'fullscreen',
   ) {
     const fc = new FakeController();
     return render(
       <App
         controller={fc as unknown as AgentController}
         version="0.0.0"
-        mode={mode}
         vtInputWarning={warning}
       />,
     );
@@ -1136,34 +1088,9 @@ describe('Windows VT-input notice (R-1)', () => {
       // wrapping path.
       expect(frame).toContain('20.19.0');
       expect(frame).toContain(THEME.symbols.warn);
-      // THE CONTROL for the inline case below, and a single word on purpose: a
-      // wrap boundary can only shave a character or two off the END of a line,
-      // so if `wheel` ever lands there this assertion goes red — loudly — while
-      // the inline negative would have gone quietly vacuous instead.
       expect(frame).toContain('wheel');
       // Row 2 of the migration matrix: showing it writes the CURRENT revision,
       // never a bare `true` — the gate compares against the constant.
-      expect(store.vtNoticeSeenWrites).toContain(VT_INPUT_NOTICE_VERSION);
-      unmount();
-    } finally {
-      store.vtInputNoticeVersion = VT_INPUT_NOTICE_VERSION;
-    }
-  });
-
-  it('threads the render mode through, so inline is told only about Shift+Tab', async () => {
-    // `App` must pass its OWN `fullscreen` down rather than assume it. Without
-    // this the builder could branch perfectly and every inline user would still
-    // read the full-screen text, because nothing else in the tree distinguishes
-    // the two.
-    store.mouseNoticeVersion = 99;
-    store.vtInputNoticeVersion = 0;
-    store.vtNoticeSeenWrites.length = 0;
-    try {
-      const { lastFrame, unmount } = mountWithWarning(AFFECTED, 'inline');
-      await delay(80);
-      const frame = stripAnsi(lastFrame() ?? '');
-      expect(frame).toContain('PLAIN'); // the notice did render
-      expect(frame).not.toContain('wheel'); // but not about a wheel that works
       expect(store.vtNoticeSeenWrites).toContain(VT_INPUT_NOTICE_VERSION);
       unmount();
     } finally {
@@ -1288,7 +1215,7 @@ describe('scroll indicator (§4.8)', () => {
   }
 
   it('reserves the rail at or above MIN_INDICATOR_COLS', async () => {
-    expect(MIN_INDICATOR_COLS).toBe(50);
+    expect(MIN_INDICATOR_COLS).toBe(40);
     const wide = renderViewport(80);
     await delay(60);
     const text = wide.frame();
@@ -1299,14 +1226,31 @@ describe('scroll indicator (§4.8)', () => {
     wide.unmount();
   });
 
-  it('renders no indicator column below MIN_INDICATOR_COLS', async () => {
-    // Below 50 columns a column of content is worth more than the affordance.
-    const narrow = renderViewport(MIN_INDICATOR_COLS - 1);
+  it('keeps the indicator at the smallest fullscreen width', async () => {
+    // The track remains discoverable at every supported fullscreen width.
+    const narrow = renderViewport(MIN_INDICATOR_COLS);
     await delay(60);
     const text = narrow.frame();
     expect(text).toContain('line'); // the viewport really rendered
-    expect(text).not.toContain(GLYPHS.scrollTrack);
-    expect(text).not.toContain(GLYPHS.scrollThumb);
+    expect(text).toContain(GLYPHS.scrollTrack);
+    expect(text).toContain(GLYPHS.scrollThumb);
     narrow.unmount();
   });
+});
+
+it('cancels a wheel burst captured before flush and resumes after release', async () => {
+  const router = mountRouter();
+  await router.waitUntilSubscribed();
+  router.wheel('up', 2);
+  router.setCaptured(true);
+  await delay(40);
+  expect(router.calls.scroll).toEqual([]);
+  router.wheel('up', 2);
+  await delay(40);
+  expect(router.calls.scroll).toEqual([]);
+  router.setCaptured(false);
+  router.wheel('up', 2);
+  await delay(40);
+  expect(router.calls.scroll).toEqual([{ kind: 'lineUp', repeat: 3 }]);
+  router.unmount();
 });

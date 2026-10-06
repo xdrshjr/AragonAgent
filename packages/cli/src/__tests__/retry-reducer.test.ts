@@ -19,7 +19,6 @@ import {
   type ViewAction,
   type ViewState,
 } from '../agent/reducer.js';
-import { computeSettledCount } from '../ui/Transcript.js';
 
 const usage: TokenUsage = { inputTokens: 1, outputTokens: 2 };
 
@@ -193,48 +192,6 @@ describe('streamRestart rewinds the view (AC-22)', () => {
     expect(kept[0]).toMatchObject({ text: 'kept' });
     expect(kept[1]).toMatchObject({ text: '' });
   });
-
-  it('does not move Transcript\'s settled boundary', () => {
-    /**
-     * THE PROPERTY THAT KEEPS `<Static>` FROM DUPLICATING THE LIVE ENTRY.
-     *
-     * `Transcript` clamps with a MONOTONIC high-water mark, so if `highWater` ever
-     * exceeded `entries.length` the clamp would mark EVERYTHING settled — including
-     * the still-streaming assistant entry. It cannot, because the entries this
-     * action removes were created AFTER the streaming entry and the boundary scan
-     * already breaks at that entry. Asserting the boundary here is what forces the
-     * next action that shrinks `entries` to argue with a test.
-     */
-    const before = apply(
-      initialViewState(),
-      { type: 'submit', text: 'one' },
-      { type: 'runStart' },
-      { type: 'turnStart' },
-      { type: 'textDelta', delta: 'a' },
-      { type: 'turnEnd', usage, costDelta: 0 },
-      { type: 'runEnd' },
-      { type: 'submit', text: 'two' },
-      { type: 'runStart' },
-      { type: 'turnStart' },
-      { type: 'textDelta', delta: 'partial' },
-      { type: 'toolCallStart', toolCallId: 'x', toolName: 'bash' },
-    );
-    const boundaryBefore = computeSettledCount(before.entries, before.expandedToolIds);
-    const after = apply(before, { type: 'streamRestart', discardedToolCallIds: ['x'] });
-    const boundaryAfter = computeSettledCount(after.entries, after.expandedToolIds);
-
-    expect(boundaryAfter).toBe(boundaryBefore);
-    expect(boundaryAfter).toBeLessThanOrEqual(after.entries.length);
-  });
-
-  it('an in-flight retry card is NOT settled by the boundary scan', () => {
-    const state = apply(midTurn(), scheduled(1));
-    // The card is the tail here, but the property being pinned is that a `waiting`
-    // card can never be inside the settled prefix at all.
-    const settled = computeSettledCount(state.entries, state.expandedToolIds);
-    const prefix = state.entries.slice(0, settled);
-    expect(prefix.some((e) => e.kind === 'retry')).toBe(false);
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -321,27 +278,6 @@ describe('runEnd is the terminal backstop (AC-25b)', () => {
     // THIS is what lets `Transcript`'s monotonic boundary advance past the card.
     expect(state.retryEntryId).toBeUndefined();
     expect(state.status).toBe('idle');
-  });
-
-  it('lets the settled card reach the settled prefix afterwards', () => {
-    // NO PENDING TOOL CARDS in this one: the boundary scan breaks at the first
-    // unsettled entry of ANY kind, and `midTurn`'s two `pending` tool cards would
-    // stop it before the retry card is even reached — which would make this assert
-    // nothing about the retry card at all.
-    const state = apply(
-      initialViewState(),
-      { type: 'submit', text: 'hello' },
-      { type: 'runStart' },
-      { type: 'turnStart' },
-      { type: 'textDelta', delta: 'partial' },
-      scheduled(1),
-      { type: 'runEnd' },
-      // One more entry so the card is no longer inside `LIVE_TAIL`.
-      { type: 'notice', level: 'info', text: 'after' },
-    );
-    const settled = computeSettledCount(state.entries, state.expandedToolIds);
-    const prefix = state.entries.slice(0, settled);
-    expect(prefix.some((e) => e.kind === 'retry')).toBe(true);
   });
 
   it('does not double-settle a card an earlier path already closed', () => {

@@ -380,6 +380,7 @@ export interface WindowSelection {
 }
 
 export interface SelectWindowInput {
+  trailingContentRows?: number;
   entries: readonly Entry[];
   /** Measured, else estimated; never 0 for a real entry. */
   heightOf: (index: number) => number;
@@ -414,7 +415,7 @@ export function selectWindow(input: SelectWindowInput): WindowSelection {
   const offset = Math.max(0, Math.floor(input.offset) || 0);
   const overscan = Math.max(VIRTUAL_LIMITS.overscan, Math.floor(input.overscan) || 0);
 
-  const bottom = totalRows - offset;
+  const bottom = totalRows + (input.trailingContentRows ?? 0) - offset;
   const top = bottom - viewport;
 
   let start = n - 1;

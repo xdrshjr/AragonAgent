@@ -1,23 +1,10 @@
-/**
- * The `service` entry kind, across the five closed switches it has to be added
- * to (§7.6 / AC-39, AC-40) and the card itself (AC-24, AC-25).
- *
- * EVERY ASSERTION HERE FAILS ON A BUILD THAT ADDED THE KIND TO ONLY ONE PLACE,
- * AND NONE OF THOSE FAILURES IS OTHERWISE VISIBLE. `entryRevision` and
- * `estimateEntryRows` both have a `default` that swallows an unknown kind;
- * `renderEntry` returns `[]`; `computeSettledCount` simply keeps counting. A
- * frozen card, a mis-windowed card, a card missing from the exit snapshot and a
- * transcript that re-renders forever are what those four look like in
- * production.
- */
-
 import { describe, expect, it } from 'vitest';
 import { render } from 'ink-testing-library';
 import React from 'react';
 import type { Entry } from '../agent/reducer.js';
 import { viewReducer, initialViewState } from '../agent/reducer.js';
 import { entryRevision, estimateEntryRows } from '../ui/layout/virtual-window.js';
-import { computeSettledCount, EntryView } from '../ui/Transcript.js';
+import { EntryView } from '../ui/Transcript.js';
 import { renderTranscriptText } from '../ui/transcript-text.js';
 import { pickGlyphs } from '../ui/glyphs.js';
 import { getTheme } from '../ui/theme.js';
@@ -122,34 +109,6 @@ describe('AC-39: the three silent switches', () => {
   });
 });
 
-describe('AC-40: the settled boundary (D-11)', () => {
-  const filler = (n: number): Entry[] =>
-    Array.from({ length: n }, (_, i) => ({ id: `f${i}`, kind: 'notice', level: 'info', text: 'x' }));
-
-  it('a READY service does NOT block the boundary', () => {
-    // THIS IS THE ASSERTION THAT KEEPS A DEV SERVER LEFT UP FOR AN HOUR FROM
-    // RE-RENDERING THE WHOLE TRANSCRIPT EVERY FRAME. Every other live clause in
-    // `computeSettledCount` is bounded by an OPERATION; a service is bounded by
-    // the user's intent, and treating the two alike pins the prefix scan at the
-    // card for the rest of the session.
-    const entries = [service({ status: 'ready' }), ...filler(50)];
-    expect(computeSettledCount(entries, {})).toBeGreaterThan(1);
-  });
-
-  it('a RUNNING service does not block it either', () => {
-    const entries = [service({ status: 'running', url: undefined }), ...filler(50)];
-    expect(computeSettledCount(entries, {})).toBeGreaterThan(1);
-  });
-
-  it('a STARTING service DOES block it', () => {
-    // The one status that is bounded by an operation - `readyTimeoutMs`, after
-    // which the supervisor calls it `running` whatever happened - which is the
-    // same shape as every other clause in that scan.
-    const entries = [service({ status: 'starting', url: undefined }), ...filler(50)];
-    expect(computeSettledCount(entries, {})).toBe(0);
-  });
-});
-
 describe('AC-24 / AC-25: the card', () => {
   const draw = (entry: Entry): string => {
     const { lastFrame } = render(
@@ -160,7 +119,6 @@ describe('AC-24 / AC-25: the card', () => {
         thinkingVisible={false}
         reducedMotion={false}
         density="compact"
-        mode="fullscreen"
         theme={THEME}
         caps={CAPS}
       />,
@@ -212,9 +170,6 @@ describe('the reducer (D-11)', () => {
   });
 
   it('serviceEnd APPENDS a new one-row entry rather than only rewriting', () => {
-    // `<Static>` cannot un-print, so any design that rewrites a printed card is
-    // wrong whatever it claims (R-13). A second event at a second time is also
-    // simply more honest.
     let state = viewReducer(initialViewState(), { type: 'serviceStart', service: snapshot() });
     state = viewReducer(state, {
       type: 'serviceEnd',

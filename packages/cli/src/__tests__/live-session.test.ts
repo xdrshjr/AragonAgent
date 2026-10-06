@@ -17,7 +17,6 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadSession, saveSession } from '../session/persist.js';
-import { computeSettledCount } from '../ui/Transcript.js';
 import { initialViewState, viewReducer, type Entry, type ViewState } from '../agent/reducer.js';
 
 let dir = '';
@@ -174,7 +173,6 @@ describe('AC-40 — every path to idle releases the tail (D-35)', () => {
     // card with a stall clock frozen at its last value.
     const after = viewReducer(stateWithTail(), { type: 'abortMark' });
     const tail: Entry = { id: 'e2', kind: 'notice', level: 'info', text: 'x' };
-    expect(computeSettledCount([...after.entries, tail], {})).toBe(0);
     expect(toolOf(after).live).toBeUndefined();
   });
 

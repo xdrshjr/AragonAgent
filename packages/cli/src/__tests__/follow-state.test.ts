@@ -84,8 +84,8 @@ describe('reduceFollow — Rule A (tail anchoring)', () => {
     // way to pass is for the rule to consume a tail delta.
     for (const overflowLines of [0, 5, 5_000]) {
       const out = reduceFollow(follow({ offset: 7, tailDelta: 0, overflowLines, newLinesWhilePaused: 3 }));
-      expect(out.offset).toBe(7);
-      expect(out.newLinesWhilePaused).toBe(3);
+      expect(out.offset).toBe(Math.min(7, overflowLines));
+      expect(out.newLinesWhilePaused).toBe(overflowLines === 0 ? 0 : 3);
     }
   });
 
@@ -215,5 +215,21 @@ describe('advanceTailRows — the tail counter (§4.3.1a)', () => {
     expect(code).not.toMatch(/measureElement/);
     expect(code).not.toMatch(/from 'ink'/);
     expect(code).not.toMatch(/viewport-geometry/);
+  });
+});
+
+
+describe('unified footer anchoring', () => {
+  it('combines signed deltas before one clamp', () => {
+    expect(reduceFollow(follow({ offset: 60, overflowLines: 55, tailDelta: 5,
+      layoutTailDelta: -10 }))).toEqual({ offset: 55, newLinesWhilePaused: 5 });
+  });
+  it('counts output but not footer growth or consumed padding', () => {
+    expect(reduceFollow(follow({ hold: true, overflowLines: 3, tailDelta: 5,
+      layoutTailDelta: -2 }))).toEqual({ offset: 3, newLinesWhilePaused: 5 });
+    expect(reduceFollow(follow({ offset: 10, tailDelta: 0, layoutTailDelta: 3 })))
+      .toEqual({ offset: 13, newLinesWhilePaused: 0 });
+    expect(reduceFollow(follow({ offset: 10, tailDelta: 0, layoutTailDelta: -4 })))
+      .toEqual({ offset: 6, newLinesWhilePaused: 0 });
   });
 });

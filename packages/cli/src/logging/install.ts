@@ -25,7 +25,7 @@
  *       Adding a listener suppresses it, turning a crash into a silent hang.
  *
  *   `SIGINT` / `SIGTERM` / `SIGHUP` — the handlers in `runInteractive()` exist
- *       ONLY in its full-screen branch, so inline mode, `-p`, and every
+ *       ONLY in its full-screen branch, so `-p` and every
  *       subcommand had no handler at all and took Node's default termination,
  *       which does not run `'exit'` listeners: the whole queue was lost. But a
  *       signal listener registered here runs BEFORE the one `runInteractive`
@@ -69,7 +69,7 @@ export function setScreenRestore(fn: () => void): void {
 
 /**
  * Replace what a signal does after the flush. The default (a bare
- * `exit(128 + signo)`) is correct for headless, inline and every subcommand;
+ * `exit(128 + signo)`) is correct for headless and every subcommand;
  * full-screen substitutes one that restores the terminal first.
  *
  * A TERMINATOR MAY NOW RETURN WITHOUT EXITING, AND THAT IS A CONTRACT CHANGE

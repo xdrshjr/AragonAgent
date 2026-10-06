@@ -1,22 +1,3 @@
-/**
- * ModeChip — the `PLAN` badge on the composer's hint row (plan-mode §6.1).
- *
- * `theme.chip = { fg, bg }` exists in every palette and was, until now, unused.
- * A mode badge is what it was for.
- *
- * SHOWN ONLY IN PLAN MODE. `BUILD` is the default, and a badge that is always on
- * is furniture rather than signal; it also means the Build-mode composer renders
- * exactly as it did before this feature existed.
- *
- * THE CHIP IS AN ENHANCEMENT, NOT THE GUARANTEE (P1-6). It rides the hint row,
- * which disappears on a short terminal (`showHint`), under `hints: false`, and
- * in inline render mode (which mounts a bare `PromptInput` and never mounts
- * `Composer` at all). The GUARANTEED carrier is the status-bar word, which
- * renders in both `AppShell` branches and has no opt-out. If you ever move the
- * mode indicator, that is the constraint to preserve: the status bar must always
- * name a non-default mode; the chip may.
- */
-
 import React from 'react';
 import { Box, Text } from 'ink';
 import type { Theme } from './theme.js';
@@ -27,6 +8,16 @@ interface ModeChipProps {
   mode: AgentMode;
   theme: Theme;
   caps: TermCapabilities;
+}
+
+/**
+ * Columns `ModeChip` occupies, including its trailing gap (plan => label + 3, any
+ * other mode 0). Both render branches (padded background chip, bracketed text)
+ * come to the same width, which is what lets the run status row budget for it
+ * without measuring a rendered element.
+ */
+export function modeChipCols(mode: AgentMode): number {
+  return mode === 'plan' ? MODE_LABEL[mode].length + 3 : 0;
 }
 
 export function ModeChip({ mode, theme, caps }: ModeChipProps): React.ReactElement | null {

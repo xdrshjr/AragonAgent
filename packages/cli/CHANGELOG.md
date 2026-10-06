@@ -7,6 +7,15 @@ were written.
 
 ## Unreleased
 
+### Removed
+
+- Removed the inline terminal UI and its automatic downgrade rules. Interactive
+  sessions now always use the full-screen UI; small windows show a resize notice.
+- Removed `--fullscreen`, `--no-fullscreen`, `ARAGON_FULLSCREEN`, and the
+  `fullscreen` config setting. Old flags are rejected and old stored preferences
+  are ignored. Headless commands and piped input retain their existing behavior.
+- Interactive-only screens now reject non-TTY input/output with exit code 2.
+
 ### Added
 
 - **`system/init` now lists what this build can do.** A new optional
@@ -72,6 +81,16 @@ were written.
 
 ### Fixed
 
+- **The right-edge scrollbar no longer disappears while output streams.** The
+  differential renderer ended every repainted row with `CSI K` (erase to end of
+  line). The scrollbar fills the last column of every viewport row, and on
+  terminals that keep the cursor on the last column after writing it (Windows
+  console hosts) that erase blanked the cell that had just been drawn, so the
+  scrollbar vanished whenever a row was redrawn. Rows that already fill the
+  terminal width are now repainted without the erase; narrower rows are
+  unchanged. `--no-diff-render` was never affected. `/perf` gained a `scrollbar:`
+  line for diagnosing visibility and drag problems.
+
 - **`{"type":"interrupt"}` now really does settle the run — on every platform.**
   The stdin interrupt frame used to raise a SIGINT at our own process. On POSIX
   that reaches the runner's terminator and the run winds down properly: it
@@ -112,6 +131,14 @@ were written.
   `/mouse` as off — while pasting still works.
 
 ### Changed
+
+- **The run status row moved above the input box and carries the `steer` hint.**
+  While a run is active, the spinner, the phrase and `steer / interrupt / exit`
+  share one row directly above the input, in place of the idle hint row below it
+  (the footer keeps its height). It scrolls with the input; when it leaves the
+  viewport the fixed bottom row shows the animation instead, so there is never
+  more than one spinner. Terminals under 20 rows and `--no-hints` keep the old
+  fixed row. The update notice is also held back for the whole run.
 
 - **Auto-compaction no longer reports compactions that did not happen.** A long
   unattended run used to print a red `context not compacted #2: nothing_to_drop`

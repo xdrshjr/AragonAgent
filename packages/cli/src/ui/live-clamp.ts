@@ -1,32 +1,4 @@
-/**
- * Live-region clamp for INLINE render mode (tui-render-performance L5 / R6).
- *
- * Inline mode has no fixed frame, so nothing kept its live (non-`<Static>`)
- * region shorter than the terminal. When one live entry grew taller than
- * `stdout.rows`, Ink took the branch at `ink.js:118-123`:
- *
- *     if (outputHeight >= this.options.stdout.rows) {
- *       stdout.write(clearTerminal + this.fullStaticOutput + output);
- *     }
- *
- * `fullStaticOutput` accumulates EVERY `<Static>` frame of the whole session and
- * is never trimmed, so once that branch is taken it is taken on every subsequent
- * frame — bypassing both the `output !== lastOutput` dedupe and `throttledLog` —
- * and the terminal receives the entire session history thirty times a second.
- * That is a genuine hard freeze, and it is reachable today by any inline user
- * (`--no-fullscreen`, `TERM=dumb`, CI, a short or narrow terminal) whose model
- * writes a long answer.
- *
- * I-L5-1 — keeping the live region strictly below `stdout.rows` makes that
- * branch UNREACHABLE, which is the inline analogue of `frame.ts`'s
- * `frameHeight(r) < r` and deserves the same standing. We cannot bound Ink's
- * `fullStaticOutput` growth (it is private and append-only); preventing the
- * branch that WRITES it is the entire mitigation, and nothing about the memory
- * it holds is fixed by this module.
- *
- * Nothing is lost, only deferred: when the entry settles it moves into
- * `<Static>` and is printed in full.
- */
+/** Keep the newest thinking lines visible while an assistant entry streams. */
 
 export interface LiveClamp {
   text: string;

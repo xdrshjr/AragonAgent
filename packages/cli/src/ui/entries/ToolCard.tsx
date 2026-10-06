@@ -54,12 +54,7 @@ interface ToolCardProps {
   isError?: boolean;
   expanded?: boolean;
   reducedMotion?: boolean;
-  /**
-   * Inline mode only (L5): ceiling on the rows a LIVE card contributes to the
-   * non-`<Static>` region. `undefined` — what the full-screen branch passes —
-   * means no clamp and byte-identical output.
-   */
-  liveClampRows?: number;
+
   /**
    * The sanitised live tail while the tool runs
    * (agent-activity-presentation-live §3.3.4).
@@ -155,7 +150,6 @@ function ToolCardImpl(props: ToolCardProps): React.ReactElement {
     isError,
     expanded,
     reducedMotion,
-    liveClampRows,
     live,
     lastOutputAt,
     nowSec,
@@ -169,15 +163,7 @@ function ToolCardImpl(props: ToolCardProps): React.ReactElement {
   // is immutable once written, and this used to reallocate up to 200 strings per
   // card per frame (R3).
   const previewLines = previewText.length > 0 ? splitLinesCached(previewText) : EMPTY_LINES;
-  // Head-first, exactly as before: the collapsed card shows the FIRST 8 lines.
-  // The inline clamp only lowers the ceiling — it never changes which end is
-  // kept, because `Ctrl+O` on a 5 000-line bash result is precisely how an
-  // inline session reaches `ink.js:121` (I-L5-1) and the fix must not also
-  // reshuffle what a full-screen user has been reading for four releases.
-  const ceiling = Math.min(
-    expanded ? previewLines.length : COLLAPSED_LINES,
-    liveClampRows ?? Number.POSITIVE_INFINITY,
-  );
+  const ceiling = expanded ? previewLines.length : COLLAPSED_LINES;
   const visibleLines =
     ceiling >= previewLines.length ? previewLines : previewLines.slice(0, ceiling);
   const hidden = previewLines.length - visibleLines.length;
@@ -195,13 +181,7 @@ function ToolCardImpl(props: ToolCardProps): React.ReactElement {
   // NOW" (D-25). Head-first while live would freeze on the first eight lines a
   // build ever printed and then never change again.
   const liveRows = live ?? EMPTY_LINES;
-  const liveCeiling = Math.min(
-    COLLAPSED_LINES,
-    // Inline only: `liveClampRows` already subtracts one row per live entry to
-    // pay for a marker (`Transcript.tsx:534-538`), which is what this card's
-    // unconditional footer spends (AC-36 / P2-7).
-    liveClampRows ?? Number.POSITIVE_INFINITY,
-  );
+  const liveCeiling = COLLAPSED_LINES;
   const visibleLive =
     liveRows.length > liveCeiling ? liveRows.slice(-Math.max(1, liveCeiling)) : liveRows;
   const showLive = !settled && visibleLive.length > 0;
@@ -292,7 +272,6 @@ function ToolCardImpl(props: ToolCardProps): React.ReactElement {
             <DiffView
               patch={patch!}
               expanded={expanded}
-              liveClampRows={liveClampRows}
               theme={theme}
             />
           ) : (

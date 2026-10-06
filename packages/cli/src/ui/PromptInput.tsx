@@ -19,12 +19,13 @@
  * rather than from a key.
  */
 
-import React, { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import { glob as tinyGlob } from 'tinyglobby';
 import type { Theme } from './theme.js';
 import type { TermCapabilities } from './capabilities.js';
 import { pickGlyphs } from './glyphs.js';
+import { PromptCaret } from './PromptCaret.js';
 import { recognize, type EditIntent, type KeyState } from '../input/keymap.js';
 import { AutocompletePopup, type Suggestion } from './AutocompletePopup.js';
 import { buildAutocompleteLayout } from './layout/autocomplete.js';
@@ -51,6 +52,9 @@ export interface CommandOption {
 }
 
 interface PromptInputProps {
+  cols?: number;
+  cursorVisible?: boolean;
+  onInteraction?: () => void;
   isActive: boolean;
   running: boolean;
   history: string[];
@@ -61,11 +65,8 @@ interface PromptInputProps {
   /**
    * Row budget for the completion popup (§5.2 / R-14).
    *
-   * The popup renders INSIDE this component, inside the shell's `flexShrink={0}`
-   * bottom chrome, and can add up to 9 rows. On a short terminal that pushes the
-   * status bar past the frame height, where the root box's `overflow: hidden`
-   * clips it away — the one piece of chrome R2 promises is always visible.
-   * `App` derives this from `budget.ts` so the popup shrinks instead.
+   * The popup shares the scrolling footer with the editor. Its height budget
+   * reserves visible message rows without changing the viewport or TODO rail.
    */
   popupMaxRows?: number;
   /** Total menu rows, including borders and the overflow hint. */
@@ -73,19 +74,17 @@ interface PromptInputProps {
   onPopupRowsChange?: (rows: number) => void;
   onSubmit: (text: string) => void;
   onHelp?: () => void;
+  onEscape?: () => void;
+  onEscapeDismiss?: () => void;
+  reducedMotion?: boolean;
   /**
    * Mirror of the session mode. Read for the placeholder only — the toggle
    * itself belongs to `App`, and this component's job is to get out of its way
    * (see the first statement of the input handler).
    */
   agentMode?: AgentMode;
-  /**
-   * Set by `Composer` in full-screen mode: draw the rounded frame around the
-   * input row only, so the autocomplete popup lands OUTSIDE it (spec §4.7)
-   * without lifting the editor's buffer/cursor state out of this component.
-   * Unset ⇒ the v0.2.0 borderless inline rendering.
-   */
-  bordered?: { color?: string };
+
+  borderColor?: string;
   /**
    * Fires when the draft flips empty ⇄ non-empty (for the border color) OR when
    * its ROW COUNT changes (for `layout/budget.ts`) — never per keystroke.
@@ -107,24 +106,7 @@ interface PromptInputProps {
    * component is the only place that holds both facts.
    */
   onNotice?: (level: 'warn' | 'error', text: string) => void;
-  /**
-   * Rows of newer output hidden BELOW the viewport — `ScrollViewport`'s offset
-   * (tui-selection-and-scroll-follow §4.2 / G7).
-   *
-   * Rendered as a right-aligned chip ON THE INPUT ROW, INSIDE THE BORDER, which
-   * is what the requirement asks for (输入框内部) and what makes the hint cost
-   * zero rows. It used to take the viewport's own last row, which spent a line of
-   * the user's content exactly when the transcript was longest AND fed the number
-   * back into its own derivation (§3.3).
-   *
-   * IT IS STATE, NOT A HINT. It deliberately ignores `showHint` / `hintsEnabled`
-   * — those govern the teaching row BELOW the box, which fades with experience
-   * and is dropped on a short terminal. "You are 12 rows behind the newest
-   * output" must survive both (T-23).
-   *
-   * Only meaningful in full-screen mode, so it renders only when `bordered` is
-   * set: inline mode has no self-drawn viewport and this is always 0 there.
-   */
+
   scrolledLines?: number;
 }
 
@@ -140,8 +122,8 @@ const CHIP_FULL_MIN_COLS = 64;
  * reads `999+`.
  */
 const CHIP_MAX_N = 999;
-/** `↓ 999+ new lines · PgDn` — the widest form the full branch can produce. */
-const CHIP_FULL_CELLS = 24;
+/** `↓ 999+ lines below · PgDn` — the widest form the full branch can produce. */
+const CHIP_FULL_CELLS = 27;
 /** `↓999+` — the widest form the terse branch can produce. */
 const CHIP_TERSE_CELLS = 6;
 
@@ -171,7 +153,7 @@ export function scrollChip(
   }
   const noun = n === 1 ? 'line' : 'lines';
   return {
-    text: `${glyphs.arrowDown} ${shown} new ${noun} ${glyphs.midDot} PgDn`,
+    text: `${glyphs.arrowDown} ${shown} ${noun} below ${glyphs.midDot} PgDn`,
     cells: CHIP_FULL_CELLS,
   };
 }
@@ -390,6 +372,7 @@ function isControlSeq(input: string): boolean {
 // ---------------------------------------------------------------------------
 
 export function PromptInput({
+  cols: colsProp, cursorVisible = true, onInteraction,
   isActive,
   running,
   history,
@@ -403,7 +386,10 @@ export function PromptInput({
   agentMode,
   onSubmit,
   onHelp,
-  bordered,
+  onEscape,
+  onEscapeDismiss,
+  reducedMotion = false,
+  borderColor,
   onDraftChange,
   onNotice,
   scrolledLines = 0,
@@ -477,16 +463,13 @@ export function PromptInput({
   // Deriving it twice — once for the frame and once for the budget — is exactly
   // the trap `BottomStatusRow.tsx:5-27` documents.
   const glyphs = pickGlyphs(caps);
-  const cols = stdout?.columns ?? 80;
+  const cols = colsProp ?? stdout?.columns ?? 80;
   const terminalRows = stdout?.rows ?? 24;
-  // Full-screen only: inline mode has no self-drawn viewport, so `scrolledLines`
-  // is always 0 there and the branch is unreachable rather than merely unused.
-  // The guard is explicit so it stays that way.
-  const chip = bordered ? scrollChip(scrolledLines, cols, glyphs) : null;
+  const chip = scrollChip(scrolledLines, cols, glyphs);
   // Err NARROW. Wrapping wider than the box Ink gives us would make Ink wrap a
   // second time, and then `layout.rows.length` is a lie — which is the one thing
   // this module may not be.
-  const chromeCols = bordered ? 2 /* border */ + 2 /* paddingX */ + 2 /* marker */ : 2;
+  const chromeCols = 2 /* border */ + 2 /* paddingX */ + 2 /* marker */;
   const baseCols = Math.max(8, cols - chromeCols - (chip ? chip.cells + 1 : 0));
   const measure = (wrapCols: number) =>
     layoutComposer({
@@ -494,7 +477,7 @@ export function PromptInput({
       cursor,
       cols: wrapCols,
       maxRows: draftMaxRows(terminalRows),
-      active: isActive,
+      active: isActive && cursorVisible,
     });
   // TWO PASSES, AND THE SECOND ONE IS LOAD-BEARING (I-8). The overflow indicator
   // rides the last rendered row INSIDE the box the draft wraps in, so its cells
@@ -512,6 +495,7 @@ export function PromptInput({
   const usableCols = overflows ? Math.max(8, baseCols - OVERFLOW_CELLS - 1) : baseCols;
   const layout = overflows ? measure(usableCols) : wide;
   const draftRowCount = Math.max(1, layout.rows.length);
+  const caretResetKey = useMemo(() => ({}), [buffer, cursor, isActive, usableCols]);
 
   // --- Draft presence and height, reported only on a transition. -----------
   // Notifying on every keystroke would re-render the whole App tree per key. The
@@ -532,6 +516,7 @@ export function PromptInput({
   // by line. Two dispatches from one key would put the legacy root back to two
   // commits and undo the whole of F3 for that branch.
   const insert = (text: string) => {
+    onInteraction?.();
     dispatch({ type: 'insert', text });
   };
 
@@ -544,6 +529,7 @@ export function PromptInput({
    * needs. `clear` releases every payload in the same dispatch.
    */
   const submit = (text: string) => {
+    onInteraction?.();
     onSubmit(expandPastes(text, editor.pastes));
     dispatch({ type: 'clear' });
   };
@@ -570,6 +556,7 @@ export function PromptInput({
   };
 
   const completeSelection = () => {
+    onInteraction?.();
     const chosen = popupItems[clampedSel];
     if (!chosen) return;
     if (popupKind === 'slash') {
@@ -582,6 +569,7 @@ export function PromptInput({
   };
 
   const verticalOrHistory = (dir: 'up' | 'down') => {
+    onInteraction?.();
     const moved = moveVertical(buffer, cursor, dir);
     if (moved) {
       dispatch({ type: 'moveCursor', cursor: moved.cursor });
@@ -605,14 +593,17 @@ export function PromptInput({
       // BOTH rewrite the user's draft and change the mode — a bug that only
       // appears with a popup open and is therefore easy to ship (AC-P3 / R-P2).
       if (key.tab && key.shift) return;
+      if (key.pageUp || key.pageDown || (key.shift && (key.upArrow || key.downArrow))) return;
 
       // Popup navigation owns Up/Down/Tab/→/Enter/Esc while it is open.
       if (popupVisible) {
         if (key.upArrow) {
+          onInteraction?.();
           dispatch({ type: 'select', sel: Math.max(0, clampedSel - 1) });
           return;
         }
         if (key.downArrow) {
+          onInteraction?.();
           dispatch({ type: 'select', sel: Math.min(popupItems.length - 1, clampedSel + 1) });
           return;
         }
@@ -627,16 +618,21 @@ export function PromptInput({
         }
         if (key.escape) {
           dispatch({ type: 'dismiss' });
+          onEscapeDismiss?.();
           return;
         }
         // Any other key falls through so typing keeps filtering the popup.
       }
 
-      if (key.escape) return; // App owns abort / close-overlay.
+      if (key.escape) {
+        onEscape?.();
+        return;
+      }
 
       // Line-editing intents (Home/End/word/kill) recognized from raw keys.
       const intent = recognize(input, key as KeyState);
       if (intent) {
+        onInteraction?.();
         const next = applyEdit(buffer, cursor, intent);
         dispatch({ type: 'replace', buffer: next.buffer, cursor: next.cursor });
         return;
@@ -655,6 +651,7 @@ export function PromptInput({
       }
 
       if (key.backspace || key.delete) {
+        onInteraction?.();
         // The `cursor > 0` guard lives in the reducer now, so this branch is one
         // unconditional dispatch and a no-op at the left edge returns the same
         // state object — which React bails out on, exactly as the old
@@ -664,11 +661,15 @@ export function PromptInput({
       }
 
       if (key.leftArrow) {
-        dispatch({ type: 'moveCursor', cursor: Math.max(0, cursor - 1) });
+        onInteraction?.();
+        const step = cursor >= 2 && (buffer.codePointAt(cursor - 2) ?? 0) > 0xffff ? 2 : 1;
+        dispatch({ type: 'moveCursor', cursor: Math.max(0, cursor - step) });
         return;
       }
       if (key.rightArrow) {
-        dispatch({ type: 'moveCursor', cursor: Math.min(buffer.length, cursor + 1) });
+        onInteraction?.();
+        const step = (buffer.codePointAt(cursor) ?? 0) > 0xffff ? 2 : 1;
+        dispatch({ type: 'moveCursor', cursor: Math.min(buffer.length, cursor + step) });
         return;
       }
       // `!key.shift` is load-bearing: Shift+↑/↓ is the viewport's line-scroll
@@ -709,6 +710,7 @@ export function PromptInput({
           onNotice?.('warn', refusal);
           return;
         }
+        onInteraction?.();
         dispatch({ type: 'input', segments });
         return;
       }
@@ -722,7 +724,7 @@ export function PromptInput({
   const marker = running ? glyphs.steer : glyphs.caret;
   const markerColor = running ? theme.toolRunning : theme.primary;
   const placeholder = running
-    ? `Type to steer the run, Esc to abort${glyphs.ellipsis}`
+    ? `Type to steer the run, Esc twice to interrupt${glyphs.ellipsis}`
     : agentMode === 'plan'
     ? `Describe what you want to build; I'll research and plan it first${glyphs.ellipsis}`
     : `Send a message (/ for commands, @ for files)${glyphs.ellipsis}`;
@@ -742,7 +744,9 @@ export function PromptInput({
     return (
       <>
         {renderSegments(split.before, `b${i}.`)}
-        <Text inverse>{split.at ? split.at.text : ' '}</Text>
+        <PromptCaret text={split.at ? split.at.text : ' '} active={isActive && cursorVisible}
+          reducedMotion={reducedMotion} colorLevel={caps.colorLevel} resetKey={caretResetKey}
+          color={split.at?.kind === 'token' ? tokenColor : undefined} />
         {renderSegments(split.after, `a${i}.`)}
       </>
     );
@@ -760,7 +764,12 @@ export function PromptInput({
       */}
       <Box flexDirection="column" flexGrow={1} flexShrink={1}>
         {buffer.length === 0 ? (
-          <Text wrap="truncate" color={theme.muted}>{placeholder}</Text>
+          <Text wrap="truncate" color={theme.muted}>
+            <PromptCaret text={String.fromCodePoint(placeholder.codePointAt(0)!)} active={isActive && cursorVisible}
+              reducedMotion={reducedMotion} colorLevel={caps.colorLevel} color={theme.muted}
+              resetKey={caretResetKey} />
+            {placeholder.slice(String.fromCodePoint(placeholder.codePointAt(0)!).length)}
+          </Text>
         ) : (
           rowNodes.map((node, i) =>
             overflow && i === rowNodes.length - 1 ? (
@@ -820,18 +829,16 @@ export function PromptInput({
           layout={popupLayout}
         />
       )}
-      {bordered ? (
+      {(
         <Box
           flexDirection="column"
           flexShrink={0}
           borderStyle={glyphs.boxStyle}
-          borderColor={bordered.color}
+          borderColor={borderColor}
           paddingX={1}
         >
           {inputRow}
         </Box>
-      ) : (
-        inputRow
       )}
     </Box>
   );

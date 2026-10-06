@@ -28,6 +28,27 @@ const THREE = [
 ];
 
 describe('TodoStore', () => {
+  it.each(['completed', 'pending', 'in_progress'])('new-task clears %s plans once', (status) => {
+    const { store, events } = makeStore();
+    store.write(THREE.map((item) => ({ ...item, status })));
+    events.length = 0;
+    store.beginUserTurn('new-task');
+    store.beginUserTurn('new-task');
+    expect(store.snapshot()).toBeNull();
+    expect(events).toEqual([{ type: 'cleared', reason: 'turn' }]);
+  });
+
+  it('explicit continuation preserves timestamps and never ages the plan', () => {
+    const { store, events } = makeStore();
+    store.write(THREE);
+    const before = store.snapshot();
+    events.length = 0;
+    for (let i = 0; i < 20; i++) store.beginUserTurn('continue');
+    expect(store.snapshot()).toEqual(before);
+    expect(events).toEqual([]);
+    store.beginUserTurn();
+    expect(store.snapshot()).toEqual(before);
+  });
   it('an empty store has no snapshot at all, which is what unmounts the rail', () => {
     const { store } = makeStore();
     expect(store.isEmpty()).toBe(true);

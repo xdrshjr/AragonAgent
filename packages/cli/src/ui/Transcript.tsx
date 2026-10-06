@@ -1,40 +1,14 @@
-/**
- * Transcript (spec §3.8). Splits the entry list into a settled prefix rendered
- * once into Ink's `<Static>` (native terminal scrollback, never re-rendered)
- * and a live tail rendered normally. This kills per-token full re-renders and
- * flicker on long/fast sessions.
- *
- * `computeSettledCount` is pure and exported for `transcript-static.test.ts`.
- * The settled boundary is held MONOTONIC at render time: a previously-settled
- * entry never leaves `<Static>` (which cannot un-print it) even if it later
- * becomes expanded, so the live tail can never duplicate a scrolled-off entry.
- *
- * `EntryView` is shared by both render paths ON PURPOSE (§4.3 / §12). Forking it
- * to freeze inline's v0.2.0 output would mean writing every future entry-layer
- * change twice and watching the two drift; inline is a degradation path, not a
- * parallel product. What inline still guarantees is its GEOMETRY contract — no
- * fixed frame, `<Static>` keeps the settled history, no private ANSI — not its
- * pixel-for-pixel appearance.
- *
- * Two things changed with tui-render-performance:
- *   - `EntryView` is `React.memo`'d with an explicit comparator (L2 / R3), which
- *     is only worth anything because `mapEntry` already preserves object
- *     identity for untouched entries;
- *   - `TranscriptList` (the FULL-SCREEN body) mounts only the entries inside the
- *     viewport and replaces the rest with two spacer boxes (L3 / R1), and the
- *     inline `Transcript` clamps its live region so `ink.js:121` is unreachable
- *     (L5 / R6).
- */
+/** Virtualized full-screen transcript and entry cards. */
+/** Virtualized full-screen transcript and shared entry cards. */
 
-import React, { useCallback, useRef } from 'react';
-import { Box, Static, Text } from 'ink';
+import React, { useCallback } from 'react';
+import { Box, Text } from 'ink';
 import { type Theme } from './theme.js';
 import type { TermCapabilities } from './capabilities.js';
 import Spinner from 'ink-spinner';
 import { pickGlyphs, toolGlyph } from './glyphs.js';
 import { separationRows, type DensityMode } from './density.js';
 import type { Entry, NoticeLevel } from '../agent/reducer.js';
-import type { RenderMode } from './layout/frame.js';
 import { EntryFrame } from './entries/EntryFrame.js';
 import { UserEntry } from './entries/UserEntry.js';
 import { AssistantEntry } from './entries/AssistantEntry.js';
@@ -55,94 +29,6 @@ import {
 } from './layout/virtual-window.js';
 import { advanceTailRows, type TailSink } from './layout/follow-state.js';
 import type { HeightStore } from './use-height-store.js';
-import { useTerminalSize } from './layout/useTerminalSize.js';
-
-/** Keep the last K entries in the live region so a mutating tail stays hot. */
-const LIVE_TAIL = 1;
-
-/**
- * Rows the inline live region leaves for the composer, the prompt echo and the
- * one-row margin Ink needs before `outputHeight >= stdout.rows` (I-L5-1).
- */
-const INLINE_LIVE_MARGIN = 4;
-/** Floor on the clamp, so a very short terminal still shows something useful. */
-const INLINE_LIVE_MIN_ROWS = 4;
-
-/**
- * Largest prefix length P such that `entries[0..P)` are all terminal, none is
- * within the last `LIVE_TAIL` entries, and none is currently expanded. Pure and
- * non-decreasing as entries terminalize (expanding a card can lower it — the
- * component clamps with a monotonic high-water mark to avoid Static duplication).
- */
-export function computeSettledCount(
-  entries: Entry[],
-  expandedToolIds: Record<string, true>,
-): number {
-  const limit = entries.length - LIVE_TAIL;
-  let count = 0;
-  for (let i = 0; i < entries.length; i += 1) {
-    if (i >= limit) break;
-    const e = entries[i]!;
-    if (expandedToolIds[e.id]) break;
-    if (e.kind === 'assistant' && e.streaming) break;
-    if (e.kind === 'tool' && e.status !== 'done' && e.status !== 'error') break;
-    // A live dispatch is not settled: its `runs` are rewritten on every
-    // `teamUpdate`, and `<Static>` cannot un-print what it has already drawn.
-    // The boundary is held MONOTONIC above, which is also why a `team` entry
-    // that never settles would be re-rendered on every frame for the rest of the
-    // session — the failure `session/persist.ts` normalizes away on load (P1-5).
-    if (e.kind === 'team' && e.active) break;
-    // A live todo card is not settled either: it is rewritten on every
-    // `todoUpdate` for the whole turn, and `<Static>` cannot un-print what it has
-    // already drawn (C-5 / I-6). `session/persist.ts` forces `live: false` on
-    // load, which is the other half — a card that never settles is re-rendered
-    // on every frame for the rest of the session.
-    if (e.kind === 'todo' && e.live) break;
-    // Nor is a retry card that is still counting down or still in flight: it is
-    // rewritten on every `retryScheduled` / `retryAttempt` and once a second by
-    // `retryTick`, and `<Static>` cannot un-print what it has already drawn.
-    // `session/persist.ts` forces a loaded card to `interrupted`, which is the
-    // other half — a card that never settles is re-rendered on every frame for
-    // the rest of the session (R-10).
-    if (e.kind === 'retry' && (e.phase === 'waiting' || e.phase === 'retrying')) break;
-    // A live review card is not settled either: it is rewritten once, when the
-    // call comes back, and `<Static>` cannot un-print what it has already drawn
-    // (C-5). `session/persist.ts` forces `live: false` on load, which is the
-    // other half.
-    if (e.kind === 'fast' && e.live) break;
-    // Nor is a compaction card whose call is still open: it is rewritten once,
-    // when the engine reports its verdict, and `<Static>` cannot un-print what it
-    // has already drawn (C-8). `session/persist.ts` forces `live: false` on load,
-    // which is the other half.
-    if (e.kind === 'compaction' && e.live) break;
-    /**
-     * A SERVICE BLOCKS ONLY WHILE IT IS `starting` (D-11 / P0-4).
-     *
-     * Every clause above is bounded by an OPERATION — a dispatch, a turn, one
-     * LLM call, one countdown — which is why each of them can safely pin this
-     * prefix scan: the wait is short and it ends. A service is bounded by the
-     * USER'S INTENT. A dev server left up for an hour is the normal case, not
-     * the pathological one, so treating it like the other five would pin the
-     * boundary at the card and re-render the whole transcript from there on
-     * EVERY FRAME, FOREVER, on exactly the long sessions where it is least
-     * likely to be noticed.
-     *
-     * `starting` is different, and it is different for the reason that makes
-     * every other clause here legitimate: it is bounded by `readyTimeoutMs`,
-     * after which the supervisor calls the service `running` whatever happened.
-     *
-     * The cost of the rest is that a printed card stops mirroring live state —
-     * which is what a transcript IS. A terminal transition appends a NEW one-row
-     * entry rather than rewriting a card `<Static>` has already drawn, and live
-     * state lives in the status chip, `/bg` and `bash_output`. Weakening this to
-     * "any non-terminal service blocks" is the change D-11 exists to prevent;
-     * see condition 5 of the design's review verdict before making it.
-     */
-    if (e.kind === 'service' && e.status === 'starting') break;
-    count = i + 1;
-  }
-  return count;
-}
 
 interface TranscriptProps {
   entries: Entry[];
@@ -150,20 +36,12 @@ interface TranscriptProps {
   thinkingVisible: boolean;
   reducedMotion: boolean;
   density: DensityMode;
-  /**
-   * The render mode, threaded from `App` as a plain scalar prop.
-   *
-   * It decides whether the collapsed thinking marker may offer `ctrl+t` (D-16):
-   * inline prints settled entries into `<Static>`, which cannot re-print them.
-   * NOT read from a module-level singleton — `render-memo.test.tsx` asserts prop
-   * stability across frames, and a hidden read would be invisible to it.
-   */
-  mode: RenderMode;
+
   /**
    * Wall-clock seconds, threaded from `App`'s existing 200 ms ticker, for the
    * live tool card's stall row (agent-activity-presentation-live §3.3.4 / D-36).
    *
-   * BOTH MAP CALLBACKS BELOW DECIDE PER ENTRY WHETHER TO PASS IT ON, and neither
+   * The entry map decides per entry whether to pass it on, and it
    * may pass it unconditionally: `ToolCard` is `React.memo` with the default
    * comparator, so a prop that changes every second on every card would defeat
    * that boundary for the whole transcript.
@@ -209,11 +87,9 @@ export interface EntryViewProps {
   thinkingVisible: boolean;
   reducedMotion: boolean;
   density: DensityMode;
-  mode: RenderMode;
   theme: Theme;
   caps: TermCapabilities;
-  /** Inline mode only (L5); `undefined` in full-screen, which means no clamp. */
-  liveClampRows?: number;
+
   /** Wall-clock seconds; set ONLY on a running tool entry (§3.3.4 / P1-3). */
   nowSec?: number;
 }
@@ -225,10 +101,8 @@ function EntryViewImpl({
   thinkingVisible,
   reducedMotion,
   density,
-  mode,
   theme,
   caps,
-  liveClampRows,
   nowSec,
 }: EntryViewProps): React.ReactElement | null {
   const glyphs = pickGlyphs(caps);
@@ -254,24 +128,6 @@ function EntryViewImpl({
     case 'user':
       return frame(glyphs.user, theme.user, <UserEntry text={entry.text} theme={theme} caps={caps} />);
     case 'assistant': {
-      // While text streams, the spinner IS the role marker. Braille dots are
-      // both an animation and a Unicode-only glyph, so reduced motion and an
-      // ASCII terminal fall back to the same static marker (P2-11 / A-10).
-      //
-      // `reducedMotion` ARRIVES PRE-WIDENED FROM `App`: it is now
-      // `cfg.reducedMotion || activityVisible`, so this marker is static for the
-      // whole of every run and the activity row above the composer carries the
-      // one animation (single-spinner-while-running D-2). Nothing here changes —
-      // the expression already meant "do not animate here".
-      //
-      // THAT IS SAFE FOR `<Static>` BY CONSTRUCTION, not by luck: a settled
-      // prefix is printed once and can never be re-printed, so a boolean that
-      // changed how an already-printed entry renders would tear the history.
-      // `computeSettledCount` below breaks on EVERY condition that makes an
-      // entry animate (`:84` streaming, `:85` running tool, `:91` active team,
-      // `:104` retry, `:109` live fast), so every animating entry is in the live
-      // region and every entry in `<Static>` already has `animate === false` on
-      // both sides of the flip. Weakening a break clause breaks that proof.
       const animate = entry.streaming && !reducedMotion && caps.unicode;
       return frame(
         animate ? <Spinner type="dots" /> : glyphs.assistant,
@@ -286,8 +142,6 @@ function EntryViewImpl({
           // `EntryViewImpl` hands each renderer EXPLICIT SCALAR PROPS, so
           // nothing on the entry reaches a component by itself (P1-6b).
           thinkingMs={entry.thinkingMs}
-          revealable={mode === 'fullscreen'}
-          liveClampRows={liveClampRows}
           theme={theme}
           caps={caps}
         />,
@@ -309,7 +163,6 @@ function EntryViewImpl({
           isError={entry.isError}
           expanded={expanded}
           reducedMotion={reducedMotion}
-          liveClampRows={liveClampRows}
           // `entry.live` AND NOT `entry.live ?? []` (P2-4): `ToolCard`'s default
           // comparator sees a fresh `[]` as a changed prop, which is why that
           // file already keeps a shared `EMPTY_LINES`.
@@ -485,10 +338,8 @@ export const EntryView = React.memo(EntryViewImpl, (a, b) => {
     a.thinkingVisible === b.thinkingVisible &&
     a.reducedMotion === b.reducedMotion &&
     a.density === b.density &&
-    a.mode === b.mode &&
     a.theme === b.theme &&
     a.caps === b.caps &&
-    a.liveClampRows === b.liveClampRows &&
     /*
      * ELEVENTH TERM, AND OMITTING IT IS THE TRAP I-L2-1 DESCRIBES ONE COMMENT UP
      * (P1-3). This comparator is a CLOSED LIST: a prop absent from it changes
@@ -503,33 +354,12 @@ export const EntryView = React.memo(EntryViewImpl, (a, b) => {
   );
 });
 
-/**
- * Full-screen transcript body — the same entry renderers with NO `<Static>`.
- *
- * `<Static>` prints above the live frame; once the frame is `rows - 1` tall
- * there is exactly one visible line up there, so the mechanism stops being a
- * history view and starts being a leak. Full-screen therefore owns its history
- * inside `ScrollViewport` instead.
- *
- * `computeSettledCount` is deliberately NOT called here: its only job is to keep
- * an entry that already reached `<Static>` from flowing back into the live
- * region, and with no Static there is nothing to protect. The settled high-water
- * mark feeds nothing else — `/save` serializes `entries` in full — so leaving it
- * un-advanced has no side effect.
- *
- * VIRTUALISED (L3 / R1). `windowSize` is now the SCROLL HORIZON — how far back
- * the user can scroll — and no longer the rendering budget, because entries
- * outside the viewport are not mounted at all. What bounds the frame is
- * `selectWindow`, and the two spacers are what keep the scroll maths honest
- * while they are absent.
- */
 export function TranscriptList({
   entries,
   expandedToolIds,
   thinkingVisible,
   reducedMotion,
   density,
-  mode,
   nowSec,
   theme,
   caps,
@@ -613,6 +443,7 @@ export function TranscriptList({
     entries: visible,
     heightOf,
     viewportRows: geometry.viewportRows,
+    trailingContentRows: geometry.trailingContentRows,
     offset: geometry.offset,
     overscan: VIRTUAL_LIMITS.overscan,
   });
@@ -658,7 +489,6 @@ export function TranscriptList({
               thinkingVisible={thinkingVisible}
               reducedMotion={reducedMotion}
               density={density}
-              mode={mode}
               nowSec={nowSecFor(entry, nowSec)}
               theme={theme}
               caps={caps}
@@ -669,102 +499,6 @@ export function TranscriptList({
       {selection.trailingRows > 0 && (
         <Box flexShrink={0} height={selection.trailingRows} />
       )}
-    </Box>
-  );
-}
-
-export function Transcript({
-  entries,
-  expandedToolIds,
-  thinkingVisible,
-  reducedMotion,
-  density,
-  mode,
-  nowSec,
-  theme,
-  caps,
-}: TranscriptProps): React.ReactElement {
-  const highWater = useRef(0);
-  const prevLen = useRef(0);
-  const { rows } = useTerminalSize();
-
-  const raw = computeSettledCount(entries, expandedToolIds);
-  // The transcript shrank (clear / reset / restore) — drop the high-water mark.
-  if (entries.length < prevLen.current) highWater.current = 0;
-  prevLen.current = entries.length;
-  const settled = Math.min(entries.length, Math.max(highWater.current, raw));
-  highWater.current = settled;
-
-  const settledEntries = entries.slice(0, settled);
-  const liveEntries = entries.slice(settled);
-
-  // I-L5-1 — the live region must stay strictly below `stdout.rows`, or Ink
-  // takes the `ink.js:118-123` branch and writes `clearTerminal +
-  // fullStaticOutput + output` on EVERY subsequent frame for the rest of the
-  // session.
-  //
-  // `LIVE_TAIL` is 1, so the common case is the design's `rows - 4` less the one
-  // row the clamp marker costs. THE DIVISION IS NOT DECORATION: the settled
-  // boundary is held back by an expanded card, a running tool, a live dispatch
-  // or a live todo list, and in every one of those cases the region holds
-  // SEVERAL entries at once — a flat per-entry ceiling of `rows - 4` would then
-  // overrun by a multiple of itself. `- 1` pays for each entry's marker row.
-  //
-  // The residual: an entry contributes at least its header row whatever the
-  // clamp says, so the bound holds while the live region holds fewer than about
-  // `rows / 2` entries. Bounding it unconditionally would mean refusing to draw
-  // a live entry at all, which is worse than a tall frame.
-  const liveBudget = Math.max(INLINE_LIVE_MIN_ROWS, rows - INLINE_LIVE_MARGIN);
-  const liveClampRows = Math.max(
-    1,
-    Math.floor(liveBudget / Math.max(1, liveEntries.length)) - 1,
-  );
-
-  return (
-    <Box flexDirection="column">
-      {/*
-        `separationRows` needs the preceding entry. `<Static>`'s child callback
-        already supplies `(item, index)`, so it comes straight off `items` — no
-        extra state, and the value is identical to the live branch's.
-
-        NO `liveClampRows` HERE, and that is the whole of L5's "nothing is lost":
-        an entry reaching `<Static>` is printed IN FULL, once, into the
-        terminal's own scrollback. The clamp only defers.
-      */}
-      <Static items={settledEntries}>
-        {(entry, index) => (
-          <EntryView
-            key={entry.id}
-            entry={entry}
-            prev={index > 0 ? settledEntries[index - 1] : undefined}
-            expanded={!!expandedToolIds[entry.id]}
-            thinkingVisible={thinkingVisible}
-            reducedMotion={reducedMotion}
-            density={density}
-            mode={mode}
-            theme={theme}
-            caps={caps}
-          />
-        )}
-      </Static>
-      <Box flexDirection="column">
-        {liveEntries.map((entry, i) => (
-          <EntryView
-            key={entry.id}
-            entry={entry}
-            prev={i > 0 ? liveEntries[i - 1] : entries[settled - 1]}
-            expanded={!!expandedToolIds[entry.id]}
-            thinkingVisible={thinkingVisible}
-            reducedMotion={reducedMotion}
-            density={density}
-            mode={mode}
-            theme={theme}
-            caps={caps}
-            liveClampRows={liveClampRows}
-            nowSec={nowSecFor(entry, nowSec)}
-          />
-        ))}
-      </Box>
     </Box>
   );
 }

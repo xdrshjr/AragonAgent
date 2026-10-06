@@ -5,8 +5,6 @@
  * I-1 (`frameHeight(r) < r`) can be pinned by a unit test rather than by hope.
  */
 
-export type RenderMode = 'fullscreen' | 'inline';
-
 /** Below this many rows a full-screen frame has no usable viewport left. */
 export const MIN_FULLSCREEN_ROWS = 12;
 /** Below this many columns the chrome (composer + status bar) cannot line-wrap sanely. */
@@ -40,44 +38,4 @@ export const FALLBACK_COLS = 80;
 export function frameHeight(rows: number | undefined): number {
   const r = rows && rows > 0 ? rows : FALLBACK_ROWS;
   return Math.max(0, r - 1);
-}
-
-interface StdoutLike {
-  isTTY?: boolean;
-  rows?: number;
-  columns?: number;
-}
-
-/** `CI=` / `CI=0` / `CI=false` are not CI; anything else non-empty is. */
-function isTruthyEnv(value: string | undefined): boolean {
-  if (value === undefined) return false;
-  const v = value.trim().toLowerCase();
-  return v.length > 0 && v !== '0' && v !== 'false';
-}
-
-/**
- * Decide the render mode once, at startup (never re-decided at run time —
- * entering/leaving the alt-screen mid-session is a state machine we do not want).
- *
- * Order is semantics, not style:
- *  1. an explicit opt-out always wins (users can always get v0.2.0 back);
- *  2. `isTTY` is the one gate `--fullscreen` cannot override — writing ANSI into
- *     a pipe or a redirected file is a contract violation, whereas a heuristic
- *     misfire only costs polish;
- *  3. the explicit force comes next so it can beat the heuristics below;
- *  4. heuristics (TERM/CI/size), all overridable by `--fullscreen`.
- */
-export function decideRenderMode(
-  flags: { fullscreen?: boolean },
-  env: Record<string, string | undefined>,
-  stdout: StdoutLike | undefined,
-): RenderMode {
-  if (flags.fullscreen === false) return 'inline';
-  if (!stdout?.isTTY) return 'inline';
-  if (flags.fullscreen === true) return 'fullscreen';
-  if (env.TERM === 'dumb') return 'inline';
-  if (isTruthyEnv(env.CI)) return 'inline';
-  if ((stdout.rows ?? 0) < MIN_FULLSCREEN_ROWS) return 'inline';
-  if ((stdout.columns ?? 0) < MIN_FULLSCREEN_COLS) return 'inline';
-  return 'fullscreen';
 }

@@ -22,7 +22,7 @@ registerBuiltinCommands(registry);
 
 interface Harness {
   store: TodoStore;
-  /** `App.tsx` mounts the rail, the inline strip and the chip on this. */
+  /** `App.tsx` mounts the rail and the chip on this. */
   railMounted: () => boolean;
   entryCount: () => number;
   notices: string[];

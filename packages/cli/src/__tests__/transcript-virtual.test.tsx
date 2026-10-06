@@ -31,6 +31,7 @@ function notices(count: number): Entry[] {
 }
 
 interface HarnessProps {
+  trailingContentRows?: number;
   entries: Entry[];
   viewportRows?: number;
   offset?: number;
@@ -41,6 +42,7 @@ interface HarnessProps {
 function Harness({
   entries,
   viewportRows = 40,
+  trailingContentRows = 0,
   offset = 0,
   sink,
   renders,
@@ -50,14 +52,13 @@ function Harness({
   seen.current += 1;
   if (renders) renders.current = seen.current;
   return (
-    <ViewportGeometryContext.Provider value={{ viewportRows, offset, contentRows: 0 }}>
+    <ViewportGeometryContext.Provider value={{ viewportRows, offset, contentRows: 0, trailingContentRows }}>
       <TranscriptList
         entries={entries}
         expandedToolIds={{}}
         thinkingVisible
         reducedMotion
         density="compact"
-        mode="fullscreen"
         theme={THEME}
         caps={CAPS}
         windowSize={20_000}
@@ -69,7 +70,7 @@ function Harness({
   );
 }
 
-function mount(entries: Entry[], opts: { viewportRows?: number; offset?: number } = {}): {
+function mount(entries: Entry[], opts: { viewportRows?: number; offset?: number; trailingContentRows?: number } = {}): {
   frame: string;
   mounted: number;
   renders: number;
@@ -128,7 +129,6 @@ describe('AC-1: the mounted entry count does not grow with the transcript', () =
           thinkingVisible
           reducedMotion
           density="compact"
-          mode="fullscreen"
           theme={THEME}
           caps={CAPS}
           windowSize={10}
@@ -159,4 +159,11 @@ describe('K-2: the height store converges', () => {
     const { renders } = mount(notices(200), { viewportRows: 30 });
     expect(renders).toBeLessThanOrEqual(5);
   });
+});
+
+it('projects a long footer without mounting the entire transcript', () => {
+  const view = mount(notices(10000), { viewportRows: 20, trailingContentRows: 50 });
+  expect(view.mounted).toBeLessThanOrEqual(3);
+  expect(view.frame).toContain('MARK9999END');
+  expect(view.frame).not.toContain('MARK9950END');
 });

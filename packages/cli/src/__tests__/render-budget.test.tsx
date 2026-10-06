@@ -17,6 +17,7 @@
 
 import { describe, expect, it } from 'vitest';
 import React from 'react';
+import { Box } from 'ink';
 import { render } from 'ink-testing-library';
 import { TranscriptList } from '../ui/Transcript.js';
 import { ViewportGeometryContext } from '../ui/layout/viewport-geometry.js';
@@ -41,11 +42,11 @@ function heavy(count: number): Entry[] {
   }));
 }
 
-function Harness({ entries }: { entries: Entry[] }): React.ReactElement {
+function Harness({ entries, offset = 0 }: { entries: Entry[]; offset?: number }): React.ReactElement {
   const heights = useHeightStore();
   return (
     <ViewportGeometryContext.Provider
-      value={{ viewportRows: VIEWPORT_ROWS, offset: 0, contentRows: 0 }}
+      value={{ viewportRows: VIEWPORT_ROWS, offset, contentRows: 0, trailingContentRows: 8 }}
     >
       <TranscriptList
         entries={entries}
@@ -53,7 +54,6 @@ function Harness({ entries }: { entries: Entry[] }): React.ReactElement {
         thinkingVisible
         reducedMotion
         density="compact"
-        mode="fullscreen"
         theme={THEME}
         caps={CAPS}
         windowSize={20_000}
@@ -115,4 +115,17 @@ describe('AC-1: the render budget is independent of transcript length', () => {
     const withoutMonster = budgetOf(heavy(200));
     expect(withMonster.chars).toBeLessThanOrEqual(Math.ceil(withoutMonster.chars * 1.1));
   });
+});
+
+it('keeps a 10000-entry document bounded while the drag target moves', () => {
+  const entries = heavy(10000);
+  const frame = (offset: number) => <Box height={VIEWPORT_ROWS} width={80} overflow="hidden">
+    <Harness entries={entries} offset={offset} /></Box>;
+  const view = render(frame(0));
+  for (const offset of [100, 4000, 16000, 1000, 0]) {
+    view.rerender(frame(offset));
+    const text = stripAnsi(view.lastFrame() ?? '').split('\n').filter((row) => row.trim());
+    expect(text.length).toBeLessThan(VIEWPORT_ROWS * 4);
+  }
+  view.unmount();
 });

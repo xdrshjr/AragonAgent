@@ -65,6 +65,7 @@ export interface FollowInput {
   overflowLines: number;
   /** Signed: rows appended at (or removed from) the tail since the last frame. */
   tailDelta: number;
+  layoutTailDelta?: number;
   /** True while a selection drag holds the viewport (§4.4). */
   hold: boolean;
   newLinesWhilePaused: number;
@@ -96,9 +97,7 @@ export function reduceFollow(input: FollowInput): FollowOutput {
   // pointer (S3), and freezing means the pin becomes an anchor for the duration
   // of the drag (T-20).
   if (offset === 0 && !hold) return { offset, newLinesWhilePaused: 0 };
-  if (tailDelta === 0) return { offset, newLinesWhilePaused: input.newLinesWhilePaused };
-
-  const next = clampScroll(offset + tailDelta, overflowLines);
+  const next = clampScroll(offset + tailDelta + (input.layoutTailDelta ?? 0), overflowLines);
   return {
     offset: next,
     // Only real arrivals arm the resume timer, and reaching the bottom by ANY

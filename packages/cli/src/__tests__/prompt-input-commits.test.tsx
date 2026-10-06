@@ -17,19 +17,23 @@
  * does not cause — the test would pass while the defect was fully present.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
-import { render } from 'ink-testing-library';
+import { cleanup, render } from 'ink-testing-library';
 import { PromptInput } from '../ui/PromptInput.js';
 import { getTheme } from '../ui/theme.js';
 import { pickGlyphs } from '../ui/glyphs.js';
 import { PASTE_CLOSE, PASTE_OPEN } from '../input/limits.js';
+import stringWidth from 'string-width';
+import stripAnsi from 'strip-ansi';
 import type { TermCapabilities } from '../ui/capabilities.js';
 
 const CAPS: TermCapabilities = { colorLevel: 3, unicode: true };
 const THEME = getTheme('cool', CAPS);
 
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 let renderCount = 0;
 
@@ -101,6 +105,135 @@ describe('PromptInput commit count (AC-4)', () => {
     await delay(5);
     expect(renderCount - baseline).toBe(2);
     unmount();
+  });
+});
+
+describe('caret integration and escape ownership', () => {
+  const props = {
+    isActive: true, running: false, history: [],
+    commands: [{ name: 'help', description: 'Show help' }], cwd: process.cwd(),
+    theme: THEME, caps: { colorLevel: 0, unicode: true } as TermCapabilities,
+    onSubmit: vi.fn(),
+  };
+
+  it('blinks the empty placeholder without parent work', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const onDraftChange = vi.fn();
+    const onPopupRowsChange = vi.fn();
+    const view = render(<CountedPromptInput {...props}
+      onDraftChange={onDraftChange} onPopupRowsChange={onPopupRowsChange} />);
+    await delay(10);
+    expect(view.lastFrame()).toContain('_end a message');
+    const renders = renderCount;
+    const draftCalls = onDraftChange.mock.calls.length;
+    const popupCalls = onPopupRowsChange.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(view.lastFrame()).toContain('Send a message');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(renderCount).toBe(renders);
+    expect(onDraftChange).toHaveBeenCalledTimes(draftCalls);
+    expect(onPopupRowsChange).toHaveBeenCalledTimes(popupCalls);
+  });
+
+  it('routes popup dismissal and unconsumed Escape separately, including meta Escape', async () => {
+    const onEscape = vi.fn();
+    const onEscapeDismiss = vi.fn();
+    const view = render(<PromptInput {...props} onEscape={onEscape} onEscapeDismiss={onEscapeDismiss} />);
+    await delay(10);
+    view.stdin.write('/');
+    await delay(10);
+    view.stdin.write('\x1b');
+    await delay(10);
+    expect(onEscapeDismiss).toHaveBeenCalledTimes(1);
+    expect(onEscape).not.toHaveBeenCalled();
+    view.stdin.write('\x1b');
+    await delay(10);
+    expect(onEscape).toHaveBeenCalledTimes(1);
+  });
+
+  it('resets after edit, movement and backspace without changing submitted text', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const onSubmit = vi.fn();
+    const view = render(<PromptInput {...props} onSubmit={onSubmit} />);
+    await delay(10);
+    view.stdin.write('ab');
+    await delay(10);
+    await vi.advanceTimersByTimeAsync(500);
+    view.stdin.write('\x1b[D');
+    await delay(10);
+    expect(view.lastFrame()).toContain('a_');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(view.lastFrame()).toContain('ab');
+    view.stdin.write('\x7f');
+    await delay(10);
+    expect(view.lastFrame()).toContain('_');
+    view.stdin.write('\r');
+    await delay(10);
+    expect(onSubmit).toHaveBeenCalledWith('b');
+  });
+
+  it('does not reset on running-state changes, but resets on width and focus changes', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const view = render(<PromptInput {...props} />);
+    await delay(10);
+    await vi.advanceTimersByTimeAsync(500);
+    view.rerender(<PromptInput {...props} running />);
+    expect(view.lastFrame()).toContain('Type to steer');
+    expect(view.lastFrame()).toContain('Esc twice to interrupt');
+    Object.defineProperty(view.stdout, 'columns', { value: 50, configurable: true });
+    view.rerender(<PromptInput {...props} running />);
+    expect(view.lastFrame()).toContain('_ype to steer');
+    view.rerender(<PromptInput {...props} isActive={false} />);
+    expect(view.lastFrame()).toContain('Send a message');
+    expect(vi.getTimerCount()).toBe(0);
+    view.rerender(<PromptInput {...props} reducedMotion />);
+    expect(view.lastFrame()).toContain('_end a message');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('keeps the full-row caret reservation and draft budget through both phases', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const onDraftChange = vi.fn();
+    const view = render(<PromptInput {...props} onDraftChange={onDraftChange} />);
+    Object.defineProperty(view.stdout, 'columns', { value: 20, configurable: true });
+    view.rerender(<PromptInput {...props} onDraftChange={onDraftChange} />);
+    await delay(10);
+    view.stdin.write('x'.repeat(14));
+    await delay(10);
+    const bright = view.lastFrame()!.split('\n');
+    expect(onDraftChange.mock.lastCall?.[0].rows).toBe(2);
+    expect(bright).toHaveLength(4);
+    const calls = onDraftChange.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(500);
+    const dark = view.lastFrame()!.split('\n');
+    expect(dark.map((row) => stringWidth(row))).toEqual(bright.map((row) => stringWidth(row)));
+    expect(onDraftChange).toHaveBeenCalledTimes(calls);
+  });
+
+  it.each([0, 3] as const)('keeps zero-width row budgets and submissions stable at color level %s', async (colorLevel) => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const body = 'e\u0301\n\u0301\n\u0301e\nxe\u0301';
+    const onSubmit = vi.fn();
+    const onDraftChange = vi.fn();
+    const view = render(<PromptInput {...props} caps={{ ...props.caps, colorLevel }}
+      onSubmit={onSubmit} onDraftChange={onDraftChange} />);
+    await delay(10);
+    view.stdin.write(`${PASTE_OPEN}${body}${PASTE_CLOSE}`);
+    await delay(10);
+    // Visit every UTF-16 location, including combining marks and newlines.
+    for (let i = 0; i <= body.length; i += 1) {
+      const bright = stripAnsi(view.lastFrame()!).split('\n');
+      const reports = onDraftChange.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(500);
+      const dark = stripAnsi(view.lastFrame()!).split('\n');
+      expect(dark.map((row) => stringWidth(row))).toEqual(bright.map((row) => stringWidth(row)));
+      expect(onDraftChange).toHaveBeenCalledTimes(reports);
+      view.stdin.write('\x1b[D');
+      await delay(5);
+    }
+    view.stdin.write('\r');
+    await delay(10);
+    expect(onSubmit).toHaveBeenCalledWith(body);
   });
 });
 
@@ -262,7 +395,7 @@ describe('paste through the composer (section 5.4)', () => {
     // Proves the indicator is actually on screen, so the row-count assertion
     // below is not passing on a draft that simply fits.
     expect(frame).toContain(pickGlyphs(CAPS).arrowUp);
-    expect(frame.split(String.fromCharCode(10)).length).toBe(reported[reported.length - 1]);
+    expect(frame.split(String.fromCharCode(10)).length).toBe(reported[reported.length - 1]! + 2); // top and bottom border
     unmount();
   });
 
@@ -277,5 +410,30 @@ describe('paste through the composer (section 5.4)', () => {
 
     expect(renderCount - baseline).toBe(1);
     unmount();
+  });
+});
+
+describe('editing returns to the unified document tail', () => {
+  it('excludes viewport keys before popup navigation and accepts one paste interaction', async () => {
+    const interaction = vi.fn();
+    const submit = vi.fn();
+    const view = render(<PromptInput isActive cursorVisible={false} cols={39}
+      running={false} history={[]} commands={[{ name: 'help', description: 'Help' }]}
+      cwd={process.cwd()} theme={THEME} caps={CAPS} onSubmit={submit}
+      onInteraction={interaction} />);
+    await delay(20);
+    view.stdin.write('/'); await delay(20);
+    expect(interaction).toHaveBeenCalledTimes(1);
+    for (const key of ['\x1b[1;2A', '\x1b[1;2B', '\x1b[5~', '\x1b[6~']) {
+      view.stdin.write(key); await delay(10);
+    }
+    expect(interaction).toHaveBeenCalledTimes(1);
+    view.stdin.write('\x15'); await delay(10);
+    interaction.mockClear();
+    view.stdin.write(`${PASTE_OPEN}hello world${PASTE_CLOSE}`); await delay(20);
+    expect(interaction).toHaveBeenCalledTimes(1);
+    view.stdin.write('\r'); await delay(20);
+    expect(submit).toHaveBeenCalledExactlyOnceWith('hello world');
+    view.unmount();
   });
 });

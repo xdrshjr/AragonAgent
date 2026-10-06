@@ -9,25 +9,49 @@
  * "the input is no longer empty", and routing that through App would re-render
  * the transcript on the first keystroke of every message.
  *
- * As of v0.4.0 this is the ONLY place keybinding hints are shown — the status
- * bar's duplicate cluster is gone (§4.6). Two hints for the same keys, one of
- * them 31 columns wide, were both redundant and the reason the status bar had a
- * `cols >= 110` breakpoint.
+ * The fixed status row retains emergency and history-navigation hints while
+ * this footer scrolls outside the viewport. Editor state stays mounted.
  */
 
 import React, { useCallback, useState } from 'react';
-import { Box, Text } from 'ink';
+import { Box, Text, type DOMElement } from 'ink';
+import stringWidth from 'string-width';
 import type { Theme } from './theme.js';
 import type { TermCapabilities } from './capabilities.js';
 import { pickGlyphs } from './glyphs.js';
 import { HINT_FADE_AFTER } from '../config/schema.js';
 import { PromptInput, type CommandOption } from './PromptInput.js';
-import { ModeChip } from './ModeChip.js';
+import { ModeChip, modeChipCols } from './ModeChip.js';
+import { ActivityLabel, resolveActivityLabel } from './ActivityLine.js';
+import { RUN_ROW_LEAD, planRunRow, type RunActivity } from './run-status-row.js';
 import { MODE_LABEL, MODE_TOGGLE_KEYS, nextMode, type AgentMode } from '../agent/agent-mode.js';
 
+/**
+ * The run status row (tui-scrollbar-edge-and-run-row §3.3): the spinner, the phrase
+ * and the `steer / interrupt / exit` clauses on ONE row above the input box.
+ * `App` passes it only while a run is in flight AND the idle hint row would have
+ * been shown, so enabling it never changes the footer's height.
+ */
+export interface RunRowProps {
+  activity: RunActivity;
+  /** The row is in the viewport with no overlay: draw the animated spinner. */
+  live: boolean;
+  /** Measured by `ScrollViewport` to learn whether the row has scrolled away. */
+  rowRef?: React.RefObject<DOMElement>;
+}
+
 export interface ComposerProps {
+  /** Present only while the run status row replaces the hint row below the input. */
+  runRow?: RunRowProps | null;
+  cols?: number;
+  cursorVisible?: boolean;
+  onInteraction?: () => void;
+  measureRef?: React.RefObject<DOMElement>;
   /** False while an overlay owns the keyboard (the input is visually blurred). */
   isActive: boolean;
+  reducedMotion?: boolean;
+  onEscape?: () => void;
+  onEscapeDismiss?: () => void;
   running: boolean;
   history: string[];
   commands: CommandOption[];
@@ -97,6 +121,25 @@ export interface ComposerProps {
 }
 
 /**
+ * The running-state hint as separate clauses, most urgent first.
+ *
+ * `hintText` joins them (its output is pinned by AC-43), and the run status row
+ * consumes the SAME array so it can drop whole clauses from the tail on a narrow
+ * terminal instead of cutting `interrupt` in half. One source, two consumers.
+ */
+export function runningHintClauses(opts: {
+  glyphs: ReturnType<typeof pickGlyphs>;
+  services: number;
+}): string[] {
+  const { glyphs, services } = opts;
+  const clauses = [`${glyphs.enterKey} steer`, `esc${glyphs.times}2 interrupt`];
+  // Confirmation is named even when service controls also need space.
+  if (services > 0) clauses.push(`ctrl+c stop ${services}`);
+  clauses.push(`ctrl+c${glyphs.times}2 exit`);
+  return clauses;
+}
+
+/**
  * Build the hint row.
  *
  * The `running` branch is NEVER abbreviated, no matter how experienced the user
@@ -124,20 +167,7 @@ function hintText(opts: {
   // clauses are shown; the row is `wrap="truncate"` and they are ordered
   // most-urgent-first, so a terminal too narrow for all of them drops the exit
   // clause last rather than the abort key.
-  if (running) {
-    if (services > 0) {
-      return [
-        `${glyphs.enterKey} steer`,
-        // Rung two is named because the whole point of the ladder is that the
-        // first press can fail; a user who does not know there is a second press
-        // is left exactly where the reported screenshot left them.
-        `esc abort${glyphs.times}2 force`,
-        `ctrl+c stop ${services}`,
-        `ctrl+c${glyphs.times}2 exit`,
-      ].join(dot);
-    }
-    return [`${glyphs.enterKey} steer`, 'esc abort', `ctrl+c${glyphs.times}2 exit`].join(dot);
-  }
+  if (running) return runningHintClauses({ glyphs, services }).join(dot);
   // The hint names the DESTINATION, not the current state — the correct label
   // for a toggle affordance, and the reason the mode word here is the OPPOSITE
   // of the one on the chip beside it.
@@ -173,8 +203,55 @@ function hintText(opts: {
  */
 export const hintTextForTest = hintText;
 
+function RunRow({
+  runRow, cols, services, agentMode, theme, caps,
+}: {
+  runRow: RunRowProps;
+  cols: number;
+  services: number;
+  agentMode: AgentMode;
+  theme: Theme;
+  caps: TermCapabilities;
+}): React.ReactElement {
+  const glyphs = pickGlyphs(caps);
+  const separator = ` ${glyphs.midDot} `;
+  const clauses = runningHintClauses({ glyphs, services });
+  const plan = planRunRow({
+    cols,
+    // Spinner glyph + the space after it, then the label.
+    labelCols: 2 + stringWidth(resolveActivityLabel(runRow.activity, glyphs)),
+    hintClauseCols: clauses.map((clause) => stringWidth(clause)),
+    separatorCols: stringWidth(separator),
+    chipCols: modeChipCols(agentMode),
+  });
+  return (
+    <Box ref={runRow.rowRef} flexDirection="row" flexShrink={0}>
+      <Box width={RUN_ROW_LEAD} flexShrink={0}><Text>{' '}</Text></Box>
+      <Box width={plan.labelCols} flexShrink={0}>
+        <ActivityLabel {...runRow.activity} spinnerLive={runRow.live} theme={theme} caps={caps} />
+      </Box>
+      {plan.hintClauses > 0 && (
+        <Text wrap="truncate" color={theme.hintFg ?? theme.muted}>
+          {separator}{clauses.slice(0, plan.hintClauses).join(separator)}
+        </Text>
+      )}
+      {plan.chip && (
+        <>
+          <Box flexGrow={1} />
+          <ModeChip mode={agentMode} theme={theme} caps={caps} />
+        </>
+      )}
+    </Box>
+  );
+}
+
 export function Composer({
+  runRow,
+  cols, cursorVisible, onInteraction, measureRef,
   isActive,
+  reducedMotion,
+  onEscape,
+  onEscapeDismiss,
   running,
   history,
   commands,
@@ -219,12 +296,31 @@ export function Composer({
     : theme.idleBorder ?? theme.border;
 
   const glyphs = pickGlyphs(caps);
-  const visible = showHint && hintsEnabled;
+  // While the run row is up it REPLACES the hint row below the input (same row
+  // count, so starting a run never moves the layout).
+  const runRowActive = running && !!runRow;
+  const visible = showHint && hintsEnabled && !runRowActive;
 
   return (
-    <Box flexDirection="column" flexShrink={0}>
+    <Box ref={measureRef} flexDirection="column" flexShrink={0}>
+      {runRowActive && (
+        <RunRow
+          runRow={runRow}
+          cols={cols ?? process.stdout.columns ?? 80}
+          services={services}
+          agentMode={agentMode}
+          theme={theme}
+          caps={caps}
+        />
+      )}
       <PromptInput
+        cols={cols}
+        cursorVisible={cursorVisible}
+        onInteraction={onInteraction}
         isActive={isActive}
+        reducedMotion={reducedMotion}
+        onEscape={onEscape}
+        onEscapeDismiss={onEscapeDismiss}
         running={running}
         history={history}
         commands={commands}
@@ -237,7 +333,7 @@ export function Composer({
         onSubmit={onSubmit}
         onHelp={onHelp}
         agentMode={agentMode}
-        bordered={{ color: borderColor }}
+        borderColor={borderColor}
         onDraftChange={onDraftChange}
         onNotice={onNotice}
         scrolledLines={scrolledLines}

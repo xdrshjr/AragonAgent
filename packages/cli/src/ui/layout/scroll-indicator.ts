@@ -30,6 +30,7 @@ export function thumbRange(
   viewportRows: number,
   contentRows: number,
   offsetFromBottom: number,
+  reserveTravel = false,
 ): ThumbRange | null {
   const viewport = Math.floor(viewportRows);
   const content = Math.floor(contentRows);
@@ -39,7 +40,8 @@ export function thumbRange(
   const overflow = content - viewport;
   const offset = Math.min(Math.max(Math.floor(offsetFromBottom) || 0, 0), overflow);
 
-  const size = Math.min(viewport, Math.max(1, Math.round((viewport * viewport) / content)));
+  const maximum = reserveTravel && viewport >= 2 ? viewport - 1 : viewport;
+  const size = Math.min(maximum, Math.max(1, Math.round((viewport * viewport) / content)));
   const travel = viewport - size;
   const hiddenAbove = overflow - offset;
   const start = travel <= 0 ? 0 : Math.round((hiddenAbove / overflow) * travel);

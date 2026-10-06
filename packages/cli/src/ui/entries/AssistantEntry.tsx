@@ -37,29 +37,7 @@ interface AssistantEntryProps {
    * `thought for 0s` is a lie where a bare `thought` is merely terse.
    */
   thinkingMs?: number;
-  /**
-   * Whether pressing `Ctrl+T` would actually reveal THIS entry's body — i.e.
-   * `mode === 'fullscreen'` (D-16 / P0-2).
-   *
-   * In inline mode a settled entry has already been printed into Ink's
-   * `<Static>`, which cannot un-print or re-print (`Transcript.tsx:9-10`), and
-   * the settled boundary is held monotonic precisely so an entry never flows back
-   * out. With thinking hidden by default the body is never printed there AT ALL,
-   * so a row reading `ctrl+t to show` would be an instruction that provably does
-   * nothing. The row degrades to `* thought for 12s` instead — still honest that
-   * reasoning happened and how long it took, and silent about a key that cannot
-   * deliver.
-   */
-  revealable?: boolean;
-  /**
-   * Inline mode only (L5): keep at most this many rows of a LIVE entry, so the
-   * non-`<Static>` region cannot reach `stdout.rows`. `undefined` means no
-   * clamp on the ANSWER BODY, which is what the full-screen branch passes — so
-   * the rendered answer there is byte-identical to a pre-feature build. (The
-   * thinking block has its own streaming clamp below and is not covered by that
-   * statement.)
-   */
-  liveClampRows?: number;
+
   theme: Theme;
   caps: TermCapabilities;
 }
@@ -73,8 +51,6 @@ function AssistantEntryImpl(props: AssistantEntryProps): React.ReactElement | nu
     streaming,
     aborted,
     thinkingMs,
-    revealable,
-    liveClampRows,
     theme,
     caps,
   } = props;
@@ -89,13 +65,11 @@ function AssistantEntryImpl(props: AssistantEntryProps): React.ReactElement | nu
   // full-screen mode: it is scratch reasoning the user reads the newest end of,
   // and an unbounded one is the single easiest way to push a live entry past the
   // whole viewport.
-  const thinkingRows = liveClampRows ?? (streaming ? STREAMING_THINKING_ROWS : undefined);
+  const thinkingRows = streaming ? STREAMING_THINKING_ROWS : undefined;
   const clampedThinking =
     hasThinking && thinkingRows !== undefined
       ? clampLiveText(thinking!, thinkingRows)
       : { text: thinking ?? '', hiddenRows: 0 };
-  const body =
-    liveClampRows === undefined ? { text, hiddenRows: 0 } : clampLiveText(text, liveClampRows);
 
   return (
     <Box flexDirection="column">
@@ -119,36 +93,18 @@ function AssistantEntryImpl(props: AssistantEntryProps): React.ReactElement | nu
           </Box>
         </Box>
       )}
-
-      {/*
-        THE COLLAPSED MARKER (§3.1.3). Hiding information without saying that it
-        exists is how a "clean" UI becomes a dishonest one; this row is the whole
-        difference. It names that reasoning happened, how long it took, and — in
-        the mode where the key can deliver — how to see it.
-
-        `!streaming` IS REQUIRED. While the run is live the activity line is the
-        live surface; a second live marker inside the transcript would duplicate
-        it and would also keep the entry off `<Static>`.
-      */}
       {hasThinking && !thinkingVisible && !streaming && (
         <Text wrap="truncate" color={theme.muted}>
           {glyphs.thinking} thought
           {thinkingMs !== undefined ? ` for ${formatDuration(thinkingMs)}` : ''}
-          {revealable ? ` ${glyphs.midDot} ctrl+t to show` : ''}
+          {` ${glyphs.midDot} ctrl+t to show`}
         </Text>
       )}
 
       {(hasText || streaming) && (
         <Box flexDirection="column">
-          {body.hiddenRows > 0 && (
-            <Text wrap="truncate" color={theme.muted}>
-              {glyphs.ellipsis} {body.hiddenRows} earlier{' '}
-              {body.hiddenRows === 1 ? 'line' : 'lines'} {glyphs.midDot} shown in full when this
-              entry finishes
-            </Text>
-          )}
           {hasText ? (
-            <Markdown text={body.text} theme={theme} caps={caps} />
+            <Markdown text={text} theme={theme} caps={caps} />
           ) : (
             <Text color={theme.muted}>{glyphs.ellipsis}</Text>
           )}

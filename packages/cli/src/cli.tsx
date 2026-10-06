@@ -16,8 +16,9 @@ import process from 'node:process';
 
 import '../runtime/insecure-tls-warning.cjs';
 
+// Must precede every other dependency that imports Ink: CI detection is cached.
+import { render } from './ui/ink-runtime.js';
 import React from 'react';
-import { render } from 'ink';
 import { Command } from 'commander';
 import { loadConfig, type CliFlags } from './config/load.js';
 import { getConfigPath, readConfigFile, updatePersistedConfig } from './config/store.js';
@@ -95,12 +96,14 @@ import { registerSessionsCommand } from './session/cli-commands.js';
 import { registerDoctorCommand, registerInfoCommand } from './diagnostics/cli-commands.js';
 import type { ToolPermission } from './exec/permission.js';
 import { App, type AppProps, type ConfirmBridge } from './ui/App.js';
-import { decideRenderMode } from './ui/layout/frame.js';
 import { createFrameDiffer } from './ui/frame-differ.js';
 import { wrapStdoutForFrames } from './ui/stdout-frame-writer.js';
 import { setFrameStatsProvider } from './commands/perf.js';
 import { tryCreateStdinFilter } from './input/stdin-filter.js';
 import type { PasteBridge } from './input/limits.js';
+import { createScrollbarBridge } from './ui/scrollbar-controller.js';
+import { createPointerRouter } from './input/pointer-router.js';
+import { createFrameObserver } from './ui/frame-observer.js';
 import { enterAltScreen, writeExitTranscript, type ScreenHandle } from './ui/screen.js';
 import { supportsWindowsVtInput } from './ui/win-vt-input.js';
 import { forceWindowsVtInput } from './ui/win-vt-force.js';
@@ -158,7 +161,6 @@ const VERSION = readVersion();
 
 interface RawOpts {
   print?: boolean;
-  fullscreen?: boolean;
   exitTranscript?: boolean;
   provider?: string;
   model?: string;
@@ -225,7 +227,6 @@ function toFlags(opts: RawOpts): CliFlags {
     confirm: opts.confirm,
     toolTimeout: opts.toolTimeout,
     idleTimeout: opts.idleTimeout,
-    fullscreen: opts.fullscreen,
     exitTranscript: opts.exitTranscript,
     compact: opts.compact,
     hints: opts.hints,
@@ -378,15 +379,8 @@ function makeController(
   // resolved a bootstrap level — it ran before commander and before `.env` were
   // readable — and without this hand-off the fully resolved one never applies.
   getLogger().reconfigure(config.log);
-  // Whether this session could EVER show the todo rail (todo-plan-execution
-  // §3.7 / P1-6). It varies ONE sentence of `<todo_planning>`; `decideRenderMode`
-  // is pure and `runInteractive` calls it again with the same inputs, so
-  // computing it here rather than threading it back costs nothing and keeps the
-  // controller's construction self-contained.
-  const todoPanelCapable =
-    opts.interactive &&
-    decideRenderMode({ fullscreen: config.fullscreen }, process.env, process.stdout) ===
-      'fullscreen';
+  // Headless controllers never expose the task panel.
+  const todoPanelCapable = opts.interactive;
   const confirmBridge: ConfirmBridge = { handler: null };
   // `cancelPending` is replaced by the App's own implementation on mount; this
   // no-op keeps the object total so nothing has to null-check it.
@@ -550,11 +544,15 @@ function runInteractive(
   flags: CliFlags,
   extras: { initialPrompt?: string; initialOverlay?: Overlay } = {},
 ): void {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    process.stderr.write('Interactive UI requires a TTY. Use -p "<prompt>", exec, or config list / config set.\n');
+    process.exitCode = 2;
+    return;
+  }
   const { controller, confirmBridge, humanInputBridge } = makeController(flags);
   const config = controller.getConfig();
-  const mode = decideRenderMode({ fullscreen: config.fullscreen }, process.env, process.stdout);
   const logger = getLogger();
-  logger.info('cli', 'run_interactive', { mode, provider: config.provider, model: config.model });
+  logger.info('cli', 'run_interactive', { mode: 'fullscreen', provider: config.provider, model: config.model });
   attachAgentEvents(logger, controller);
   // The team stream is CLI-local (D-10), so `attachAgentEvents` cannot see it.
   // Without this a dispatch leaves NO trace in the log file at all — the wrong
@@ -606,7 +604,6 @@ function runInteractive(
   const vtInputByNode = supportsWindowsVtInput(process.platform, process.versions.node);
   const vtInputSupported = vtInputByNode || forceVtInputForThisConsole();
   const wantMouse =
-    mode === 'fullscreen' &&
     config.mouse &&
     !!process.stdout.isTTY &&
     !!process.stdin.isTTY &&
@@ -652,37 +649,30 @@ function runInteractive(
 
   // --- Drag-select (tui-selection-and-scroll-follow §4.4). ------------------
   //
-  // ONE EXPRESSION, READ BY FOUR THINGS, and that is the same discipline
-  // `wantMouse` above follows for the same reason: the `?1002h` write, the
-  // controller, the differ's `decorate` hook and the startup notice must never
-  // disagree about whether drag-select is running. With it false the session is
-  // byte-identical to a pre-feature build — no extra escape on the wire (AC-8),
-  // no controller, no `decorate`, no mirror.
+  // Selection owns its controller, decoration and notice. Button motion follows
+  // mouseOn independently so --no-mouse-select still permits scrollbar dragging.
   const wantSelect = mouseOn && config.mouseSelect;
+  let mouseCaptured = mouseOn;
+  const scrollbar = createScrollbarBridge(() => mouseCaptured);
+  const pointerRouter = mouseOn && filter ? createPointerRouter({
+    source: filter.source, handle: (event) => scrollbar.controller?.handle(event) ?? false,
+  }) : null;
   const selectionBridge: SelectionBridge = {
     controller: null,
     onCopied: null,
     requestRedraw: null,
   };
 
-  // --- Frame differ (tui-input-flicker-fix §3.2 / §4.2). -------------------
-  //
-  // FULL-SCREEN ONLY, and that is invariant I-3 rather than caution: inline mode
-  // prints settled entries through Ink's `<Static>`, starts wherever the shell's
-  // cursor happened to be and scrolls, so row k of a frame is not absolute row k
-  // there and never will be. `--no-diff-render` skips construction entirely,
-  // which is what makes rung 2 of the fail-safe ladder byte-identical to a
-  // pre-fix build rather than merely equivalent.
-  //
-  // `rows` is a THUNK, not a snapshot: it is the only input to the I-9 geometry
-  // guard and it changes under the differ's feet on every resize.
   const frameWriter =
-    mode === 'fullscreen' && config.diffRender
+    config.diffRender
       ? wrapStdoutForFrames(
           process.stdout,
           createFrameDiffer({
             sync: config.syncOutput && process.env.TERM !== 'dumb',
             rows: () => process.stdout.rows,
+            // Rows that fill the line skip `CSI K` so the scrollbar's last column
+            // is not erased on pending-wrap terminals (frame-differ I-4).
+            cols: () => process.stdout.columns,
             // The console bridge (`App.tsx`, full-screen only) turns this into
             // `dispatch({type:'notice', level:'warn'})`, which is the only legal
             // user-visible channel with the TUI mounted — a direct write would
@@ -715,14 +705,20 @@ function runInteractive(
   // `null` when no writer was built, so `/perf` can say "diff render off" rather
   // than printing zeroes that read like a writer doing nothing (§5.4).
   if (frameWriter) setFrameStatsProvider(frameWriter.stats);
+  const frameObserver = createFrameObserver({
+    stdout: frameWriter?.stdout ?? process.stdout, terminal: process.stdout, scrollbar,
+  });
   const disposeFrameWriter = (): void => {
+    frameObserver.dispose();
+    pointerRouter?.dispose();
+    scrollbar.controller?.dispose();
     if (!frameWriter) return;
     setFrameStatsProvider(null);
     frameWriter.dispose();
   };
 
   const replayTranscript = (): void => {
-    if (replayed || mode !== 'fullscreen' || !config.exitTranscript) return;
+    if (replayed || !config.exitTranscript) return;
     replayed = true;
     const snapshot = readExitSnapshot();
     if (!snapshot) return; // Never published (instant exit) — skip, do not throw.
@@ -743,7 +739,7 @@ function runInteractive(
     );
   };
 
-  if (mode === 'fullscreen') {
+  {
     // `mouse` here means "a mouse-parsing filter is installed", NOT "the user
     // wants mouse support" — see `AltScreenOptions`. `screen.ts` must never
     // derive it for itself, or a later refactor re-opens the gap I-8 closes.
@@ -756,8 +752,8 @@ function runInteractive(
     // keep their terminal's own selection.
     screen = enterAltScreen(process.stdout, {
       mouse: mouseOn,
-      motion: wantSelect,
-      bracketedPaste: pasteOn && mode === 'fullscreen',
+      motion: mouseOn,
+      bracketedPaste: pasteOn,
     });
     const restore = (): void => screen?.restore();
 
@@ -785,44 +781,8 @@ function runInteractive(
     });
   }
 
-  // --- Auto-update (cli-auto-update section 3.8). --------------------------
-  //
-  // THE ONLY CONSTRUCTION SITE. `runOneShot` / `runHeadless` never reach this
-  // function, so `aragon -p` executes zero update code and its stdout is
-  // byte-identical to a pre-feature build (AC-1); `aragon config <subcommand>`,
-  // `aragon logs`, `aragon skills` and `aragon --version` likewise. Bare
-  // `aragon config` DOES construct it, because it is a full interactive session
-  // with a settings overlay on top - which is correct, and is why AC-1's claim
-  // names the SUBCOMMAND form.
-  //
-  // `CI` is excluded on top of the two TTY tests because a CI runner with a pty
-  // allocated is otherwise a machine that silently mutates its own global
-  // toolchain mid-pipeline (D-11).
-  // --- The foreign-write door (§4.4.5). ------------------------------------
-  //
-  // Where bytes that are OURS but are NOT a frame go — today, the OSC 52
-  // clipboard sequence. THREE SHAPES, ONE DOOR, and the third one is the reason
-  // this is a resolved value rather than an inline arrow:
-  //
-  //  * with the differ in front of stdout it MUST be `frameWriter.writeForeign`,
-  //    which invalidates the cache and skips the fallback accounting — through
-  //    the proxy the same bytes are an unrecognised chunk, which is
-  //    `passThrough(true)`, which prints `FRAME_FALLBACK_NOTICE` at a user who
-  //    did nothing but copy something (P1-6);
-  //  * without one — `--no-diff-render`, and inline mode, which never builds a
-  //    differ at all — stdout IS the real stream, so a direct write is both safe
-  //    and what §4.4.5 prescribes. OSC 52 emits no newline, so Ink's own line
-  //    accounting is untouched and there is nothing to invalidate;
-  //  * on a non-TTY there is no terminal to accept it, so the door is ABSENT.
-  //
-  // It must never be a function that accepts a chunk and writes NOWHERE.
-  // `copyText` reports `'osc52'` whenever its door took the text, so a silent
-  // no-op door — which `frameWriter?.writeForeign(chunk)` is under
-  // `--no-diff-render` — makes the toast name a mechanism that was never
-  // attempted. Naming the mechanism honestly is the entire reason that return
-  // value exists (R-7), and a door that lies is worse than no door.
   const writeForeign: ((text: string) => void) | null = frameWriter
-    ? (text: string) => frameWriter.writeForeign(text)
+    ? (text: string) => { frameObserver?.invalidate(); frameWriter.writeForeign(text); }
     : process.stdout.isTTY
     ? (text: string) => {
         try {
@@ -844,10 +804,9 @@ function runInteractive(
   // than inside `screen.ts`'s closure because `App` needs to READ it and the
   // handle's own flag is private (it has to be — `restore()` reads it, and
   // exposing a setter would be a second way to get the two out of step).
-  let mouseCaptured = mouseOn;
   if (wantSelect && filter) {
     selectionBridge.controller = createSelectionController({
-      source: filter.source,
+      source: pointerRouter?.selectionSource ?? filter.source,
       // The frame writer is absent under `--no-diff-render`, where there is no
       // cache to repaint from at all; the controller then falls back to asking
       // `App` for a React redraw on every drag flush, which is slower and
@@ -872,28 +831,16 @@ function runInteractive(
     selectionBridge.controller = null;
   };
 
-  /**
-   * The terminal-facing services `App` cannot build for itself (§4.4).
-   *
-   * PRESENT IN INLINE MODE TOO, and only for the foreign-write door: §4.4.5
-   * routes `/copy` through `ui/clipboard.ts` precisely so it gains OSC 52 — the
-   * one mechanism that reaches the clipboard of the machine the USER is sitting
-   * at over SSH — and gating the whole bridge on full-screen would have handed
-   * that back only to full-screen users while the command is available in both.
-   * Every OTHER field stays absent there, so the inline tree is unchanged: there
-   * is no filter, hence no `setMouseCapture` and no `ctx.mouse`; `mouseSelect`
-   * is `wantSelect`, which is already false without one; and there is no
-   * controller, so no `selection`.
-   */
   const terminalBridge: AppProps['terminal'] =
-    mode === 'fullscreen' || writeForeign
-      ? {
+    {
           mouseSelect: wantSelect,
+          scrollbar,
           ...(mouseOn
             ? {
                 setMouseCapture: (on: boolean) => {
                   screen?.setMouseCapture(on);
                   mouseCaptured = on;
+                  if (!on) scrollbar.controller?.cancel();
                   // A released mouse cannot be dragging, and a selection left
                   // painted over a screen the terminal is now selecting on its
                   // own would be two highlights claiming the same rows.
@@ -906,30 +853,43 @@ function runInteractive(
           // drag-release can never disagree about which stream OSC 52 goes to.
           ...(writeForeign ? { writeForeign } : {}),
           ...(selectionBridge.controller ? { selection: selectionBridge } : {}),
-        }
-      : undefined;
+        };
 
   const updateBridge: UpdateBridge = { service: null, onAttach: null };
   let updateService: { dispose(): void } | null = null;
+  let interactiveClosed = false;
+  const failInteractive = (error: unknown): void => {
+    // Ink consumes render exceptions; retain failure even if a disposer throws.
+    process.exitCode = 1;
+    interactiveClosed = true;
+    logger.error('cli', 'render_failed', { error: String(error) });
+    for (const cleanup of [
+      () => screen?.restore(), disposeSelection, disposeStdinFilter, disposeFrameWriter,
+      () => controller.abort(), () => controller.dispose(), () => updateService?.dispose(),
+      () => { process.stdin.pause(); process.stdin.unref?.(); },
+    ]) {
+      try { cleanup(); }
+      catch (cleanupError) {
+        logger.error('cli', 'render_cleanup_failed', { error: String(cleanupError) });
+      }
+    }
+  };
   const updateEligible =
     !!process.stdout.isTTY &&
     !!process.stdin.isTTY &&
     !process.env.CI &&
     config.update.mode !== 'off';
 
-  const instance = render(
+  let instance: ReturnType<typeof render>;
+  try {
+    instance = render(
     <App
       controller={controller}
       version={VERSION}
-      mode={mode}
       confirmBridge={confirmBridge}
       humanInputBridge={humanInputBridge}
       initialPrompt={extras.initialPrompt}
       initialOverlay={extras.initialOverlay}
-      // `mouseOn`, NOT the handle (I-11). `App.tsx:186-188` documents this
-      // prop's contract as "absent under `--no-mouse`, inline, or non-TTY", and
-      // it feeds `enabled: !!mouseSource` on a wheel subscription that would
-      // otherwise be a channel no event can ever arrive on.
       mouseSource={mouseOn && filter ? filter.source : undefined}
       // Present ONLY when this console swallows `CSI Z` and mouse reports.
       // Passed in rather than probed inside `App` so that every test renders
@@ -949,19 +909,18 @@ function runInteractive(
     // straight to stdout and permanently shifts the fixed frame's accounting.
     {
       exitOnCtrlC: false,
-      patchConsole: mode === 'inline',
+      patchConsole: false,
       // I-5: with mouse support off the REAL stdin is handed over unwrapped, so
       // every existing path is provably unchanged.
       stdin: filter?.stdin ?? process.stdin,
-      // SPREAD, not `frameWriter?.stdout ?? process.stdout`. This call passed no
-      // `stdout` at all before, and Ink defaults it to `process.stdout`; omitting
-      // the key entirely when the writer is off keeps the options object the same
-      // SHAPE it has always had, which is what makes AC-5 / AC-6 ("byte-identical
-      // with --no-diff-render, inline mode and `aragon -p`") a statement about
-      // the code rather than about Ink's defaulting.
-      ...(frameWriter ? { stdout: frameWriter.stdout } : {}),
+      stdout: frameObserver.stdout,
     },
   );
+
+  } catch (error) {
+    failInteractive(error);
+    throw error;
+  }
 
   // H1's primary disarm, and this is the earliest moment at which "this build
   // STARTS" is proven: the module graph loaded, config resolved, Ink mounted
@@ -985,6 +944,7 @@ function runInteractive(
     // must degrade to "no updater", never to a crashed TUI.
     void import('./update/service.js')
       .then(({ UpdateService }) => {
+        if (interactiveClosed) return;
         const service = new UpdateService({ config: config.update, currentVersion: VERSION });
         updateService = service;
         updateBridge.service = service;
@@ -1016,6 +976,7 @@ function runInteractive(
   void instance
     .waitUntilExit()
     .then(() => {
+      interactiveClosed = true;
       screen?.restore();
       // BEFORE `disposeStdinFilter()`, which clears the listener set it subscribed to,
       // and after `restore()` for the reason that call records: the terminal must
@@ -1044,18 +1005,7 @@ function runInteractive(
       updateService?.dispose();
       replayTranscript();
     })
-    .catch(() => {
-      screen?.restore();
-      // BEFORE `disposeStdinFilter()`, which clears the listener set it subscribed to,
-      // and after `restore()` for the reason that call records: the terminal must
-      // stop reporting first, and anything already in flight is still consumed by
-      // a live filter.
-      disposeSelection();
-      disposeStdinFilter();
-      disposeFrameWriter();
-      controller.dispose();
-      updateService?.dispose();
-    });
+    .catch(failInteractive);
 }
 
 async function runOneShot(flags: CliFlags, prompt: string, quiet: boolean): Promise<void> {
@@ -1154,7 +1104,6 @@ const CONFIG_SET_KEYS = new Set([
   'confirmTools',
   'toolTimeoutMs',
   'idleTimeoutMs',
-  'fullscreen',
   'exitTranscript',
   'transcriptWindow',
   // tui-render-performance L1 / L4. Listed here AND cased in the switch
@@ -1394,9 +1343,6 @@ function runConfigSet(key: string, value: string): void {
       break;
     case 'idleTimeoutMs':
       patch.idleTimeoutMs = coercePositiveInt(value, 210_000);
-      break;
-    case 'fullscreen':
-      patch.fullscreen = value === 'true' || value === '1';
       break;
     case 'exitTranscript':
       patch.exitTranscript = value === 'true' || value === '1';
@@ -1703,30 +1649,16 @@ function buildProgram(): Command {
     .option('--tool-timeout <ms>', 'Per-tool executor ceiling (default 180000)')
     .option('--idle-timeout <ms>', 'Watchdog idle timeout (auto-raised to >= tool-timeout+30s)')
     .option('--theme <name>', 'auto|warm|cool|light ("dark" is an alias for "cool")')
-    // Same tri-state shape as `--fullscreen`: declaring the positive form first
-    // keeps the default `undefined`, so "no opinion" stays distinguishable from
-    // an explicit choice and the config layer below can still win.
     .option('--compact', 'Compact transcript density (no blank rows between turns)')
     .option('--no-compact', 'Comfortable transcript density')
     .option('--hints', 'Always show the composer hint row')
     .option('--no-hints', 'Hide the composer hint row')
-    // Positive form first, same tri-state reason as `--fullscreen` above.
     .option('--show-thinking', 'Show the reasoning blocks the model returns')
     .option('--no-show-thinking', 'Hide reasoning blocks (the default)')
-    // Positive form first, same tri-state reason as `--fullscreen` above. The
-    // pair matters more here than for its neighbour because this key defaults to
-    // ON: a lone negative form would let commander synthesize `true` and
-    // overwrite a stored `false` on every run that passed no flag at all.
     .option('--live-tool-output', 'Show a running command output tail (the default)')
     .option('--no-live-tool-output', 'Keep a running tool card to one line')
-    // Positive form first, same tri-state reason as `--fullscreen` above.
     .option('--mouse', 'Wheel scrolls the transcript (full-screen mode)')
     .option('--no-mouse', 'Leave the mouse to the terminal (the wheel does nothing)')
-    // Positive form FIRST, for the tri-state reason `--fullscreen` records
-    // below: `mouseSelect` is persisted and defaults to `true`, so a lone
-    // `--no-mouse-select` would make commander default `opts.mouseSelect` to
-    // `true` — indistinguishable from silence, and silently overriding a stored
-    // `false` on every run that passes no flag at all.
     .option('--mouse-select', 'Drag with the mouse to select text; releasing copies it')
     .option('--no-mouse-select', 'Keep wheel scrolling, but leave drag-select off')
     // Positive form FIRST, same tri-state reason as `--mouse-select` above:
@@ -1735,16 +1667,7 @@ function buildProgram(): Command {
     // silence, and silently overriding a stored `false` on every run.
     .option('--paste', 'Collapse large pastes into a placeholder (the default)')
     .option('--no-paste', 'Treat pasted bytes as keystrokes (pre-0.6.3 behavior)')
-    // Declaring `--fullscreen` BEFORE `--no-fullscreen` keeps the default
-    // `undefined` instead of `true`, which is what makes the tri-state work:
-    // "no opinion" must stay distinguishable from "force it".
-    .option('--fullscreen', 'Force the full-screen TUI (overrides auto-downgrade, except non-TTY)')
-    .option('--no-fullscreen', 'Force the inline renderer (v0.2.0 behavior)')
     .option('--no-exit-transcript', 'Do not replay the session summary after exiting')
-    // Same tri-state shape as `--fullscreen`: the positive form is declared
-    // FIRST so the default stays `undefined` and "no opinion" remains
-    // distinguishable from an explicit `--no-plan`, which is what lets the
-    // config layer win when neither flag was given.
     .option('--plan', 'Start the session in PLAN mode (read-only research + review)')
     .option('--no-plan', 'Start the session in BUILD mode (overrides planModeDefault)')
     // BOTH FORMS, positive first, and the pair is mandatory (team-subagents

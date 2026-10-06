@@ -1,6 +1,8 @@
+import type { PromptOptions, PromptOutcome } from '../agent/prompt-options.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
 import { render } from 'ink-testing-library';
+import { createTerminalHarness, settleTerminal } from './helpers/terminal-harness.js';
 import type { AgentEvent, ModelInfo } from '@aragon-agent/core';
 
 // Keep the app hermetic — never write the developer's real config file.
@@ -63,7 +65,6 @@ import {
 } from '../config/schema.js';
 import type { SkillService } from '../skills/service.js';
 import type { HeadlessController } from '../agent/headless.js';
-import type { RenderMode } from '../ui/layout/frame.js';
 import type { AgentMode } from '../agent/agent-mode.js';
 import type { TeamEvent, TeamSnapshot } from '../team/types.js';
 import type { TodoEvent, TodoSnapshot } from '../todo/types.js';
@@ -295,8 +296,11 @@ class FakeController {
     this.aborted = true;
   }
   steer(): void {}
-  prompt(text: string): Promise<void> {
-    return this.onPrompt ? this.onPrompt(text) : Promise.resolve();
+  promptOptions: PromptOptions[] = [];
+  async prompt(text: string, options: PromptOptions = {}): Promise<PromptOutcome> {
+    this.promptOptions.push(options);
+    await this.onPrompt?.(text);
+    return { status: 'finished' };
   }
   getSkillService(): SkillService {
     return EMPTY_SKILL_SERVICE;
@@ -475,8 +479,7 @@ function mount(
   fc: FakeController,
   extra: {
     initialPrompt?: string;
-    mode?: RenderMode;
-    humanInputBridge?: HumanInputBridge;
+        humanInputBridge?: HumanInputBridge;
     updateBridge?: UpdateBridge;
   } = {},
 ) {
@@ -484,7 +487,6 @@ function mount(
     <App
       controller={fc as unknown as AgentController}
       version="0.0.0"
-      mode={extra.mode ?? 'inline'}
       initialPrompt={extra.initialPrompt}
       humanInputBridge={extra.humanInputBridge}
       updateBridge={extra.updateBridge}
@@ -493,6 +495,25 @@ function mount(
 }
 
 describe('App (interactive)', () => {
+  it('opens slash help in an 80-column terminal without a layout feedback loop', async () => {
+    const terminal = createTerminalHarness(80, 24, false);
+    const fc = new FakeController();
+    fc.config = { ...CONFIG, theme: 'warm' };
+    try {
+      terminal.mount(<App controller={fc as unknown as AgentController} version="test" />);
+      await settleTerminal();
+      terminal.input('/help');
+      await settleTerminal();
+      terminal.input('\r');
+      await settleTerminal();
+      const output = stripAnsi(terminal.frames.join(''));
+      expect(output).not.toContain('Maximum update depth');
+      expect(output).toContain('Help');
+    } finally {
+      terminal.dispose();
+    }
+  });
+
   it('streams assistant text, renders a tool card, and a status bar', async () => {
     const fc = new FakeController();
     fc.onPrompt = async () => {
@@ -537,7 +558,7 @@ describe('App (interactive)', () => {
     unmount();
   });
 
-  it('aborts the run on Esc', async () => {
+  it('aborts the run only on two Esc events', async () => {
     const fc = new FakeController();
     fc.onPrompt = () =>
       new Promise<void>(() => {
@@ -546,8 +567,26 @@ describe('App (interactive)', () => {
       });
     const { stdin, unmount } = mount(fc, { initialPrompt: 'go' });
     await delay(40);
-    stdin.write('\u001B'); // Esc key (escape)
+    stdin.write('\u001B'); // Ink sets both escape and meta for bare ESC.
     await delay(40);
+    expect(fc.aborted).toBe(false);
+    stdin.write(ESC);
+    await delay(40);
+    expect(fc.aborted).toBe(true);
+    unmount();
+  });
+
+  it.each(['/reset', '/resume missing.json'])('refuses %s during a live run', async (command) => {
+    const fc = new FakeController();
+    Object.assign(fc, { clearMessages: vi.fn(), clearAllQueues: vi.fn() });
+    fc.onPrompt = () => new Promise<void>(() => { fc.emit({ type: 'agent_start' }); });
+    const { stdin, lastFrame, unmount } = mount(fc, { initialPrompt: 'go' });
+    await delay(40);
+    stdin.write(command); await delay(40);
+    stdin.write('\r'); await delay(40);
+    expect(lastFrame()).toContain('Interrupt the current run before switching conversations.');
+    stdin.write(ESC); await delay(20);
+    stdin.write(ESC); await delay(40);
     expect(fc.aborted).toBe(true);
     unmount();
   });
@@ -669,7 +708,7 @@ function runningController(mode: AgentMode = 'plan'): FakeController {
 }
 
 describe('human-input bridge', () => {
-  it('AC-P25: dismissing a plan card keeps the run alive; a second Esc is the way out', async () => {
+  it('AC-P25: dismissing a plan card keeps the run alive; two further Esc events interrupt', async () => {
     // The two halves are one criterion on purpose. `submit_plan` has no round
     // budget and its dismissal result tells the model to refine and resubmit,
     // so `esc dismiss` names the LOOP. The exit is Esc again with no overlay
@@ -696,7 +735,10 @@ describe('human-input bridge', () => {
     expect(fc.aborted).toBe(false); // ...and the run it belongs to is still alive
     expect(fc.getAgentMode()).toBe('plan'); // a dismissal is not an approval
 
-    stdin.write(ESC); // no overlay open now: THIS is the exit
+    stdin.write(ESC); // First confirmation after dismissing the overlay.
+    await delay(40);
+    expect(fc.aborted).toBe(false);
+    stdin.write(ESC);
     await delay(60);
     expect(fc.aborted).toBe(true);
     unmount();
@@ -734,13 +776,9 @@ describe('human-input bridge', () => {
 });
 
 describe('App (fullscreen frame)', () => {
-  // `mode` MUST be passed explicitly. `ink-testing-library`'s stdout stub has no
-  // `isTTY` (its `class Stdout` exposes only a `columns` getter), so
-  // `decideRenderMode` would return 'inline' forever and this whole block would
-  // silently be testing the fallback path instead of the frame it claims to.
   it('pins the composer and status bar to the bottom of a fixed-height frame (R2)', async () => {
     const fc = new FakeController();
-    const { lastFrame, unmount } = mount(fc, { mode: 'fullscreen' });
+    const { lastFrame, unmount } = mount(fc);
     await delay(60);
 
     const lines = (lastFrame() ?? '').split('\n');
@@ -760,7 +798,7 @@ describe('App (fullscreen frame)', () => {
 
   it('keeps the frame strictly shorter than the terminal (invariant I-1)', async () => {
     const fc = new FakeController();
-    const { lastFrame, unmount } = mount(fc, { mode: 'fullscreen' });
+    const { lastFrame, unmount } = mount(fc);
     await delay(60);
     const lines = (lastFrame() ?? '').split('\n');
     expect(lines.length).toBeLessThan(24);
@@ -772,7 +810,7 @@ describe('App (fullscreen frame)', () => {
     // Seeded through the history STORE, not `CliConfig`: the recall list left
     // the resolved config in config-state-separation §4.1.
     promptHistoryMock.entries = ['a remembered prompt'];
-    const { lastFrame, stdin, unmount } = mount(fc, { mode: 'fullscreen' });
+    const { lastFrame, stdin, unmount } = mount(fc);
     await delay(60);
 
     stdin.write('[1;2A'); // Shift+Up
@@ -842,7 +880,7 @@ describe('App (fullscreen frame)', () => {
 
   it('repaints on Ctrl+L instead of leaving a blank screen (I-5)', async () => {
     const fc = new FakeController();
-    const { lastFrame, frames, stdin, unmount } = mount(fc, { mode: 'fullscreen' });
+    const { lastFrame, frames, stdin, unmount } = mount(fc);
     await delay(60);
 
     const before = frames.length;
@@ -882,7 +920,7 @@ describe('App (fullscreen frame)', () => {
       fc.emit({ type: 'agent_end', messages: [] });
     };
 
-    const { lastFrame, stdin, unmount } = mount(fc, { mode: 'fullscreen', initialPrompt: 'go' });
+    const { lastFrame, stdin, unmount } = mount(fc, {  initialPrompt: 'go' });
     await delay(120);
 
     const pinned = stripAnsi(lastFrame() ?? '');
@@ -908,7 +946,7 @@ describe('App (fullscreen frame)', () => {
 
   it('renders a placeholder instead of a broken frame when the terminal is too short', async () => {
     const fc = new FakeController();
-    const { stdout, lastFrame, unmount } = mount(fc, { mode: 'fullscreen' });
+    const { stdout, lastFrame, unmount } = mount(fc);
     await delay(60);
 
     Object.defineProperty(stdout, 'rows', { value: 8, configurable: true });
@@ -943,7 +981,7 @@ describe('overlay frame (A-2b / A-2c)', () => {
       fc.emit({ type: 'agent_end', messages: [] });
     };
 
-    const { lastFrame, stdin, unmount } = mount(fc, { mode: 'fullscreen', initialPrompt: 'go' });
+    const { lastFrame, stdin, unmount } = mount(fc, {  initialPrompt: 'go' });
     await delay(120);
     expect(stripAnsi(lastFrame() ?? '')).toContain('LINE60');
 
@@ -967,7 +1005,7 @@ describe('overlay frame (A-2b / A-2c)', () => {
     // was clipped by `overflow: hidden` with no scrollbar, no indicator and no
     // key that could reach it.
     const fc = new FakeController();
-    const { lastFrame, stdin, unmount } = mount(fc, { mode: 'fullscreen' });
+    const { lastFrame, stdin, unmount } = mount(fc);
     await delay(80);
     stdin.write('?');
     await delay(80);
@@ -999,19 +1037,6 @@ describe('overlay frame (A-2b / A-2c)', () => {
     expect(third).not.toContain('Keybindings'); // ...and the window really moved
     unmount();
   });
-
-  it('renders the whole overlay unclipped in inline mode (A-2c)', async () => {
-    // Inline has no fixed frame, so `maxRows` is Infinity: render everything and
-    // show no position indicator. Rarely opened by hand, easy to break silently.
-    const fc = new FakeController();
-    const { lastFrame, unmount } = mount(fc, { mode: 'inline', initialPrompt: '/help' });
-    await delay(80);
-    const frame = stripAnsi(lastFrame() ?? '');
-    expect(frame).toContain('Keybindings');
-    expect(frame).toContain('/exit'); // nothing was cut
-    expect(frame).not.toMatch(/\d+-\d+\/\d+/); // no position indicator
-    unmount();
-  });
 });
 
 describe('reduced motion (A-10)', () => {
@@ -1027,7 +1052,7 @@ describe('reduced motion (A-10)', () => {
         fc.emit({ type: 'message_update', streamEvent: { type: 'text_delta', delta: 'partial' } });
       });
     const { lastFrame, unmount } = mount(fc, { initialPrompt: 'go' });
-    await delay(80);
+    await vi.waitFor(() => expect(lastFrame() ?? '').toContain('partial'));
     const frame = stripAnsi(lastFrame() ?? '');
     expect(frame).toContain('partial');
     expect(frame).not.toMatch(/[⠀-⣿]/); // no braille dots
@@ -1097,16 +1122,16 @@ describe('composer hints (A-14)', () => {
         fc.emit({ type: 'agent_start' });
         fc.emit({ type: 'turn_start' });
       });
-    const { lastFrame, unmount } = mount(fc, { mode: 'fullscreen', initialPrompt: 'go' });
+    const { lastFrame, unmount } = mount(fc, {  initialPrompt: 'go' });
     await delay(100);
-    expect(stripAnsi(lastFrame() ?? '')).toContain('esc abort');
+    expect(stripAnsi(lastFrame() ?? '')).toMatch(/esc.*2 interrupt/);
     unmount();
   });
 
   it('collapses the idle hint once the user has submitted enough times', async () => {
     const fc = new FakeController();
     fc.config = { ...CONFIG, submitCount: 999 };
-    const { lastFrame, unmount } = mount(fc, { mode: 'fullscreen' });
+    const { lastFrame, unmount } = mount(fc);
     await delay(80);
     const frame = stripAnsi(lastFrame() ?? '');
     expect(frame).toContain('? help');
@@ -1116,7 +1141,7 @@ describe('composer hints (A-14)', () => {
 
   it('shows the full idle hint to a new user', async () => {
     const fc = new FakeController();
-    const { lastFrame, unmount } = mount(fc, { mode: 'fullscreen' });
+    const { lastFrame, unmount } = mount(fc);
     await delay(80);
     expect(stripAnsi(lastFrame() ?? '')).toContain('newline');
     unmount();
@@ -1125,7 +1150,7 @@ describe('composer hints (A-14)', () => {
   it('hides the hint row entirely when hints are disabled', async () => {
     const fc = new FakeController();
     fc.config = { ...CONFIG, hints: false };
-    const { lastFrame, unmount } = mount(fc, { mode: 'fullscreen' });
+    const { lastFrame, unmount } = mount(fc);
     await delay(80);
     const frame = stripAnsi(lastFrame() ?? '');
     expect(frame).not.toContain('? help');
@@ -1209,7 +1234,7 @@ describe('the todo rail (todo-plan-execution §3.9)', () => {
     // away its scroll offset and the intent nonce it seeds on mount — the first
     // time the model ever called `todo_write`.
     const fc = new FakeController();
-    const { lastFrame, unmount } = mount(fc, { mode: 'fullscreen' });
+    const { lastFrame, unmount } = mount(fc);
     await delay(60);
     const frame = stripAnsi(lastFrame() ?? '');
     expect(frame).not.toContain('TODO');
@@ -1218,7 +1243,7 @@ describe('the todo rail (todo-plan-execution §3.9)', () => {
 
   it('mounts the rail the moment a list exists, and unmounts it when cleared', async () => {
     const fc = new FakeController();
-    const { lastFrame, unmount } = mount(fc, { mode: 'fullscreen' });
+    const { lastFrame, unmount } = mount(fc);
     await delay(60);
 
     fc.todoSnapshot = SNAPSHOT;
@@ -1243,7 +1268,7 @@ describe('the todo rail (todo-plan-execution §3.9)', () => {
     // only writes the file — so the runtime mutator is the whole mechanism. This
     // asserts the render side of that pair.
     const fc = new FakeController();
-    const { lastFrame, unmount } = mount(fc, { mode: 'fullscreen' });
+    const { lastFrame, unmount } = mount(fc);
     await delay(60);
     fc.todoSnapshot = SNAPSHOT;
     fc.emitTodo({ type: 'updated', snapshot: SNAPSHOT });
@@ -1261,24 +1286,9 @@ describe('the todo rail (todo-plan-execution §3.9)', () => {
     unmount();
   });
 
-  it('never renders the rail in inline mode (non-goal 4)', async () => {
-    const fc = new FakeController();
-    const { lastFrame, unmount } = mount(fc, { mode: 'inline' });
-    await delay(60);
-    fc.todoSnapshot = SNAPSHOT;
-    fc.emitTodo({ type: 'updated', snapshot: SNAPSHOT });
-    await delay(60);
-    const frame = stripAnsi(lastFrame() ?? '');
-    expect(frame).not.toContain('TODO');
-    // The transcript CARD still renders in both modes; only the rail is
-    // full-screen-only.
-    expect(frame).toContain('Todos');
-    unmount();
-  });
-
   it('surfaces a refused write as a warn notice (the suppressed-card compensation)', async () => {
     const fc = new FakeController();
-    const { lastFrame, unmount } = mount(fc, { mode: 'inline' });
+    const { lastFrame, unmount } = mount(fc);
     await delay(60);
     fc.emitTodo({ type: 'rejected', reason: 'A one-step list is not a plan.' });
     await delay(60);
@@ -1297,7 +1307,7 @@ describe('the todo rail (todo-plan-execution §3.9)', () => {
       fc.emit({ type: 'turn_end', message: { role: 'assistant', content: [] }, usage: { inputTokens: 1, outputTokens: 1 } } as never);
       fc.emit({ type: 'agent_end' } as never);
     };
-    const { lastFrame, unmount } = mount(fc, { mode: 'inline', initialPrompt: 'go' });
+    const { lastFrame, unmount } = mount(fc, {  initialPrompt: 'go' });
     await delay(120);
     const frame = stripAnsi(lastFrame() ?? '');
     expect(frame).toContain('2 todo items are unfinished');
@@ -1394,7 +1404,7 @@ describe('AC-38: the output subscription goes through the coalescer, not dispatc
     startRunningBash(fc);
     const { frames, lastFrame, unmount } = mount(fc, {
       initialPrompt: 'go',
-      mode: 'fullscreen',
+
     });
     await delay(60);
     const before = frames.length;
@@ -1436,7 +1446,7 @@ describe('AC-38: the output subscription goes through the coalescer, not dispatc
   it('the tail does reach the card, so the buffering is not just swallowing it', async () => {
     const fc = new FakeController();
     startRunningBash(fc);
-    const { lastFrame, unmount } = mount(fc, { initialPrompt: 'go', mode: 'fullscreen' });
+    const { lastFrame, unmount } = mount(fc, { initialPrompt: 'go' });
     await delay(60);
     fc.emitToolOutput({ toolCallId: 't1', rows: ['PASS tests/one', 'PASS tests/two'] });
     await delay(160);
@@ -1470,7 +1480,7 @@ describe('AC-41: the stall row`s seconds advance THROUGH EntryView`s comparator'
     try {
       const fc = new FakeController();
       startRunningBash(fc);
-      const { lastFrame, unmount } = mount(fc, { initialPrompt: 'go', mode: 'fullscreen' });
+      const { lastFrame, unmount } = mount(fc, { initialPrompt: 'go' });
       await delay(60);
 
       // The listener stamps `at: Date.now()`, so the tail's clock starts at t0.
@@ -1532,7 +1542,7 @@ describe('AC-37: the activity row opens on the phrase its own run seeds (L5)', (
           fc.emit({ type: 'agent_start' });
           fc.emit({ type: 'turn_start' });
         });
-      const { frames, unmount } = mount(fc, { initialPrompt: 'go', mode: 'fullscreen' });
+      const { frames, unmount } = mount(fc, { initialPrompt: 'go' });
       await delay(60);
 
       const first = frames.map(stripAnsi).find((f) => ACTIVITY_PHRASES.some((p) => f.includes(p)));
@@ -1590,11 +1600,6 @@ describe('the auto-update bridge (cli-auto-update §6.3)', () => {
   };
 
   it('AC-19: `installing -> ready` pushes EXACTLY ONE toast, however often it repeats', async () => {
-    // R-8, the classic auto-updater failure. The guard is a `useRef`, so the
-    // case has to do the two things a ref survives and a state flag would not:
-    // re-render at `ready` repeatedly, AND cross the edge a second time. Inline
-    // `ToastStack` draws one row per toast (up to three), so a second push is
-    // a second occurrence in the same frame rather than a subtler difference.
     const fake = fakeService(IDLE);
     const fc = new FakeController();
     const { lastFrame, unmount } = mount(fc, {
@@ -1629,5 +1634,138 @@ describe('the auto-update bridge (cli-auto-update §6.3)', () => {
     unmount();
     expect(frame).not.toContain('restart aragon to apply');
     expect(frame).not.toContain('available');
+  });
+});
+
+/**
+ * The run status row, wired through `<App>` (tui-scrollbar-edge-and-run-row
+ * T9 / T13 / T14).
+ *
+ * These are App-level because the claims are about WHO decides: the row exists
+ * only where the idle hint row would, the fixed bottom row hands the life signal
+ * over without ever doubling it, and the update notice stays silent for a whole
+ * run. None of that is visible from a component test.
+ */
+describe('the run status row in <App>', () => {
+  const braille = (frame: string): number => (frame.match(/[\u2800-\u28ff]/g) ?? []).length;
+  const INTERRUPT = 'esc\u00d72 interrupt';
+
+  /** A run that streams `lines` lines of text and then waits for `finish()`. */
+  function longRun(config: CliConfig = CONFIG, lines = 60) {
+    const fc = new FakeController();
+    fc.config = config;
+    let release: () => void = () => {};
+    fc.onPrompt = () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+        fc.emit({ type: 'agent_start' });
+        fc.emit({ type: 'turn_start' });
+        const text = Array.from({ length: lines }, (_, i) => `line ${i}`).join('\n\n');
+        fc.emit({ type: 'message_update', streamEvent: { type: 'text_delta', delta: text } });
+      });
+    const finish = (): void => {
+      fc.emit({ type: 'agent_end', messages: [] });
+      release();
+    };
+    return { fc, finish };
+  }
+
+  async function runAt(cols: number, rows: number, config: CliConfig = CONFIG) {
+    const terminal = createTerminalHarness(cols, rows);
+    const { fc, finish } = longRun(config);
+    terminal.mount(<App controller={fc as unknown as AgentController} version="test"
+      initialPrompt="go" />);
+    await settleTerminal();
+    await settleTerminal();
+    return { terminal, fc, finish };
+  }
+
+  const rowOf = (frame: string, needle: string): number =>
+    frame.split('\n').findIndex((row) => row.includes(needle));
+
+  it('T9a: enabled -> the row sits above the input, replaces the hint row, and footer height is constant', async () => {
+    const { terminal, finish } = await runAt(80, 24);
+    try {
+      const during = terminal.lastFrame();
+      const top = during.split('\n').findIndex((row) => row.includes('\u256d'));
+      expect(top).toBeGreaterThan(0);
+      expect(during.split('\n')[top - 1]).toContain(INTERRUPT);
+      expect(braille(during)).toBe(1);
+      // The idle-style hint row is gone from below the input.
+      expect(during.split('\n').slice(top).join('\n')).not.toContain('23ce steer');
+      finish();
+      await settleTerminal();
+      await settleTerminal();
+      const after = terminal.lastFrame();
+      expect(after).not.toContain(INTERRUPT);
+      expect(after).toContain('send'); // the idle hint row is back below the input
+      // Footer height is constant: the run row occupies exactly the row the input
+      // box's top border had while idle, and the box moved down by that one row.
+      const idleTop = after.split('\n').findIndex((row) => row.includes('╭'));
+      expect(top - 1).toBe(idleTop);
+      expect(after.split('\n').length).toBe(during.split('\n').length);
+    } finally { terminal.dispose(); }
+  });
+
+  it.each([
+    ['a short terminal (16 rows)', 80, 16, CONFIG],
+    ['--no-hints', 80, 24, { ...CONFIG, hints: false }],
+  ] as [string, number, number, CliConfig][])(
+    'T9b: %s -> the run row is not enabled and the fixed bottom row keeps the life signal',
+    async (_label, cols, rows, config) => {
+      const { terminal, finish } = await runAt(cols, rows, config);
+      try {
+        const during = terminal.lastFrame();
+        expect(during).not.toContain('\u23ce steer');
+        expect(braille(during)).toBe(1);
+        // Not enabled: the box top-border row is identical while running and idle.
+        const runningTop = rowOf(during, '╭');
+        finish();
+        await settleTerminal();
+        await settleTerminal();
+        const after = terminal.lastFrame();
+        expect(braille(after)).toBe(0);
+        expect(rowOf(after, '╭')).toBe(runningTop);
+      } finally { terminal.dispose(); }
+    },
+  );
+
+  it('T13: an available update stays silent for the whole run and shows after it', async () => {
+    const listeners = new Set<(s: UpdateSnapshot) => void>();
+    const snapshot: UpdateSnapshot = {
+      phase: 'available', currentVersion: '0.5.9', latestVersion: '0.6.0', source: 'npm-global',
+      nextCheckAt: null, consecutiveFailures: 0,
+    };
+    const service: UpdateServiceHandle = {
+      snapshot: () => snapshot,
+      subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
+      checkNow: async () => snapshot, skip: () => {}, nextCheckAt: () => null,
+    };
+    const terminal = createTerminalHarness(100, 24);
+    const { fc, finish } = longRun();
+    try {
+      terminal.mount(<App controller={fc as unknown as AgentController} version="test"
+        initialPrompt="go" updateBridge={{ service, onAttach: null }} />);
+      await settleTerminal();
+      await settleTerminal();
+      expect(terminal.lastFrame()).toContain('esc\u00d72 interrupt');
+      expect(terminal.lastFrame()).not.toContain('0.6.0');
+      finish();
+      await settleTerminal();
+      await settleTerminal();
+      expect(terminal.lastFrame()).toContain('0.6.0');
+    } finally { terminal.dispose(); }
+  });
+
+  it('T14: a toast with the run row in view carries no glyph of its own', async () => {
+    const { terminal } = await runAt(100, 24);
+    try {
+      terminal.input('\x14'); // Ctrl+T - the cheapest mid-run toast
+      await settleTerminal();
+      const frame = terminal.lastFrame();
+      expect(frame).toContain('Thinking');
+      expect(braille(frame)).toBe(1);
+      expect(frame).not.toMatch(/[\u2800-\u28ff]\s+Thinking (shown|hidden)/);
+    } finally { terminal.dispose(); }
   });
 });

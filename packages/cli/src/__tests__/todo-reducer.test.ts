@@ -74,6 +74,23 @@ describe('SELF_RENDERING_TOOLS suppression (D-10)', () => {
 });
 
 describe('the todo entry (§5.2)', () => {
+  it('a new task clears live projections but keeps the old card and assigns a new id', () => {
+    const before = fold([
+      { type: 'submit', text: 'old task' },
+      { type: 'todoUpdate', snapshot: snapshot(1, 3) },
+      { type: 'runEnd' },
+    ]);
+    const oldCard = todoEntries(before)[0]!;
+    const cleared = fold([
+      { type: 'submit', text: 'new task' }, { type: 'todoCleared' },
+    ], before);
+    expect(cleared.todos).toBeNull();
+    expect(cleared.todoEntryId).toBeUndefined();
+    const after = viewReducer(cleared, { type: 'todoUpdate', snapshot: snapshot(0, 4) });
+    expect(todoEntries(after)[0]).toEqual(oldCard);
+    expect(todoEntries(after)).toHaveLength(2);
+    expect(todoEntries(after)[1]!.id).not.toBe(oldCard.id);
+  });
   it('AC-29: one card per turn; a second write rewrites it, a new turn appends', () => {
     let state = fold([
       { type: 'submit', text: 'do the thing' },

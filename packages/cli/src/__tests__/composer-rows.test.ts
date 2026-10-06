@@ -177,3 +177,47 @@ describe('layoutComposer — token segmentation', () => {
     expect(out.rows.map(rowText).join('')).toBe(buffer);
   });
 });
+
+describe('caret visual boundaries (C-06/C-10)', () => {
+  it('keeps all visual cursors in the clipped window across tabs, emoji and tokens', () => {
+    const buffer = '\u4e2d\u{1f600}\t[Pasted text #1 +12 lines]\nend';
+    for (let cursor = 0; cursor <= buffer.length; cursor += 1) {
+      const out = layout(buffer, { cursor, cols: 8, maxRows: 2 });
+      expect(out.cursorRow).toBeGreaterThanOrEqual(0);
+      expect(out.cursorRow).toBeLessThan(out.rows.length);
+      const row = out.rows[out.cursorRow]!;
+      const split = splitRowAtColumn(row, out.cursorCol);
+      const joined = [...split.before, ...(split.at ? [split.at] : []), ...split.after].map(s => s.text).join('');
+      expect(joined).toBe(rowText(row));
+      expect(out.cursorCol).toBeLessThan(8);
+    }
+  });
+
+  it.each([-10, 1, 99])('normalizes an out-of-range or surrogate cursor %s', (cursor) => {
+    const out = layout('\u{1f600}', { cursor });
+    expect(out.cursorRow).toBe(0);
+    expect(out.cursorCol).toBe(cursor > 2 ? 2 : 0);
+  });
+
+  it('budgets the caret at a full row followed by a newline', () => {
+    const out = layout('abcd\nx', { cursor: 4, cols: 4 });
+    expect(out.totalRows).toBe(3);
+    expect(out.cursorRow).toBe(1);
+    expect(out.cursorCol).toBe(0);
+  });
+
+  it.each([
+    ['e\u0301x', 1, 'e\u0301', 0],
+    ['\u0301ex', 0, '\u0301e', 0],
+    ['xe\u0301', 2, 'e\u0301', 1],
+    ['\u0301', 0, null, 0],
+    ['\u0301\nq', 0, null, 0],
+  ] as const)('groups zero-width text for %j', (buffer, cursor, expected, column) => {
+    const out = layout(buffer, { cursor });
+    const row = out.rows[out.cursorRow]!;
+    const split = splitRowAtColumn(row, out.cursorCol);
+    expect(out.cursorCol).toBe(column);
+    expect(split.at?.text ?? null).toBe(expected);
+    expect([...split.before, ...(split.at ? [split.at] : []), ...split.after].map(s => s.text).join('')).toBe(rowText(row));
+  });
+});

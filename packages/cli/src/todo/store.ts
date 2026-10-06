@@ -9,15 +9,9 @@
  * is why `AgentController` can own this object as unconditionally as it owns
  * `TeamRuntime`.
  *
- * INVARIANT I-2 — the list is a PROJECTION OF WHAT THE MODEL BELIEVES, and
- * nothing that does not tell the model may change it — EXCEPT AN EXPLICIT USER
- * INSTRUCTION, which is the rule's standing exception and is marked
- * `TodoClearReason = 'user'`. Two commands come through that door: `/todo clear`
- * and `/clear`. Neither tells the model anything, and that is fine, because what
- * they leave behind is "panel absent, model still remembers" - the direction I-9
- * below calls safe, and one the model's next full-replacement write heals on its
- * own. `/reset` (reason `'reset'`) remains the only clear caused by the belief
- * itself being destroyed, because it clears `messages`.
+ * The list projects the current plan. Explicit clear/reset and a new TUI task
+ * may remove that projection while the model still remembers the old plan.
+ * Continuations preserve it; legacy callers retain completion/staleness rules.
  *
  * Every write is a FULL REPLACEMENT and every clear is a FULL REMOVAL - there is
  * no partial update anywhere, which is what makes I-9 ("the panel is never a
@@ -150,12 +144,17 @@ export class TodoStore {
    * asymmetry for free, which is the behaviour you want: a steer must not age
    * out the plan it is steering.
    *
-   * A FULLY-COMPLETED LIST IS DROPPED HERE rather than at `agent_end`. Ending
-   * the run is exactly when the user wants to see `7/7 done`; wiping it there
-   * would replace a moment of feedback with a blank column (D-6).
+   * A new TUI task drops the old plan here, while a continuation preserves it.
+   * With no policy, legacy callers retain completed/stale-plan expiration.
+   * Clearing at `agent_end` would erase the final progress before the user can
+   * inspect it and remove the plan that automatic continuation still needs.
    */
-  beginUserTurn(): void {
-    if (this.items.length === 0) return;
+  beginUserTurn(policy?: 'new-task' | 'continue'): void {
+    if (this.items.length === 0 || policy === 'continue') return;
+    if (policy === 'new-task') {
+      this.clear('turn');
+      return;
+    }
 
     if (this.items.every((item) => item.status === 'completed')) {
       this.clear('turn');

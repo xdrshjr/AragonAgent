@@ -1,29 +1,13 @@
-/**
- * W1 — thinking is hidden by default, and says so (agent-activity-presentation
- * §3.1 / AC-1..AC-5, AC-19, AC-21).
- *
- * TWO CONDITIONS OF APPROVAL LIVE HERE, and both fail silently if skipped:
- *
- *  - **D-16 / P0-2** — the INLINE collapsed marker must not offer `ctrl+t`.
- *    Inline prints settled entries into Ink's `<Static>`, which cannot un-print
- *    or re-print, so with thinking hidden by default the body is never printed
- *    there at all and the key provably cannot do what the row says. Asserted in
- *    BOTH modes, because a one-sided assertion is what lets the next reader
- *    "simplify" `revealable` back to a constant with the test still green.
- *  - **P1-6** — `estimateEntryRows` must charge a collapsed marker ONE row.
- */
-
 import { describe, expect, it } from 'vitest';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import stripAnsi from 'strip-ansi';
-import { Transcript, TranscriptList } from '../ui/Transcript.js';
+import { TranscriptList, EntryView } from '../ui/Transcript.js';
 import { estimateEntryRows } from '../ui/layout/virtual-window.js';
 import { ViewportGeometryContext } from '../ui/layout/viewport-geometry.js';
 import { initialViewState, viewReducer, type Entry } from '../agent/reducer.js';
 import { getTheme } from '../ui/theme.js';
 import type { HeightStore } from '../ui/use-height-store.js';
-import type { RenderMode } from '../ui/layout/frame.js';
 import type { TermCapabilities } from '../ui/capabilities.js';
 
 const CAPS: TermCapabilities = { colorLevel: 3, unicode: true };
@@ -43,22 +27,12 @@ function assistant(over: Partial<Extract<Entry, { kind: 'assistant' }>> = {}): E
   } as Entry;
 }
 
-function frameOf(entries: Entry[], thinkingVisible: boolean, mode: RenderMode): string {
-  const { lastFrame, unmount } = render(
-    <Transcript
-      entries={entries}
-      expandedToolIds={{}}
-      thinkingVisible={thinkingVisible}
-      reducedMotion
-      density="compact"
-      mode={mode}
-      theme={THEME}
-      caps={CAPS}
-    />,
-  );
-  const frame = stripAnsi(lastFrame() ?? '');
-  unmount();
-  return frame;
+function frameOf(entries: Entry[], thinkingVisible: boolean): string {
+  const { lastFrame, unmount } = render(<>{entries.map((entry, i) => (
+    <EntryView key={entry.id} entry={entry} prev={entries[i - 1]} expanded={false}
+      thinkingVisible={thinkingVisible} reducedMotion density="compact" theme={THEME} caps={CAPS} />
+  ))}</>);
+  const frame = stripAnsi(lastFrame() ?? ''); unmount(); return frame;
 }
 
 describe('initialViewState seeding (D-2 / AC-4 / AC-21)', () => {
@@ -76,7 +50,7 @@ describe('initialViewState seeding (D-2 / AC-4 / AC-21)', () => {
 
   it('shows the body on the FIRST frame when seeded true (no flash-then-hide)', () => {
     const seeded = initialViewState({ thinkingVisible: true });
-    const frame = frameOf([assistant()], seeded.thinkingVisible, 'fullscreen');
+    const frame = frameOf([assistant()], seeded.thinkingVisible);
     expect(frame).toContain('reasoning step');
     expect(frame).not.toContain('thought for');
   });
@@ -84,7 +58,7 @@ describe('initialViewState seeding (D-2 / AC-4 / AC-21)', () => {
 
 describe('the collapsed marker (AC-1 / AC-2)', () => {
   it('draws no reasoning text and exactly one `thought` row', () => {
-    const frame = frameOf([assistant({ thinkingMs: 12_000 })], false, 'fullscreen');
+    const frame = frameOf([assistant({ thinkingMs: 12_000 })], false);
     expect(frame).not.toContain('reasoning step');
     expect(frame.split('\n').filter((r) => r.includes('thought'))).toHaveLength(1);
     expect(frame).toContain('thought for 12.0s');
@@ -93,27 +67,22 @@ describe('the collapsed marker (AC-1 / AC-2)', () => {
   it('omits the duration when it is unknown rather than claiming `0s`', () => {
     // A session restored from a file written by an older build has no
     // `thinkingMs`, and `thought for 0s` is a lie where `thought` is merely terse.
-    const frame = frameOf([assistant()], false, 'fullscreen');
+    const frame = frameOf([assistant()], false);
     expect(frame).toContain('thought');
     expect(frame).not.toContain('for 0');
   });
 
   it('is suppressed while the entry is still streaming (R-9)', () => {
     // Exactly one live surface at a time: the activity line owns the run.
-    const frame = frameOf([assistant({ streaming: true, text: '' })], false, 'fullscreen');
+    const frame = frameOf([assistant({ streaming: true, text: '' })], false);
     expect(frame).not.toContain('thought');
   });
 
-  it('offers ctrl+t in FULL-SCREEN and never in INLINE (D-16 / P0-2 / R-12)', () => {
+  it('offers ctrl+t to reveal settled thinking', () => {
     const entry = assistant({ thinkingMs: 4_000 });
-    const full = frameOf([entry], false, 'fullscreen');
-    const inline = frameOf([entry], false, 'inline');
+    const full = frameOf([entry], false);
 
     expect(full).toContain('ctrl+t to show');
-    // BOTH DIRECTIONS. `<Static>` cannot re-print a settled entry, so an inline
-    // marker offering the key would be an instruction that provably does nothing.
-    expect(inline).toContain('thought for 4.0s');
-    expect(inline).not.toContain('ctrl+t');
   });
 });
 
@@ -124,15 +93,15 @@ describe('Ctrl+T still reveals in full-screen (AC-3)', () => {
       entries: [assistant({ thinkingMs: 4_000 })],
     });
     expect(state.thinkingVisible).toBe(false);
-    expect(frameOf(state.entries, state.thinkingVisible, 'fullscreen')).toContain('thought for');
+    expect(frameOf(state.entries, state.thinkingVisible)).toContain('thought for');
 
     state = viewReducer(state, { type: 'toggleThinking' });
-    const revealed = frameOf(state.entries, state.thinkingVisible, 'fullscreen');
+    const revealed = frameOf(state.entries, state.thinkingVisible);
     expect(revealed).toContain('reasoning step');
     expect(revealed).not.toContain('thought for');
 
     state = viewReducer(state, { type: 'toggleThinking' });
-    expect(frameOf(state.entries, state.thinkingVisible, 'fullscreen')).toContain('thought for');
+    expect(frameOf(state.entries, state.thinkingVisible)).toContain('thought for');
   });
 });
 
@@ -165,7 +134,7 @@ describe('estimateEntryRows and the hidden marker (AC-19 / P1-6)', () => {
   it('never under-estimates the rendered height, in either state', () => {
     const entry = assistant({ thinkingMs: 4_000 });
     for (const visible of [false, true]) {
-      const drawn = frameOf([entry], visible, 'fullscreen').split('\n').length;
+      const drawn = frameOf([entry], visible).split('\n').length;
       expect(estimateEntryRows(entry, 100, 'compact', false, visible)).toBeGreaterThanOrEqual(
         drawn,
       );
@@ -218,7 +187,6 @@ describe('TranscriptList passes thinkingVisible to estimateEntryRows (AC-19 / co
           thinkingVisible={thinkingVisible}
           reducedMotion
           density="compact"
-          mode="fullscreen"
           theme={THEME}
           caps={CAPS}
           windowSize={20_000}

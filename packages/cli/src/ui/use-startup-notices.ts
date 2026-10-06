@@ -93,64 +93,13 @@ function retainRaisedNotice(requested: number, resolved: number): string {
  */
 export const VT_INPUT_NOTICE_VERSION = 1;
 
-/**
- * The `shift-tab-and-mouse-wheel-dead-on-some-terminals` notice (F1'). Shown at
- * most once per `VT_INPUT_NOTICE_VERSION`, and only on a Windows console that
- * cannot deliver either input — see `ui/win-vt-input.ts` for why that is a
- * property of the Node version rather than of the terminal.
- *
- * IT NAMES WHAT THE KEY DOES NOW, not merely that it is unavailable, and that
- * is the load-bearing half of the text. `Shift+Tab` on these machines is not
- * inert: the modifier is lost inside libuv, so Ink sees an ordinary `Tab` and
- * the `/` palette or an `@` popup completes its selection over the user's
- * draft. A user told only "this key does not work" keeps pressing it and keeps
- * losing text without ever connecting the two.
- *
- * THE FALLBACK KEY COMES BEFORE `/plan` IN BOTH BRANCHES, and it is named from
- * `MODE_TOGGLE_KEYS` rather than spelled out, so the four consumers of that
- * constant cannot drift apart. This notice is the last one of them to be wired
- * up, and it is also the only channel that reaches the affected user without
- * being asked to: the composer hint does not exist at all in inline mode and is
- * switched off by a short terminal or `hints: false` in full-screen, and
- * `/help` has to be typed by someone whose current belief is "the key does
- * nothing" rather than "I should read the help". Ordering follows cost — one
- * keystroke before four and a return.
- *
- * `Shift+Up` / `Shift+Down` is the scroll workaround named here because it is
- * the only one PROVEN to survive: both Node versions emit `\x1b[1;2A` for it,
- * byte for byte, in the probe data. `PgUp` / `PgDn` is expected to work too but
- * was never injected, so it is left out rather than promised.
- *
- * THE WHEEL HALF IS FULL-SCREEN ONLY, and dropping it inline is not a detail.
- * `Shift+Tab` is broken in both modes — the modifier dies inside libuv, well
- * below anything this app chooses — but the wheel is only ours to lose in
- * full-screen: inline never asks the console to report it (`mode` is a conjunct
- * of `cli.tsx::wantMouse`), so the wheel goes on scrolling the terminal's own
- * scrollback exactly as it always has. And `Shift+Up` / `Shift+Down` are handled
- * inside `App`'s `if (fullscreen)` branch, so recommending them inline names a
- * key that does nothing. Telling an inline user their working wheel is dead and
- * then handing them an inert workaround is the same failure this notice exists
- * to end — advice about a mode that is not running — merely pointed the other
- * way.
- *
- * EXPORTED FOR ITS TEST, unlike the two notices above it. Asserting this text
- * through a rendered frame does not work: the transcript wraps a notice at two
- * columns wider than it displays it, so any phrase landing on a wrap boundary
- * loses a character or two on the way to `lastFrame()` and the assertion fails
- * for a reason that has nothing to do with the text.
- */
-export function vtInputDeadNotice(nodeVersion: string, fullscreen: boolean): string {
+export function vtInputDeadNotice(nodeVersion: string): string {
   const cause = `Node ${nodeVersion} on Windows does not turn on the console's VT input mode, so `;
   const cost =
     'it will not switch mode, and with the / palette or an @ popup open it completes that ' +
     'instead, overwriting your draft. ';
   const toggle = `Press ${MODE_TOGGLE_KEYS.fallback} to switch mode instead (or /plan)`;
-  if (!fullscreen) {
-    return (
-      `${cause}Shift+Tab never arrives: it comes through as a PLAIN TAB - ${cost}` +
-      `${toggle}. Node 22.17.0+ (or 24.2.0+) restores it.`
-    );
-  }
+
   return (
     `${cause}two keys never arrive: the wheel sends nothing at all, and Shift+Tab arrives ` +
     `as a PLAIN TAB - ${cost}${toggle}, and Shift+Up / Shift+Down to scroll. ` +
@@ -205,16 +154,7 @@ export interface MouseNoticeOptions {
 export interface VtInputNoticeOptions {
   /** `process.versions.node`, quoted back so the user can act on it. */
   nodeVersion: string;
-  /**
-   * Whether this run owns the alternate screen, i.e. `App`'s own `fullscreen`.
-   *
-   * Selects which half of the text applies: inline keeps the wheel and loses the
-   * full-screen scroll keys, so it is told about `Shift+Tab` and nothing else
-   * (see `vtInputDeadNotice`). Taken from the caller rather than re-derived here
-   * for the same reason the version is — one source, no chance of the notice and
-   * the renderer disagreeing about which mode is running.
-   */
-  fullscreen: boolean;
+
   /**
    * Record that `VT_INPUT_NOTICE_VERSION` was shown (`state.json`). Called once,
    * after dispatch — and it must write that constant, not `true`: the gate
@@ -291,7 +231,6 @@ export function useStartupNotices(
   const vtNoticeRef = useRef(vtInputNotice);
   vtNoticeRef.current = vtInputNotice;
   const vtNodeVersion = vtInputNotice?.nodeVersion;
-  const vtFullscreen = vtInputNotice?.fullscreen ?? false;
   const vtNoticeShown = useRef(false);
   useEffect(() => {
     if (vtNodeVersion === undefined || vtNoticeShown.current) return;
@@ -300,10 +239,10 @@ export function useStartupNotices(
     dispatch({
       type: 'notice',
       level: 'warn',
-      text: vtInputDeadNotice(vtNodeVersion, vtFullscreen),
+      text: vtInputDeadNotice(vtNodeVersion),
     });
     vtNoticeRef.current?.onSeen();
-  }, [vtNodeVersion, vtFullscreen, dispatch]);
+  }, [vtNodeVersion, dispatch]);
 
   // A `warn` notice rather than a toast: it is about a value the user typed, so
   // it belongs in the transcript where it can be scrolled back to, not in a row

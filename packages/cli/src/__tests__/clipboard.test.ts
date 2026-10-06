@@ -54,7 +54,7 @@ describe('copyText', () => {
   });
 
   it('skips OSC 52 entirely when no door is supplied', () => {
-    // A caller with no terminal to write to (inline mode, a test) must not have
+    // A caller with no terminal to write to (for example, a test) must not have
     // an escape sequence invented for it.
     expect(['native', 'none']).toContain(copyText('hello'));
   });

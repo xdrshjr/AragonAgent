@@ -29,8 +29,8 @@
 - Language: TypeScript
 
 ## Index Settings
-- Generated: 2026-08-17
-- Previously Generated: 2026-08-13
+- Generated: 2026-10-06
+- Previously Generated: 2026-08-17
 - Project Root: M:\takoAI\JRAgentMesh\aragon-agent-core
 - Index Version: 1.0
 - Environments Configured: No
@@ -44,3 +44,29 @@
 - MAX_CYCLOMATIC: 10
 - MAX_LINE_LENGTH: 100
 - MAX_NESTING_DEPTH: 4
+
+## 本功能历史文件例外
+
+2026-10-03，统一滚动条实施前基线：`packages/cli/src/ui/App.tsx` 为 2728 行，
+`packages/cli/src/cli.tsx` 为 2096 行。本功能仅允许各净增最多 100 行用于布局及桥接接线；
+历史大文件不作无关拆分，新机制独立成模块，新增模块与函数继续遵守默认阈值。
+
+## TUI 输入与任务生命周期的历史文件例外
+
+2026-10-03，终审以 `21da100d0` 为基线：`ui/App.tsx` 2713 行、
+`agent/controller.ts` 2087 行、`commands/builtins.ts` 1336 行
+（路径均相对 `packages/cli/src/`）。本功能允许 App 净增不超过 60 行，
+Controller 净增不超过 20 行，builtins 净增不超过 5 行；仅限状态接线和参数传递。
+这些历史文件的既有大函数与复杂度暂不作无关拆分；新增光标、手势和选项模块
+仍遵守默认阈值。理由：本次只改变输入和启动边界，全面拆分会扩大回归范围。
+
+## TUI right-edge scrollbar and run status row exception
+
+2026-10-06, baseline `c3445fce7`: `ui/App.tsx` is 2582 lines and `cli.tsx` is 2016 lines
+(paths relative to `packages/cli/src/`). The feature `tui-scrollbar-edge-and-run-row`
+allows a net increase of at most 40 lines in `App.tsx` and 10 lines in `cli.tsx`, limited
+to wiring: the run-row enable condition, the shared activity object, the `cols` option of
+the frame differ and the lazy `/perf` scrollbar getter. New logic lives in
+`ui/run-status-row.ts`, `ui/frame-differ.ts` and `commands/perf.ts`, which keep the default
+thresholds. Reason: the change only moves one existing row and one escape sequence, and a
+wholesale split of these historical files would widen the regression surface.

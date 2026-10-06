@@ -28,8 +28,8 @@ describe('scrollChip', () => {
   });
 
   it('says the whole sentence when the terminal is wide enough', () => {
-    expect(scrollChip(12, 120, UNI)?.text).toBe('↓ 12 new lines · PgDn');
-    expect(scrollChip(1, 120, UNI)?.text).toBe('↓ 1 new line · PgDn');
+    expect(scrollChip(12, 120, UNI)?.text).toBe('↓ 12 lines below · PgDn');
+    expect(scrollChip(1, 120, UNI)?.text).toBe('↓ 1 line below · PgDn');
   });
 
   it('goes terse on a narrow terminal rather than wrapping', () => {
@@ -72,7 +72,7 @@ describe('scrollChip', () => {
   it('I-5: every glyph comes from `pickGlyphs`, so a legacy console gets ASCII', () => {
     // Manual matrix row 10: `cmd.exe` must render `v12`, not mojibake.
     expect(scrollChip(12, 40, ASC)?.text).toBe('v12');
-    expect(scrollChip(12, 120, ASC)?.text).toBe('v 12 new lines - PgDn');
+    expect(scrollChip(12, 120, ASC)?.text).toBe('v 12 lines below - PgDn');
     for (const cols of [40, 120]) {
       expect(scrollChip(12, cols, ASC)!.text).not.toMatch(/[^\x00-\x7f]/);
     }
@@ -93,33 +93,28 @@ describe('PromptInput — the chip on the input row', () => {
 
   it('T-22: renders inside the border at 12, and nothing at 0', () => {
     const shown = renderRowsAtWidth(
-      <PromptInput {...base} bordered={{}} scrolledLines={12} />,
+      <PromptInput {...base} scrolledLines={12} />,
       120,
     ).join('\n');
-    expect(shown).toContain('12 new lines');
+    expect(shown).toContain('12 lines below');
     const pinned = renderRowsAtWidth(
-      <PromptInput {...base} bordered={{}} scrolledLines={0} />,
+      <PromptInput {...base} scrolledLines={0} />,
       120,
     ).join('\n');
-    expect(pinned).not.toContain('new lines');
+    expect(pinned).not.toContain('lines below');
   });
 
   it('AC-4: it really arrived in the box — same row as the prompt marker', () => {
     const rows = renderRowsAtWidth(
-      <PromptInput {...base} bordered={{}} scrolledLines={12} />,
+      <PromptInput {...base} scrolledLines={12} />,
       120,
     );
-    const chipRow = rows.findIndex((r) => r.includes('new lines'));
+    const chipRow = rows.findIndex((r) => r.includes('lines below'));
     expect(chipRow).toBeGreaterThan(-1);
     // Inside the border means there is a frame row above it and below it.
     expect(rows[chipRow]).toContain('Send a message');
     expect(chipRow).toBeGreaterThan(0);
     expect(chipRow).toBeLessThan(rows.length - 1);
-  });
-
-  it('is suppressed in inline mode, where there is no self-drawn viewport', () => {
-    const rows = renderRowsAtWidth(<PromptInput {...base} scrolledLines={12} />, 120).join('\n');
-    expect(rows).not.toContain('new lines');
   });
 
   it('T-23: survives BOTH hint switches, because it is state and not a tutorial', async () => {
@@ -151,7 +146,7 @@ describe('PromptInput — the chip on the input row', () => {
         />,
         120,
       ).join('\n');
-      expect(rows, `showHint=${showHint} hints=${hintsEnabled}`).toContain('12 new lines');
+      expect(rows, `showHint=${showHint} hints=${hintsEnabled}`).toContain('12 lines below');
     }
   });
 
@@ -160,10 +155,10 @@ describe('PromptInput — the chip on the input row', () => {
     // lands on the top row either way today, and relying on that is how a later
     // `justifyContent` edit moves it without failing anything.
     const rows = renderRowsAtWidth(
-      <PromptInput {...base} bordered={{}} scrolledLines={7} />,
+      <PromptInput {...base} scrolledLines={7} />,
       120,
     );
-    const chipRow = rows.findIndex((r) => r.includes('new lines'));
+    const chipRow = rows.findIndex((r) => r.includes('lines below'));
     const markerRow = rows.findIndex((r) => r.includes('Send a message'));
     expect(chipRow).toBe(markerRow);
   });

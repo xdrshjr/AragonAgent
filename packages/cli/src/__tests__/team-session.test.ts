@@ -3,7 +3,6 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadSession, normalizeLoadedEntries, saveSession } from '../session/persist.js';
-import { computeSettledCount } from '../ui/Transcript.js';
 import { initialViewState, viewReducer, type Entry } from '../agent/reducer.js';
 import type {
   DispatchOutcome,
@@ -78,15 +77,6 @@ describe('P1-5 — a session saved mid-dispatch resumes settled', () => {
       { id: 'e2', kind: 'notice', level: 'info', text: 'note' },
     ];
     expect(normalizeLoadedEntries(entries)).toEqual(entries);
-  });
-
-  it('the normalized entry SETTLES, so it can reach <Static>', () => {
-    // The point of the fix: an unsettled entry is what pins the transcript into
-    // a permanent re-render. `computeSettledCount` keeps a live dispatch out of
-    // the settled prefix and lets the normalized one in.
-    const tail: Entry = { id: 'e9', kind: 'user', text: 'later' };
-    expect(computeSettledCount([liveTeamEntry, tail], {})).toBe(0);
-    expect(computeSettledCount([...normalizeLoadedEntries([liveTeamEntry]), tail], {})).toBe(1);
   });
 });
 

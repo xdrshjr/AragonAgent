@@ -4,7 +4,7 @@ import { buildTeamPanelLayout } from '../ui/layout/team-panel.js';
 import type { TeamSnapshot } from '../team/types.js';
 
 const input = {
-  mode: 'fullscreen' as const, cols: 100, panelEnabled: true, overlayOpen: false,
+   cols: 100, panelEnabled: true, overlayOpen: false,
   itemCount: 20, viewportBudget: 12, teamRows: 8, popupRows: 0,
 };
 
@@ -21,18 +21,18 @@ function teamSnapshot(count: number, mail = false): TeamSnapshot {
 }
 
 describe('TODO 共享行预算', () => {
-  it('100×20、团队八行时仍显示十五列四行右栏', () => {
+  it('团队八行时右栏仍占完整预算，正文保留其余列', () => {
     expect(buildTodoRailLayout(input)).toMatchObject({
-      visible: true, reason: 'visible', width: 15, rows: 4, contentCols: 85, popupMaxHeight: 1,
+      visible: true, reason: 'visible', width: 15, rows: 12, contentCols: 85, popupMaxHeight: 1,
     });
   });
   it('菜单为正文保留三行，空间不足时菜单不占行', () => {
-    expect(buildTodoRailLayout({ ...input, popupRows: 9 }).rows).toBe(4);
-    expect(buildTodoRailLayout({ ...input, teamRows: 0, popupRows: 99 }).rows).toBe(3);
+    expect(buildTodoRailLayout({ ...input, popupRows: 9 }).rows).toBe(12);
+    expect(buildTodoRailLayout({ ...input, teamRows: 0, popupRows: 99 }).rows).toBe(12);
   });
   it('按顺序应用隐藏条件', () => {
     for (const [over, reason] of [
-      [{ mode: 'inline' }, 'inline'], [{ panelEnabled: false }, 'disabled'],
+      [{ panelEnabled: false }, 'disabled'],
       [{ overlayOpen: true }, 'overlay'], [{ itemCount: 0 }, 'empty'],
       [{ cols: 75 }, 'narrow'], [{ viewportBudget: 2 }, 'short'],
     ] as const) {

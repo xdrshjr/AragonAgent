@@ -103,10 +103,6 @@ function advise(interactive: boolean, text: string): string {
   return interactive ? ` ${text}` : '';
 }
 
-/**
- * The decision. EVALUATED IN THIS ORDER, AND THE ORDER IS SEMANTICS, NOT STYLE —
- * the same sentence `decideRenderMode` carries.
- */
 export function decideFollowThrough(input: FollowThroughInput): FollowThroughDecision {
   const { mode, snapshot, runEnd, budget, interactive } = input;
 

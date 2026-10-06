@@ -73,7 +73,6 @@ import {
   type TodoConfig,
 } from '../config/schema.js';
 import type { SkillService } from '../skills/service.js';
-import type { RenderMode } from '../ui/layout/frame.js';
 import type { AgentMode } from '../agent/agent-mode.js';
 import type { TeamEvent, TeamSnapshot } from '../team/types.js';
 import type { TodoEvent, TodoSnapshot } from '../todo/types.js';
@@ -191,6 +190,8 @@ class FakeController {
     return () => this.listeners.delete(l);
   }
   emit(e: AgentEvent): void {
+    if (e.type === 'agent_start') this.running = true;
+    if (e.type === 'agent_end') this.running = false;
     for (const l of this.listeners) l(e);
   }
   getConfig(): CliConfig {
@@ -415,15 +416,13 @@ function mount(
   fc: FakeController,
   extra: {
     initialPrompt?: string;
-    mode?: RenderMode;
-    humanInputBridge?: HumanInputBridge;
+        humanInputBridge?: HumanInputBridge;
   } = {},
 ) {
   return render(
     <App
       controller={fc as unknown as AgentController}
       version="0.0.0"
-      mode={extra.mode ?? 'inline'}
       initialPrompt={extra.initialPrompt}
       humanInputBridge={extra.humanInputBridge}
     />,
@@ -434,7 +433,6 @@ function mount(
 function streamingController(config: CliConfig = CONFIG): FakeController {
   const fc = new FakeController();
   fc.config = config;
-  fc.running = true;
   fc.onPrompt = () =>
     new Promise<void>(() => {
       fc.emit({ type: 'agent_start' });
@@ -447,7 +445,6 @@ function streamingController(config: CliConfig = CONFIG): FakeController {
 /** A run parked inside a `bash` call that never returns. */
 function toolRunningController(): FakeController {
   const fc = new FakeController();
-  fc.running = true;
   fc.onPrompt = () =>
     new Promise<void>(() => {
       fc.emit({ type: 'agent_start' });
@@ -561,7 +558,7 @@ describe('single spinner while running', () => {
     unmount();
   });
 
-  it('AC-5: an overlay mid-run hands the animation back, so the screen is never dead', async () => {
+  it('AC-5: a modal hides the transcript animation and closing it restores activity', async () => {
     // THE ONE CASE THAT CANNOT BE WRITTEN THE OBVIOUS WAY (P0-1). `?` is gated
     // on `!running` (`PromptInput.tsx:421`) and `/help` / `/model` / `/settings`
     // are slash commands needing a submit, so NO help overlay can exist while a
@@ -575,7 +572,7 @@ describe('single spinner while running', () => {
     // human-input suite already uses.
     const fc = streamingController();
     const bridge = makeBridge();
-    const { lastFrame, unmount } = mount(fc, { initialPrompt: 'go', humanInputBridge: bridge });
+    const { lastFrame, stdin, unmount } = mount(fc, { initialPrompt: 'go', humanInputBridge: bridge });
     const before = await settledFrame(lastFrame, (f) => f.includes('partial'));
     expect(brailleCount(before)).toBe(1); // baseline: the activity row, and only it
     expect(hasActivityRow(before)).toBe(true);
@@ -585,7 +582,10 @@ describe('single spinner while running', () => {
 
     expect(frame).toContain('Review plan'); // the overlay really is up...
     expect(hasActivityRow(frame)).toBe(false); // ...the row is gone...
-    expect(brailleCount(frame)).toBeGreaterThanOrEqual(1); // ...and the screen is not dead
+    expect(brailleCount(frame)).toBe(0); // the modal owns the viewport
+    stdin.write('\x1b');
+    const restored = await settledFrame(lastFrame, (f) => hasActivityRow(f));
+    expect(brailleCount(restored)).toBe(1);
     unmount();
   });
 
@@ -703,17 +703,31 @@ describe('a mid-run toast keeps the one animation', () => {
     updatedAt: 1_700_000_000_000,
   };
 
-  /** A full-screen run parked in `bash`, with a live todo rail beside it. */
-  function mountThickRun() {
+  /**
+   * A full-screen run parked in `bash`, with a live todo rail beside it.
+   *
+   * `hints: false` is the configuration in which the run status row is NOT
+   * enabled (it replaces the idle hint row, so it exists only where that row
+   * does), which keeps the life signal on the fixed bottom row - the layout the
+   * toast-glyph cases below were written for.
+   */
+  function mountThickRun(config: CliConfig = CONFIG) {
     const fc = toolRunningController();
-    fc.todoSnapshot = TODOS;
-    const r = mount(fc, { initialPrompt: 'ls', mode: 'fullscreen' });
-    fc.emitTodo({ type: 'updated', snapshot: TODOS });
-    return r;
+    fc.config = config;
+    const startTool = fc.onPrompt!;
+    fc.onPrompt = (text) => {
+      const running = startTool(text);
+      // Emit from the active run, after App has subscribed to TODO events.
+      // An event immediately after mount can be lost before effects run.
+      fc.todoSnapshot = TODOS;
+      fc.emitTodo({ type: 'updated', snapshot: TODOS });
+      return running;
+    };
+    return mount(fc, { initialPrompt: 'ls',  });
   }
 
   it('AC-12: braille count is 1 before, during and after the ack', async () => {
-    const { lastFrame, stdin, unmount } = mountThickRun();
+    const { lastFrame, stdin, unmount } = mountThickRun({ ...CONFIG, hints: false });
 
     const before = await settledFrame(lastFrame, (f) => f.includes('Running bash'));
     // The fixture really is thick: two sites that WOULD animate if the
@@ -745,6 +759,24 @@ describe('a mid-run toast keeps the one animation', () => {
     }
     expect(after).toContain('Running bash'); // the row is handed back...
     expect(brailleCount(after)).toBe(1); // ...and still owns the only animation
+    unmount();
+  });
+
+  it('AC-12b: with the run row up, the toast takes the bottom row and the animation stays above the input', async () => {
+    // tui-scrollbar-edge-and-run-row: the run row sits in the footer, so a toast
+    // on the fixed bottom row can no longer displace the life signal and needs no
+    // glyph of its own. Still exactly one animation, never zero, never two.
+    const { lastFrame, stdin, unmount } = mountThickRun();
+    const before = await settledFrame(lastFrame, (f) => f.includes('Running bash'));
+    expect(brailleCount(before)).toBe(1);
+
+    stdin.write('\x14');
+    const during = await settledFrame(lastFrame, (f) => /Thinking (shown|hidden)/.test(f));
+    expect(during).toContain('Running bash'); // the run row is NOT displaced
+    expect(brailleCount(during)).toBe(1);
+    expect(during).toContain('Thinking shown.');
+    // The toast carries no animation of its own while the run row is visible.
+    expect(during).not.toMatch(/[⠀-⣿]\s+Thinking shown/);
     unmount();
   });
 
@@ -784,7 +816,7 @@ describe('a mid-run toast keeps the one animation', () => {
       fc.config = config;
       const { lastFrame, stdin, unmount } = mount(fc, {
         initialPrompt: 'ls',
-        mode: 'fullscreen',
+
       });
       // eslint-disable-next-line no-await-in-loop
       await settledFrame(lastFrame, (f) => f.includes('Running bash'));

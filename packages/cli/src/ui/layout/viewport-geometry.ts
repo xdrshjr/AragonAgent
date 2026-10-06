@@ -20,11 +20,12 @@ export interface ViewportGeometry {
   offset: number;
   /** Natural (unclipped) height of the content, in rows. */
   contentRows: number;
+  trailingContentRows?: number;
 }
 
 /**
  * The default is the UNMEASURED geometry, and consumers must treat it as such:
- * a `TranscriptList` rendered outside a `ScrollViewport` (inline mode, and every
+ * a `TranscriptList` rendered outside a `ScrollViewport` (including
  * test that mounts it bare) sees `viewportRows: 0`, which `selectWindow` reads
  * as "first frame" and answers by pinning the live tail.
  */
@@ -32,6 +33,7 @@ export const ViewportGeometryContext = createContext<ViewportGeometry>({
   viewportRows: 0,
   offset: 0,
   contentRows: 0,
+  trailingContentRows: 0,
 });
 
 export function useViewportGeometry(): ViewportGeometry {

@@ -27,8 +27,8 @@ describe('viewportRows (A-3 / A-4)', () => {
 
   it('specifically does not regress at the old 27 -> 28 cliff', () => {
     expect(viewportRows(28)).toBeGreaterThanOrEqual(viewportRows(27));
-    expect(viewportRows(28)).toBe(20);
-    expect(viewportRows(27)).toBe(19);
+    expect(viewportRows(28)).toBe(24);
+    expect(viewportRows(27)).toBe(23);
   });
 
   it('takes no `empty` argument, so the first submit cannot change it (A-4)', () => {
@@ -56,10 +56,10 @@ describe('viewportRows (A-3 / A-4)', () => {
   });
 
   it('matches the published layout budget exactly', () => {
-    // Spec 5.1: rows-8 with the hint row, rows-7 without.
-    expect(viewportRows(24)).toBe(16);
-    expect(viewportRows(30)).toBe(22);
-    expect(viewportRows(19)).toBe(12);
+    // Unified document: header, activity and status are the only fixed rows.
+    expect(viewportRows(24)).toBe(20);
+    expect(viewportRows(30)).toBe(26);
+    expect(viewportRows(19)).toBe(15);
   });
 });
 
@@ -77,7 +77,7 @@ describe('chromeBudget', () => {
 
   it('spends the extra hint row out of the row the terminal just gained', () => {
     // This is why the hint step does not create a dip in `viewportRows`.
-    expect(viewportRows(HINT_MIN_ROWS)).toBe(viewportRows(HINT_MIN_ROWS - 1));
+    expect(viewportRows(HINT_MIN_ROWS)).toBe(viewportRows(HINT_MIN_ROWS - 1) + 1);
   });
 });
 
@@ -101,11 +101,11 @@ describe('the activity line did not cost the viewport a row (AC-8a / R-11)', () 
   it('reports the same rows it did before the feature, at every height', () => {
     // Spec 5.1 again, restated as a regression baseline: if a future round adds
     // the bottom-chrome row this one declined to add, these numbers move.
-    expect(viewportRows(24)).toBe(16);
-    expect(viewportRows(30)).toBe(22);
-    expect(viewportRows(19)).toBe(12);
-    expect(viewportRows(27)).toBe(19);
-    expect(viewportRows(28)).toBe(20);
+    expect(viewportRows(24)).toBe(20);
+    expect(viewportRows(30)).toBe(26);
+    expect(viewportRows(19)).toBe(15);
+    expect(viewportRows(27)).toBe(23);
+    expect(viewportRows(28)).toBe(24);
   });
 });
 
@@ -155,10 +155,10 @@ describe('viewportRows — the draftRows parameter (D-12)', () => {
     }
   });
 
-  it('spends exactly one viewport row per draft row, until the composer is full', () => {
+  it('keeps the viewport budget independent of draft rows', () => {
     // R-12's first rule: past the ceiling the transcript stops moving, which is
     // what makes a 218-line draft and a 400-line draft look the same.
-    expect(viewportRows(30, 1) - viewportRows(30, 2)).toBe(1);
+    expect(viewportRows(30, 1) - viewportRows(30, 2)).toBe(0);
     expect(viewportRows(30, 10)).toBe(viewportRows(30, 11));
     expect(viewportRows(30, 10)).toBe(viewportRows(30, 5000));
   });

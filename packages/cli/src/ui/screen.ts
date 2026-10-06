@@ -40,18 +40,16 @@ const SHOW_CURSOR = '\x1b[?25h';
  * text rather than raw bytes above 0x7F that `setEncoding('utf8')` would mangle.
  *
  * `?1002` is BUTTON-EVENT TRACKING: motion is reported ONLY WHILE A BUTTON IS
- * HELD, which is what drag-select needs and costs exactly zero reports while the
+ * HELD, which both scrollbar dragging and text selection need and costs exactly zero reports while the
  * pointer is idle. This comment used to lump it together with `?1003` and
  * dismiss both as "floods stdin on every pointer move" — true of `?1003`
  * (any-event), false of `?1002`, and the sentence had to go in the same commit
  * that started asking for it or it would stand as a documented reason not to
  * (AC-11 / D-10).
  *
- * IT IS GATED ON `motion`, i.e. on the resolved `mouseSelect` capability, and
- * that is what makes "S3 is revertible" a byte-level fact rather than a claim:
- * with drag-select off the sequences below are byte-identical to the constants
- * they replaced (AC-8 / D-15). `disableMouse` is the exact reverse of
- * `enableMouse` for both values (I-1 / AC-7).
+ * Motion is enabled with mouse reporting, independently of text selection.
+ * Disabling selection must still allow scrollbar gestures. The enable/disable
+ * sequences remain paired for both values of this resolved capability.
  */
 const enableMouse = (motion: boolean): string =>
   `\x1b[?1000h${motion ? '\x1b[?1002h' : ''}\x1b[?1006h`;
@@ -121,7 +119,7 @@ export interface AltScreenOptions {
    *
    * SAME "ALREADY DECIDED ELSEWHERE" DISCIPLINE AS `mouse`: this module must
    * never derive it from config. `cli.tsx` passes
-   * `mouseFilter !== null && cfg.mouseSelect`.
+   * `mouseOn`, after the filter and VT capability have been resolved.
    *
    * Optional, defaulting to `false`, so every pre-existing caller and every
    * pre-existing test emits exactly the bytes it emitted before (AC-8 / T-34).

@@ -40,12 +40,7 @@ const GUTTER_MAX = 6;
 export interface DiffViewProps {
   patch: FilePatch;
   expanded?: boolean;
-  /**
-   * Inline mode only (L5): ceiling on the rows a LIVE card contributes to the
-   * non-`<Static>` region. `undefined` — what the full-screen branch passes —
-   * means no clamp.
-   */
-  liveClampRows?: number;
+
   theme: Theme;
 }
 
@@ -112,14 +107,10 @@ function gutterWidth(rows: DiffRow[]): number {
 function DiffViewImpl({
   patch,
   expanded,
-  liveClampRows,
   theme,
 }: DiffViewProps): React.ReactElement {
   const rows = diffRows(patch);
-  const ceiling = Math.min(
-    expanded ? rows.length : DIFF_COLLAPSED_LINES,
-    liveClampRows ?? Number.POSITIVE_INFINITY,
-  );
+  const ceiling = expanded ? rows.length : DIFF_COLLAPSED_LINES;
   const visible = ceiling >= rows.length ? rows : rows.slice(0, Math.max(0, ceiling));
   const hidden = rows.length - visible.length;
   const width = gutterWidth(rows);

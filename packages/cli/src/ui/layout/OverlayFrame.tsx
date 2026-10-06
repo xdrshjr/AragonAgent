@@ -1,28 +1,3 @@
-/**
- * OverlayFrame (spec §4.4) — the shared shell for all four overlays.
- *
- * TWO CONTENT MODES, and the distinction is load-bearing:
- *
- *  - mode A (`rows`): the caller hands over an array of elements that are each
- *    exactly one row and `wrap="truncate"`. The frame slices them and OWNS the
- *    scroll keys. Used by Help and Settings.
- *
- *  - mode B (`children`): the content manages itself. The frame draws the title,
- *    the border and the footer, and touches NOTHING else — no slicing, no
- *    arrow-key handling, no position indicator.
- *
- * Mode B exists because of `ink-select-input`: it already windows itself via
- * `limit` and registers its own `useInput` with `isFocused` defaulting to true.
- * Ink dispatches a key to EVERY mounted input handler, so a frame that also
- * claimed the arrow keys would move the model picker's selection twice per press
- * — breaking a feature that already works. Slicing it by element would be worse
- * still, since it is a single component rather than a list of rows.
- *
- * `maxRows` may be `Infinity` (the inline render path, which has no fixed frame
- * and therefore no height to fit): the frame then renders everything and shows
- * no position indicator.
- */
-
 import React, { useEffect } from 'react';
 import { Box, Text } from 'ink';
 import type { Theme } from '../theme.js';
@@ -37,7 +12,7 @@ interface OverlayFrameBase {
   title: string;
   /** Footer text. Written by the CALLER so each overlay names its own keys. */
   hint: string;
-  /** Viewport rows the overlay may occupy; `Infinity` in inline mode. */
+  /** Viewport rows the overlay may occupy. */
   maxRows: number;
   cols?: number;
   theme: Theme;

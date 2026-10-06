@@ -251,7 +251,6 @@ class FakeController {
     return undefined;
   }
 
-
   outputListeners = new Set<ToolOutputListener>();
   subscribeToolOutput(l: ToolOutputListener): () => void {
     this.outputListeners.add(l);
@@ -260,7 +259,6 @@ class FakeController {
   emitToolOutput(event: ToolOutputEvent): void {
     for (const l of this.outputListeners) l(event);
   }
-
 
   procListeners = new Set<ProcEventListener>();
   subscribeProc(l: ProcEventListener): () => void {
@@ -373,7 +371,7 @@ function mountApp(fc: FakeController) {
     isTTY: true, setRawMode() {}, ref() {}, unref() {},
   });
   const instance = render(<App controller={fc as unknown as AgentController}
-    version="0.0.0" mode="fullscreen" />, {
+    version="0.0.0" />, {
     stdout: stdout as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
     debug: true, patchConsole: false, exitOnCtrlC: false,
@@ -382,7 +380,7 @@ function mountApp(fc: FakeController) {
 }
 
 function railLines(frame: string, width = 15, cols = 100): string[] {
-  return frame.split('\n').map(line => line.slice(cols - width)).filter(line => line.startsWith('|'));
+  return frame.split('\n').map(line => line.slice(cols - width - 1, cols - 1)).filter(line => line.startsWith('|'));
 }
 
 describe('真实 App 的 TODO 布局接线', () => {
@@ -394,29 +392,29 @@ describe('真实 App 的 TODO 布局接线', () => {
       fc.todoSnapshot = PLAN;
       fc.emitTodo({ type: 'updated', snapshot: PLAN });
       await delay(100);
-      expect(railLines(app.frame())).toHaveLength(12);
+      expect(railLines(app.frame())).toHaveLength(16);
       expect(railLines(app.frame()).join('\n')).toContain('9/20');
       fc.teamSnapshot = TEAM;
       for (const listener of fc.teamListeners) listener({ type: 'agent_update',
         dispatchId: 'd', run: TEAM.runs[0]! });
       await delay(100);
-      expect(railLines(app.frame())).toHaveLength(4);
+      expect(railLines(app.frame())).toHaveLength(16);
       expect(railLines(app.frame()).join('\n'), app.frame()).toContain('ANCHOR');
-      expect(railLines(app.frame()).join('\n')).toContain('-9 +9');
+      expect(railLines(app.frame()).join('\n')).toContain('9/20');
       // A hidden /c menu must submit the typed buffer, not /clear.
       app.stdin.write('/c'); await delay(80);
-      expect(railLines(app.frame())).toHaveLength(4);
+      expect(railLines(app.frame())).toHaveLength(16);
       app.stdin.write('\r'); await delay(100);
-      expect(railLines(app.frame())).toHaveLength(4);
+      expect(railLines(app.frame())).toHaveLength(16);
       expect(app.frame()).toContain('Unknown command');
       app.stdin.write('\u001b[5~'); await delay(100);
-      expect(app.frame()).toMatch(/v \d+ new/);
-      for (const [cols, width] of [[75, 0], [76, 14], [100, 15], [200, 30]]) {
+      expect(app.frame()).toContain('PgDn down');
+      for (const [cols, width] of [[76, 0], [77, 14], [100, 15], [200, 30]]) {
         app.stdout.columns = cols!;
         app.stdout.emit('resize'); await delay(120);
         const lines = railLines(app.frame(), width!, cols!);
-        expect(lines.length, app.frame()).toBe(width ? 4 : 0);
-        if (cols! >= 100) expect(app.frame()).toMatch(/v \d+ new/);
+        expect(lines.length, app.frame()).toBe(width ? 16 : 0);
+        if (cols! >= 100) expect(app.frame()).toContain('PgDn down');
         for (const line of app.frame().split('\n')) expect(stringWidth(line)).toBeLessThanOrEqual(cols!);
       }
       fc.emitTodo({ type: 'cleared', reason: 'reset' }); await delay(80);
@@ -434,7 +432,7 @@ describe('真实 App 的 TODO 布局接线', () => {
       for (const listener of fc.teamListeners) listener({ type: 'agent_update',
         dispatchId: 'd', run: TEAM.runs[0]! });
       await delay(100);
-      expect(railLines(app.frame())).toHaveLength(4);
+      expect(railLines(app.frame())).toHaveLength(16);
       app.stdin.write('long draft '.repeat(40)); await delay(150);
       expect(app.frame()).toContain('8 running');
       expect(app.frame()).not.toContain('+3 more (3 running)');
@@ -442,7 +440,7 @@ describe('真实 App 的 TODO 布局接线', () => {
       expect(app.frame()).toContain('idle');
       app.stdin.write('\u0015'); await delay(160);
       expect(app.frame()).toContain('+3 more (3 running)');
-      expect(railLines(app.frame())).toHaveLength(4);
+      expect(railLines(app.frame())).toHaveLength(16);
     } finally { app.unmount(); app.cleanup(); }
   });
 
@@ -453,21 +451,21 @@ describe('真实 App 的 TODO 布局接线', () => {
       await delay(100);
       fc.emitTodo({ type: 'updated', snapshot: PLAN }); await delay(80);
       app.stdin.write('/'); await delay(100);
-      expect(railLines(app.frame())).toHaveLength(3);
+      expect(railLines(app.frame())).toHaveLength(16);
       app.stdin.write('\u001b'); await delay(100);
-      expect(railLines(app.frame())).toHaveLength(12);
+      expect(railLines(app.frame())).toHaveLength(16);
       app.stdin.write('\u0015'); await delay(80);
       app.stdin.write('/help'); await delay(80);
       app.stdin.write('\r'); await delay(100);
       expect(railLines(app.frame())).toEqual([]);
       expect(app.frame()).toContain('Help');
       app.stdin.write('\u001b'); await delay(100);
-      expect(railLines(app.frame())).toHaveLength(12);
+      expect(railLines(app.frame())).toHaveLength(16);
       app.stdin.write('/'); await delay(80);
       app.stdout.rows = 11; app.stdout.emit('resize'); await delay(120);
       expect(app.frame()).toContain('Terminal too small');
       app.stdout.rows = 20; app.stdout.emit('resize'); await delay(120);
-      expect(railLines(app.frame())).toHaveLength(12);
+      expect(railLines(app.frame())).toHaveLength(16);
       expect(app.frame()).not.toContain('Maximum update depth');
       const count = app.frames.length;
       await delay(160);
@@ -476,12 +474,13 @@ describe('真实 App 的 TODO 布局接线', () => {
         expect(frame.split('\n').length).toBeLessThanOrEqual(19);
         if (!frame.includes('Terminal too small')) expect(frame).toContain('idle');
       }
+      app.stdin.write('\u0015'); await delay(60);
       app.stdin.write('/todo panel off'); await delay(80);
       app.stdin.write('\r'); await delay(100);
       expect(railLines(app.frame())).toEqual([]);
       app.stdin.write('/todo panel on'); await delay(80);
       app.stdin.write('\r'); await delay(100);
-      expect(railLines(app.frame())).toHaveLength(12);
+      expect(railLines(app.frame())).toHaveLength(16);
     } finally { app.unmount(); app.cleanup(); }
   });
 });

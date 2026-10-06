@@ -82,8 +82,6 @@ export interface CliFlags {
   confirm?: boolean;
   toolTimeout?: string | number;
   idleTimeout?: string | number;
-  /** `--fullscreen` ⇒ true, `--no-fullscreen` ⇒ false, absent ⇒ undefined. */
-  fullscreen?: boolean;
   /** `--no-exit-transcript` ⇒ false. */
   exitTranscript?: boolean;
   /** `--compact` ⇒ true, `--no-compact` ⇒ false, absent ⇒ undefined. */
@@ -303,33 +301,10 @@ export interface CliFlags {
 }
 
 /**
- * Resolve the tri-state full-screen preference (see `CliConfig.fullscreen`).
- * Only a flag or the env var counts as an explicit FORCE; a config file holding
- * the default `true` must not disable the automatic downgrades.
- */
-function resolveFullscreen(
-  flags: CliFlags,
-  env: Partial<PersistedConfig>,
-  file: Partial<PersistedConfig>,
-): boolean | undefined {
-  if (flags.fullscreen !== undefined) return flags.fullscreen;
-  if (env.fullscreen !== undefined) return env.fullscreen;
-  if (file.fullscreen === false) return false;
-  return undefined;
-}
-
-/**
  * Resolve wheel region routing: flag › env › file › default `true`.
  *
- * THIS NEEDS ITS OWN RESOLVER; it does not "match every other boolean" in this
- * file. `hints` is `flags.hints !== undefined ? … : file.hints ?? DEFAULT` and
- * reads NO ENV AT ALL — copying that line would ship `ARAGON_MOUSE` as
- * documented-but-dead (P1-9). Only `fullscreen` has an env layer, and only
- * because `resolveFullscreen` above was written to give it one.
- *
- * Unlike `fullscreen` this is a plain boolean rather than a tri-state: there
- * are no heuristics for an explicit `true` to override, so a persisted `true`
- * is just a value and not an opinion that has to be told apart from silence.
+ * Unlike `hints`, mouse routing accepts an environment override. Keep that
+ * layer explicit so ARAGON_MOUSE works even when a wrapper owns the arguments.
  */
 function resolveMouse(
   flags: CliFlags,
@@ -812,12 +787,6 @@ export function loadConfig(flags: CliFlags = {}): CliConfig {
   const file: Partial<PersistedConfig> = read.config ?? {};
   const env = readEnvConfig();
 
-  // A config file that exists but will not parse used to reset EVERY setting
-  // with nothing anywhere explaining it. The fallback is unchanged; what is new
-  // is that it leaves a trace. The record alone is not the explanation, so the
-  // two owners of a user-visible channel say it too: `main()` writes one stderr
-  // line (headless, inline and every subcommand) and `App.tsx` raises a toast
-  // (full-screen, where the alternate screen wipes that line away).
   if (read.parseError) {
     getLogger().error('config', 'config_parse_failed', { error: read.parseError });
   }
@@ -987,7 +956,6 @@ export function loadConfig(flags: CliFlags = {}): CliConfig {
     contextWindow,
     theme,
     reducedMotion,
-    fullscreen: resolveFullscreen(flags, env.partial, file),
     exitTranscript:
       flags.exitTranscript !== undefined
         ? flags.exitTranscript
@@ -1071,7 +1039,6 @@ function recordResolvedConfig(config: CliConfig): void {
     // "why is my output truncated" was unanswerable after the fact.
     maxTokens: config.maxTokens ?? 'auto',
     theme: config.theme,
-    fullscreen: config.fullscreen,
     toolTimeoutMs: config.toolTimeoutMs,
     idleTimeoutMs: config.idleTimeoutMs,
     historyEnabled: config.historyEnabled,

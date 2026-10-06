@@ -97,6 +97,8 @@ export function readConfigFile(): ConfigFileRead {
     const raw = readFileSync(file, 'utf-8');
     const parsed = JSON.parse(raw) as unknown;
     if (parsed && typeof parsed === 'object') {
+      // Retired layout preference: tolerate old files without restoring a UI mode.
+      delete (parsed as Record<string, unknown>).fullscreen;
       return { config: parsed as Partial<PersistedConfig> };
     }
     return { config: null, parseError: `${file} does not contain a JSON object` };

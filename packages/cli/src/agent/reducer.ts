@@ -147,18 +147,7 @@ export type Entry =
       lastOutputAt?: number;
     }
   | { id: string; kind: 'notice'; level: NoticeLevel; text: string }
-  /**
-   * A team dispatch (team-subagents §5.3). JSON-SERIALIZABLE by construction, so
-   * `/save` and `/resume` need no format change.
-   *
-   * `active: true` is normalized away ON LOAD, in `session/persist.ts`, not here
-   * (P1-5). A session saved mid-dispatch would otherwise resume with a card that
-   * claims to be running while nothing is: it spins forever, and because
-   * `Transcript`'s settled boundary is MONOTONIC an entry that never settles
-   * never reaches `<Static>` and is re-rendered on every frame for the rest of
-   * the session. The reducer never legitimately sees a stale-active entry — only
-   * the file does — which is why the fix belongs in the load path.
-   */
+
   | {
       id: string;
       kind: 'team';
@@ -169,18 +158,7 @@ export type Entry =
       durationMs?: number;
       active: boolean;
     }
-  /**
-   * The turn's todo checklist (todo-plan-execution §3.8). ONE per user turn,
-   * rewritten in place — a 7-item list updated twice per item would otherwise be
-   * 14 near-identical tool cards in the one surface the user reads most.
-   *
-   * JSON-SERIALIZABLE by construction, so `/save` needs no format change.
-   *
-   * `live: true` is normalized away ON LOAD, in `session/persist.ts`, for the
-   * same reason the team entry's `active` is (C-5): `Transcript`'s settled
-   * boundary is MONOTONIC, so an entry that never settles never reaches
-   * `<Static>` and is re-rendered on every frame for the rest of the session.
-   */
+
   | {
       id: string;
       kind: 'todo';
@@ -197,19 +175,7 @@ export type Entry =
        */
       interrupted?: boolean;
     }
-  /**
-   * The turn's retry story (llm-api-retry-backoff §6.4). ONE per turn, REWRITTEN
-   * IN PLACE — ten retries rendered as ten notices would bury the transcript in
-   * the one moment the user most needs it legible.
-   *
-   * JSON-SERIALIZABLE by construction, so `/save` needs no format change.
-   *
-   * `phase: 'waiting' | 'retrying'` is normalized away ON LOAD, in
-   * `session/persist.ts`, exactly as the team entry's `active` and the todo
-   * card's `live` are (R-10): `Transcript`'s settled boundary is MONOTONIC, so a
-   * card that never settles never reaches `<Static>` and is re-rendered on every
-   * frame for the rest of the session.
-   */
+
   | {
       id: string;
       kind: 'retry';
@@ -227,20 +193,7 @@ export type Entry =
       totalRetries?: number;
       elapsedMs?: number;
     }
-  /**
-   * One fast-model review (fast-model-tier §5.4). ONE CARD PER REVIEW, never
-   * rewritten across reviews — a critique is a single event, unlike the todo
-   * card's per-turn checklist.
-   *
-   * JSON-SERIALIZABLE by construction, so `/save` needs no format change.
-   *
-   * `live: true` is normalized away ON LOAD, in `session/persist.ts`, next to
-   * `team.active`, `todo.live` and the retry card's phase, and for the identical
-   * reason (C-5): `Transcript`'s settled boundary is MONOTONIC, so an entry that
-   * never settles never reaches `<Static>` and is re-rendered on every frame for
-   * the rest of the session. The reducer never legitimately sees a stale-live
-   * entry — only the file does.
-   */
+
   | {
       id: string;
       kind: 'fast';
@@ -256,25 +209,7 @@ export type Entry =
       durationMs?: number;
       live: boolean;
     }
-  /**
-   * One context compaction (context-auto-compaction §5.5). ONE CARD PER
-   * COMPACTION, rewritten once when the call returns — like the fast card, and
-   * unlike the todo card's per-turn checklist.
-   *
-   * JSON-SERIALIZABLE by construction, so `/save` and `/resume` need no format
-   * change.
-   *
-   * `live: true` is normalized away ON LOAD, in `session/persist.ts`, next to
-   * `team.active`, `todo.live`, the retry card's phase and `fast.live`, and for
-   * the identical reason (C-8): `Transcript`'s settled boundary is MONOTONIC, so
-   * an entry that never settles never reaches `<Static>` and is re-rendered on
-   * every frame for the rest of the session.
-   *
-   * EVERY STRING ON THIS CARD DESCRIBES THE HISTORY, NEVER THE SCREEN (P2-9).
-   * `/clear` empties the transcript view but not `messages`, so a compaction can
-   * legitimately fire against a visually empty transcript and report
-   * "112 -> 9 messages" with nine visible rows.
-   */
+
   | {
       id: string;
       kind: 'compaction';
@@ -304,27 +239,7 @@ export type Entry =
       tailRelief?: { messages: number; charsRemoved: number };
       live: boolean;
     }
-  /**
-   * One supervised background service (background-service-supervision §3.10).
-   *
-   * JSON-SERIALIZABLE by construction, so `/save` needs no format change.
-   *
-   * IT IS THE ONE LIVE CARD THAT DOES **NOT** BLOCK THE SETTLED BOUNDARY ONCE IT
-   * IS UP (D-11 / P0-4). Every other live clause in
-   * `Transcript.tsx::computeSettledCount` is bounded by an OPERATION — a
-   * dispatch, a turn, one LLM call, one countdown — and each carries a comment
-   * saying that an entry which never settles is re-rendered on every frame for
-   * the rest of the session. A service is bounded by the USER'S INTENT: a dev
-   * server left up for an hour is the normal case. So only `starting` blocks
-   * (bounded by `readyTimeoutMs`), a `ready`/`running` card commits its body to
-   * `<Static>`, and a later terminal transition appends a NEW one-row entry
-   * rather than trying to rewrite a card `<Static>` has already printed.
-   *
-   * `terminal: true` marks that second entry. `session/persist.ts` rewrites any
-   * restored non-terminal card to `stopped`, next to `team.active`, `todo.live`,
-   * the retry phase, `fast.live` and `compaction.live`, and for the identical
-   * reason.
-   */
+
   | {
       id: string;
       kind: 'service';
@@ -684,14 +599,7 @@ export type ViewAction =
   // one service arriving through two channels would be two cards.
   | { type: 'serviceStart'; service: ServiceSnapshot }
   | { type: 'serviceUpdate'; service: ServiceSnapshot }
-  /**
-   * A service reached a terminal state.
-   *
-   * IT APPENDS A NEW ONE-ROW ENTRY rather than rewriting the card (D-11). The
-   * card may already have been printed into `<Static>`, and `<Static>` cannot
-   * un-print — so any design that rewrites a printed card is wrong whatever it
-   * claims. A second event at a second time is also simply more honest.
-   */
+
   | { type: 'serviceEnd'; service: ServiceSnapshot };
 
 // ---------------------------------------------------------------------------
@@ -1042,31 +950,6 @@ function settleRetryCard(
   };
 }
 
-/**
- * EVERY PATH THAT REACHES `status: 'idle'` RELEASES THE LIVE TAIL (D-35 / AC-40).
- *
- * `runEnd` finalizes only the streaming ASSISTANT entry and `abortMark` maps only
- * assistant entries, so neither touches a tool entry stranded at
- * `status: 'running'` -- the engine's own idle watchdog, a provider error mid-call
- * and `Esc` all produce one. Today that costs a single spinner row. With a tail
- * attached it costs a permanent multi-row card whose stall counter is frozen at
- * its last value, because the 200 ms ticker that feeds `nowSec` is torn down the
- * instant `state.status` leaves `running` -- and, worse, `computeSettledCount`
- * breaks on a non-settled tool entry, so that card pins `Transcript`'s MONOTONIC
- * settled boundary and re-renders the tail every frame for the rest of the
- * session. The rule and the stakes are `settleRetryCard`'s, verbatim.
- *
- * THE STATUS IS DELIBERATELY NOT CHANGED. That is a different decision with
- * different consequences for `bashBadge` and for the run's own bookkeeping, and
- * it is not this round's to make. Only the tail is released.
- *
- * `liveSeq` is BUMPED rather than cleared, and that is not bookkeeping: clearing
- * `live` is a non-append mutation, and with the status untouched nothing else in
- * the tool revision moves -- so without the bump the height cache would keep
- * serving the multi-row measurement for a card that now draws one row (I-L3-1).
- * Entries with no tail are returned by identity, which is what keeps
- * `EntryView`'s memo boundary intact for the rest of the transcript.
- */
 function releaseLiveTails(entries: Entry[]): Entry[] {
   let touched = false;
   const next = entries.map((e) => {
@@ -1969,22 +1852,6 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
       };
     }
 
-    /**
-     * Rewind the view for a mid-stream restart.
-     *
-     * THE ONLY ACTION IN THIS REDUCER THAT SHRINKS `entries`, and it is safe for
-     * one specific reason (§6.4 / AC-22). `Transcript` clamps its settled boundary
-     * with a MONOTONIC high-water mark: if `highWater` ever exceeded
-     * `entries.length` the clamp would mark EVERYTHING settled — including the
-     * still-streaming assistant entry — and `<Static>` would duplicate it.
-     *
-     * It cannot, and the ORDERING is why: the entries removed here are
-     * `kind: 'tool'` cards created by `toolCallStart` AFTER `turnStart` created the
-     * streaming assistant entry, so they sit strictly above it in the array; and
-     * the boundary scan already breaks at that entry. Removing only entries above
-     * the boundary is the invariant. A future action that removed a SETTLED entry
-     * would break `<Static>` and nothing would report it.
-     */
     case 'streamRestart': {
       const discarded = new Set(action.discardedToolCallIds);
       const entries = state.entries.filter(
@@ -2085,18 +1952,6 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
       };
     }
 
-    /**
-     * Rewrite the LIVE card in place.
-     *
-     * SAFE ONLY BECAUSE OF D-11'S OTHER HALF: a `ready` / `running` card has
-     * reached `<Static>` and cannot be re-printed, so `serviceEnd` appends a new
-     * entry instead of routing through here. What this handles is the window in
-     * which the card is still in the live region — `starting`, and the one
-     * transition out of it — plus the output tail while it is there.
-     *
-     * The lookup is by `serviceId` and SKIPS terminal entries, so a stray update
-     * cannot rewrite the one-row record `serviceEnd` appended.
-     */
     case 'serviceUpdate': {
       const target = findServiceEntryId(state, action.service.id);
       if (!target) return state;
@@ -2108,15 +1963,6 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
       };
     }
 
-    /**
-     * A service reached a terminal state.
-     *
-     * TWO WRITES, AND BOTH ARE REQUIRED. The live card is settled in place so
-     * `computeSettledCount` can move past it and `estimateEntryRows` stops
-     * charging for a tail nothing will add to; the NEW one-row entry is what the
-     * user actually reads, because the card may already be printed into
-     * `<Static>` and `<Static>` cannot un-print (D-11 / R-13).
-     */
     case 'serviceEnd': {
       const target = findServiceEntryId(state, action.service.id);
       const settled = target

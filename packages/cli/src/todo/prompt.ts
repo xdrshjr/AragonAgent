@@ -25,21 +25,7 @@ import { TODO_BLOCK_VERSION } from './limits.js';
 export { TODO_BLOCK_VERSION };
 
 export interface TodoBlockParams {
-  /**
-   * Whether this session can actually render the rail.
-   *
-   * FOUR SUPPORTED PATHS HAVE THE TOOL AND NO PANEL — `-p` (§3.12), inline mode
-   * (non-goal 4), `--no-todo-panel` (§4.3), and a terminal under 80 columns or 6
-   * viewport rows (§6.4) — and in the first three the answer is fixed for the
-   * whole session, before the prompt is composed. Telling the model about a
-   * panel the user does not have is the same error `composeSystemPrompt` already
-   * guards against for team mode with its TWO flags (P1-6 / D-24).
-   *
-   * Dropping the block instead would be wrong: the planning discipline is worth
-   * having without the column, which is precisely why `enabled` and `panel` are
-   * separate config keys, and a screen-reader user is the case that argument was
-   * written for.
-   */
+
   panelVisible: boolean;
 }
 

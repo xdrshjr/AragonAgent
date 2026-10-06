@@ -1,5 +1,147 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { enterAltScreen, writeExitTranscript } from '../ui/screen.js';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { basename, dirname, join, resolve } from 'node:path';
+import { createRequire } from 'node:module';
+
+describe('CLI 渲染退出的真实进程验证', () => {
+  const packageRoot = fileURLToPath(new URL('../../', import.meta.url));
+  let buildDirectory: string;
+  let commandHome: string;
+  const releaseEntries = ['launcher.js', 'cli.js'].map(name =>
+    fileURLToPath(new URL(`../../dist/${name}`, import.meta.url)));
+  let releaseContents: Array<string | undefined>;
+  beforeAll(() => {
+    releaseContents = releaseEntries.map(path => existsSync(path) ? readFileSync(path, 'utf8') : undefined);
+    // These subprocesses bypass Vitest's source transform; compile the current
+    // source in isolation: writing shared dist would remove its post-build
+    // shebangs and race the release-output assertions in other test files.
+    buildDirectory = mkdtempSync(join(packageRoot, '.screen-test-'));
+    commandHome = join(buildDirectory, 'home');
+    mkdirSync(commandHome);
+    writeFileSync(join(commandHome, 'config.json'), JSON.stringify({ update: { mode: 'off' }, log: { toFile: false } }));
+    const require = createRequire(import.meta.url);
+    const build = spawnSync(process.execPath, [require.resolve('typescript/bin/tsc'),
+      '-p', join(packageRoot, 'tsconfig.json'), '--outDir', buildDirectory], {
+      windowsHide: true, encoding: 'utf8', timeout: 60_000,
+    });
+    expect(build.error).toBeUndefined();
+    expect(build.status, build.stdout + build.stderr).toBe(0);
+  }, 65_000);
+
+  afterAll(() => {
+    if (!buildDirectory) return;
+    expect(dirname(buildDirectory)).toBe(resolve(packageRoot));
+    expect(basename(buildDirectory)).toMatch(/^\.screen-test-/);
+    rmSync(buildDirectory, { recursive: true, force: true });
+  });
+
+  it('leaves shared release entry points unchanged by subprocess compilation', () => {
+    expect(releaseEntries.map(path => existsSync(path) ? readFileSync(path, 'utf8') : undefined))
+      .toEqual(releaseContents);
+  });
+
+  // Emulate a terminal at the process boundary. Production still uses the real
+  // TTY checks; the loader below substitutes only the application under test.
+  const ttyPreload = `data:text/javascript,${encodeURIComponent(`
+    Object.defineProperty(process.stdin, 'isTTY', {value:true});
+    Object.defineProperty(process.stdout, 'isTTY', {value:true});
+    Object.defineProperty(process.stdout, 'columns', {value:100});
+    Object.defineProperty(process.stdout, 'rows', {value:30});
+    process.stdin.setRawMode = () => process.stdin;
+    globalThis.__frameBytes = '';
+    const write = process.stdout.write.bind(process.stdout);
+    process.stdout.write = (chunk, ...args) => {
+      globalThis.__frameBytes += String(chunk);
+      return write(chunk, ...args);
+    };
+  `)}`;
+
+  it.each(['--fullscreen', '--no-fullscreen'])('rejects retired option %s', (option) => {
+    const result = spawnSync(process.execPath, [join(buildDirectory, 'cli.js'), option], {
+      windowsHide: true, encoding: 'utf8', timeout: 10_000,
+      env: { ...process.env, ARAGON_HOME: commandHome },
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(`unknown option '${option}'`);
+    expect(result.stdout).not.toContain('\x1b[?1049h');
+  });
+
+  it('rejects a non-TTY settings screen before entering the alternate screen', () => {
+    const result = spawnSync(process.execPath, [join(buildDirectory, 'cli.js'), 'config'], {
+      windowsHide: true, encoding: 'utf8', timeout: 10_000,
+      env: { ...process.env, ARAGON_HOME: commandHome },
+    });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('Interactive UI requires a TTY');
+    expect(result.stderr).toContain('config list / config set');
+    expect(result.stdout).not.toContain('\x1b[');
+  });
+
+  it.each([[false, false], [true, false], [false, true]])(
+    '正常退出=%s，清理抛错=%s，工作进程已清理且退出码准确', (normal, cleanupThrows) => {
+    const scratch = fileURLToPath(new URL('../../../../../.agentmesh/', import.meta.url));
+    mkdirSync(scratch, { recursive: true });
+    const home = mkdtempSync(join(scratch, 'fatal-test-'));
+    const marker = join(home, 'child.json');
+    const workerMarker = join(home, 'worker-pid.txt');
+    const workerScript = join(home, 'worker.cjs');
+    writeFileSync(workerScript,
+      "require('node:fs').writeFileSync(process.env.PROBE_WORKER_MARKER,String(process.pid));setInterval(()=>{},1000);");
+    writeFileSync(join(home, 'config.json'), JSON.stringify({ update: { mode: 'off' }, log: { toFile: false } }));
+    const app = `
+      import React from 'react';
+      import {useApp,Text} from 'ink';
+      import {writeFileSync} from 'node:fs';
+      export function App({controller}) {
+        const [failed,setFailed]=React.useState(false);const ink=useApp();
+        React.useEffect(()=>{
+          controller.procs.start({toolCallId:'fatal-test',
+            command:[process.execPath,process.env.PROBE_WORKER_SCRIPT].map(p=>JSON.stringify(p.replaceAll(String.fromCharCode(92),'/'))).join(' '),
+            cwd:process.cwd()}).then(result=>setTimeout(()=>{
+              const pid=result.service?.pid;let alive=false;
+              try{process.kill(pid,0);alive=true}catch{}
+              writeFileSync(process.env.PROBE_MARKER,JSON.stringify({pid,alive,
+                frameSeen:globalThis.__frameBytes.includes('TUI_FRAME_PROBE'),ci:process.env.CI}));
+              if(process.env.PROBE_CLEANUP_THROW==='1')controller.abort=()=>{throw new Error('CLEANUP_TEST')};
+              if(process.env.PROBE_NORMAL==='1')ink.exit();else setFailed(true);
+            },200));
+        },[]);
+        if(failed)throw new Error('RENDER_FATAL_TEST');
+        return React.createElement(Text,null,'TUI_FRAME_PROBE');
+      }`;
+    const loader = `export async function load(url,ctx,next){
+      if(url!==${JSON.stringify(pathToFileURL(join(buildDirectory, 'ui/App.js')).href)})return next(url,ctx);
+      return {format:'module',shortCircuit:true,source:${JSON.stringify(app)}};
+    }`;
+    try {
+      const result = spawnSync(process.execPath, ['--import', ttyPreload, '--experimental-loader',
+        `data:text/javascript,${encodeURIComponent(loader)}`,
+        join(buildDirectory, 'cli.js'), 'config'], {
+        cwd: home, windowsHide: true, encoding: 'utf8', timeout: 10_000,
+        env: { ...process.env, TERM: 'dumb', CI: '1', ARAGON_FULLSCREEN: '0',
+          ARAGON_HOME: home, PROBE_MARKER: marker,
+          PROBE_NORMAL: normal ? '1' : '0', PROBE_CLEANUP_THROW: cleanupThrows ? '1' : '0',
+          PROBE_WORKER_SCRIPT: workerScript, PROBE_WORKER_MARKER: workerMarker },
+      });
+      expect(result.error).toBeUndefined();
+      const child = JSON.parse(readFileSync(marker, 'utf8'));
+      expect(child.alive).toBe(true);
+      expect(child.frameSeen, 'frame must be painted before unmount under CI=1').toBe(true);
+      expect(child.ci).toBe('1');
+      expect(() => process.kill(child.pid, 0)).toThrow();
+      const workerPid = Number(readFileSync(workerMarker, 'utf8'));
+      expect(() => process.kill(workerPid, 0)).toThrow();
+      expect(result.status, result.stderr).toBe(normal ? 0 : 1);
+      expect(result.stdout).toContain('\x1b[?1049h');
+      expect(result.stdout).toContain('\x1b[?1049l');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 15_000);
+});
 
 function fakeStdout(isTTY: boolean) {
   const writes: string[] = [];
@@ -338,5 +480,17 @@ describe('enterAltScreen — bracketed paste (I-1 / I-2)', () => {
     // ...and the exit still unwinds it exactly once.
     handle.restore();
     expect(all().split(DISABLE).length - 1).toBe(1);
+  });
+});
+
+describe('scrollbar motion without text selection', () => {
+  it('pairs button-motion enable and disable through runtime toggles', () => {
+    const out = fakeStdout(true);
+    const screen = enterAltScreen(out.stdout, { mouse: true, motion: true });
+    screen.setMouseCapture(false);
+    screen.setMouseCapture(true);
+    screen.restore();
+    expect(out.all().split('\x1b[?1002h')).toHaveLength(3);
+    expect(out.all().split('\x1b[?1002l')).toHaveLength(3);
   });
 });

@@ -9,6 +9,8 @@
  * from the event stream by the reducer (TUI) and the headless writer.
  */
 
+import type { PromptOptions, PromptOutcome } from './prompt-options.js';
+
 import {
   Agent,
   initProviders,
@@ -94,7 +96,7 @@ import type { NoticeLevel } from './reducer.js';
  *
  * `bash`'s own kill grace is what a wedged foreground command costs; this covers
  * the loop's own unwinding on top of it. Waiting FOREVER is not an option - a
- * tool that never settles is exactly why rung two exists.
+ * tool that never settles is exactly why the force-stop rung exists.
  */
 const ENGINE_UNWIND_GRACE_MS = 3000;
 
@@ -136,7 +138,7 @@ export interface ControllerDeps {
   humanInput?: HumanInputGate;
   /**
    * Whether this session could EVER render the todo rail (todo-plan-execution
-   * §3.7 / P1-6). Full-screen and interactive; `-p` and inline mode are false.
+   * §3.7 / P1-6). Full-screen and interactive; headless calls are false.
    *
    * It varies ONE SENTENCE of the `<todo_planning>` block, and nothing else.
    * Telling the model "the user sees this list in a panel beside the
@@ -405,6 +407,7 @@ export class AgentController {
    * abort lands.
    */
   private runGen = 0;
+  private startupSequence = 0;
   /**
    * Set SYNCHRONOUSLY by `abort()` before `agent.abort()` (§3.5.4a guard 1).
    * Cleared at the next `agent_start`.
@@ -1051,35 +1054,24 @@ export class AgentController {
    * underlying promise so headless mode can await completion. `agent.prompt()`
    * never rejects, so callers must not treat resolution as success.
    */
-  async prompt(text: string): Promise<void> {
-    // I-8 - THIS METHOD NEVER REJECTS, AND THAT HAS TO BE A PROPERTY OF THE
-    // METHOD RATHER THAN A COMMENT ABOVE IT (P0-1).
-    //
-    // `App` calls this as `void controller.prompt(...)`, and
-    // `logging/install.ts` routes an `unhandledRejection` into `handleFatal`,
-    // which EXITS THE PROCESS. `Agent.prompt()` throws SYNCHRONOUSLY while
-    // `Agent.running` is true - so before the force-stop ladder existed this was
-    // merely nearly-true (the view was only ever idle when the engine was), and
-    // rung two makes the view idle while the engine is still unwinding. Without
-    // the wait and the guard below, "Esc, Esc, then type" would kill the CLI on
-    // the very screen this feature exists to rescue.
-    //
-    // TWO PARTS, BOTH REQUIRED. First WAIT the engine out, bounded, so the
-    // common case (the engine unwinds in a few hundred ms) starts a real run
-    // rather than reporting a failure. Then swallow anything that still escapes
-    // and surface it through the existing notify channel, because a message that
-    // cannot be started must produce a visible sentence - never a crash, and
-    // never silence.
-    if (this.agent.state.isRunning) {
-      this.abort();
-      await this.waitForEngineIdle();
-    }
+  async prompt(text: string, options: PromptOptions = {}): Promise<PromptOutcome> {
+    // Capture BEFORE stopping: synchronous abort listeners may cancel this request.
+    const request = ++this.startupSequence;
     try {
-      await this.startPrompt(text);
+      if (this.agent.state.isRunning) {
+        this.stopEngine();
+        await this.waitForEngineIdle();
+      }
+      if (request !== this.startupSequence) {
+        return { status: 'not-started', reason: 'cancelled' };
+      }
+      if (this.agent.state.isRunning) throw new Error('The previous run is still stopping.');
+      return await this.startPrompt(text, options, request);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       getLogger().warn('agent', 'prompt_failed', { reason });
       this.notifyHostFn?.('error', `Could not start the run: ${reason}`);
+      return { status: 'not-started', reason: 'failed' };
     }
   }
 
@@ -1087,7 +1079,7 @@ export class AgentController {
    * Wait for the engine to unwind, bounded.
    *
    * BOUNDED BECAUSE THE UNBOUNDED CASE IS THE ONE THIS FEATURE IS ABOUT: a tool
-   * that never settles is exactly why rung two exists, and `Agent.waitForIdle()`
+   * that never settles is exactly why the force-stop rung exists, and `Agent.waitForIdle()`
    * alone would hang here for as long as it hangs there. The budget is the two
    * graces a wedged `bash` can legitimately spend, plus the executor's own.
    */
@@ -1107,31 +1099,28 @@ export class AgentController {
     });
   }
 
-  /** The pre-round body of `prompt`, unchanged apart from being private. */
-  private startPrompt(text: string): Promise<void> {
-    // A new user message is a new intent, so the previous turn's tool ceiling
-    // expires here and anything a slash command queued is promoted (D-G1 / D-G2).
-    // This and `steer()` below are the ONLY two places a user message enters the
-    // engine, which is what makes a per-turn scope implementable at all (FG9).
+  /** Prepare before clearing the plan, then enter the engine without yielding. */
+  private async startPrompt(
+    text: string, options: PromptOptions, request: number,
+  ): Promise<PromptOutcome> {
     if (this.skillsEnabled) this.skills.beginUserTurn();
-    // The ask-round budget is per USER TURN and resets here for the same reason
-    // the skill frame does. `steer()` deliberately does NOT reset it: a user
-    // steering "actually, use Postgres" into a running plan is answering the
-    // questions, not buying four more rounds of them.
     this.askRounds = 0;
-    // Same asymmetry, same reason (§3.5): a completed plan is dropped HERE
-    // rather than at `agent_end`, so the user gets their `7/7 done` moment, and
-    // an unfinished one survives "continue" / "now do the rest" but not four
-    // unrelated turns.
-    this.todos?.beginUserTurn();
-    // The fast reviewer is asked whether the run is on track FOR THIS (§3.5.2).
-    // Without it the reviewer judges progress without being told the goal, which
-    // is the one input it cannot reconstruct from the event stream.
     this.fast?.setGoal(text);
-    return this.agent.prompt(text);
+    if (request !== this.startupSequence) {
+      return { status: 'not-started', reason: 'cancelled' };
+    }
+    this.todos?.beginUserTurn(options.todoPolicy);
+    await this.agent.prompt(text);
+    return { status: 'finished' };
   }
 
+  /** Cancel pending startup as well as any engine run already in progress. */
   abort(): void {
+    this.startupSequence += 1;
+    this.stopEngine();
+  }
+
+  private stopEngine(): void {
     // SET BEFORE `agent.abort()`, SYNCHRONOUSLY — guard 1 of §3.5.4a. The loop
     // still emits the batch's final `tool_execution_end` (`agent-loop.ts:249`)
     // after an Esc lands inside the last tool's `await`, and the reviewer's
@@ -1156,7 +1145,7 @@ export class AgentController {
   }
 
   /**
-   * Rung two of the Esc ladder: stop the AGENT, whatever it is blocked on
+   * Final rung of the Esc ladder: stop the AGENT, whatever it is blocked on
    * (§3.6 / G3).
    *
    * FOUR STEPS, AND THE FOURTH IS AN ABSENCE.
@@ -1164,7 +1153,7 @@ export class AgentController {
    *   1. `abort()` - everything it does today, unchanged.
    *   2. `killForeground('force')` - hard-kill every tracked foreground `bash`
    *      child. THIS is what actually unblocks a wedged `await tool.execute`;
-   *      an abort signal a tool ignores is advisory, and rung two exists for
+   *      an abort signal a tool ignores is advisory, and the force-stop rung exists for
    *      precisely the tools that ignore it.
    *   3. `runGen += 1` - so `App` can drop the events the engine will keep
    *      emitting while it unwinds (I-7). Without it the view bounces straight
@@ -1173,7 +1162,7 @@ export class AgentController {
    *      `Ctrl+C` stops the SERVICES. That asymmetry is the user's own two
    *      sentences and it is exactly the kind of thing a later reader will
    *      "fix" by making this kill everything - which would mean a user who
-   *      pressed Esc twice to stop a runaway turn also lost the dev server they
+   *      confirmed a force-stop of a runaway turn also lost the dev server they
    *      had been working against for an hour. It is invariant I-4.
    *
    * UNCONDITIONAL ON `bash.background` (P1-6 / D-9). The supervisor is always
@@ -1733,6 +1722,7 @@ export class AgentController {
 
   clearMessages(): void {
     this.agent.clearMessages();
+    this.startupSequence += 1;
     // INVALIDATION SITE 3 (context-auto-compaction-hardening §3.2.3). The history
     // was CLEARED, not appended to, so the prefix length the last measurement
     // covered indexes an array that no longer exists.
@@ -1762,6 +1752,7 @@ export class AgentController {
 
   replaceMessages(messages: Message[]): void {
     this.agent.replaceMessages(messages);
+    this.startupSequence += 1;
     // INVALIDATION SITE 4 (§3.2.3) - `/resume`, and any future host-side rewrite.
     // `estimateAppendedTokens` bounds-checks as well, so a MISSED site costs
     // accuracy and never correctness; that belt does not make this call optional.

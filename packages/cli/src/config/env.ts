@@ -98,8 +98,6 @@ export function readEnvConfig(): EnvConfig {
     partial.thinkingLevel = clampThinkingLevel(process.env.ARAGON_THINKING.trim(), 'off');
   }
 
-  // Parsed by the POSITIVE list, like ARAGON_FULLSCREEN: anything else is left
-  // ABSENT so the config file underneath still wins.
   const showThinking = process.env.ARAGON_SHOW_THINKING?.trim().toLowerCase();
   if (showThinking !== undefined && showThinking.length > 0) {
     partial.showThinking =
@@ -152,17 +150,8 @@ export function readEnvConfig(): EnvConfig {
     partial.theme = clampTheme(process.env.ARAGON_THEME.trim(), 'auto');
   }
 
-  // ARAGON_FULLSCREEN=0|1 — the one channel that works where neither a flag nor
   // a config file is reachable (containers, SSH, being spawned by another tool).
-  const fullscreen = process.env.ARAGON_FULLSCREEN?.trim().toLowerCase();
-  if (fullscreen !== undefined && fullscreen.length > 0) {
-    partial.fullscreen = fullscreen === '1' || fullscreen === 'true' || fullscreen === 'on' || fullscreen === 'yes';
-  }
 
-  // ARAGON_MOUSE=0 turns off wheel region routing. Parsed by the POSITIVE list
-  // above, exactly as ARAGON_FULLSCREEN is — NOT by `envBool` below, which uses
-  // a negative list. The two disagree on `ARAGON_MOUSE=disable`, and `mouse` is
-  // modelled on `--fullscreen`, so it uses the reader `--fullscreen` uses.
   const mouse = process.env.ARAGON_MOUSE?.trim().toLowerCase();
   if (mouse !== undefined && mouse.length > 0) {
     partial.mouse = mouse === '1' || mouse === 'true' || mouse === 'on' || mouse === 'yes';
@@ -200,8 +189,6 @@ export function readEnvConfig(): EnvConfig {
     if (Number.isFinite(n) && n >= 0) partial.scrollResumeMs = n;
   }
 
-  // ARAGON_PLAN=1 starts the session in PLAN mode — the same channel story as
-  // ARAGON_FULLSCREEN, for terminals reached through a wrapper that owns argv.
   const plan = process.env.ARAGON_PLAN?.trim().toLowerCase();
   if (plan !== undefined && plan.length > 0) {
     partial.planModeDefault = plan === '1' || plan === 'true' || plan === 'on' || plan === 'yes';
@@ -219,12 +206,6 @@ export function readEnvConfig(): EnvConfig {
     } as PersistedConfig['skills'];
   }
 
-  // ARAGON_TEAM=0 turns team mode off; ARAGON_TEAM_MAX=<n> overrides the fan-out
-  // width. Parsed by the POSITIVE list, exactly as ARAGON_FULLSCREEN /
-  // ARAGON_MOUSE / ARAGON_PLAN are — NOT by `envBool` below, which uses a
-  // negative list. The two readers disagree on `ARAGON_TEAM=disable`, and the
-  // documented-but-dead outcome of copying the wrong one is what `load.ts`
-  // records for `ARAGON_MOUSE`.
   const team = process.env.ARAGON_TEAM?.trim().toLowerCase();
   const teamMax = process.env.ARAGON_TEAM_MAX?.trim();
   if ((team !== undefined && team.length > 0) || (teamMax !== undefined && teamMax.length > 0)) {
@@ -244,27 +225,6 @@ export function readEnvConfig(): EnvConfig {
     if (Object.keys(section).length > 0) partial.team = section as PersistedConfig['team'];
   }
 
-  // ARAGON_TODO=0 turns todo planning off entirely (no tool, no rail). Parsed by
-  // the POSITIVE list, exactly as ARAGON_FULLSCREEN / ARAGON_MOUSE / ARAGON_PLAN
-  // / ARAGON_TEAM are — NOT by `envBool` below, which uses a negative list. The
-  // two readers disagree on values like `ARAGON_TODO=disable`, and this file
-  // already records that once for team mode.
-  //
-  // There is no `ARAGON_TODO_PANEL`: the panel is a per-machine display
-  // preference, which is what `config.json` is for, and every env var here
-  // exists because a flag and a config file are BOTH unreachable in the channel
-  // it serves (containers, SSH, being spawned by another tool).
-  //
-  // ARAGON_TODO_FOLLOW=notify|auto|off PASSES THAT SAME TEST (D-18), which is
-  // why it exists where `ARAGON_TODO_PANEL` does not: follow-through is exactly
-  // the knob an unattended `-p` run in a container with a fixed entrypoint needs
-  // and can reach no other way.
-  //
-  // ONE ACCUMULATED SECTION, ASSIGNED ONCE — the shape the `team` branch above
-  // already uses, and NOT two `if` blocks each assigning `partial.todo` (P1-4).
-  // THE CAST IS WHAT WOULD MAKE THAT MISTAKE SILENT: a second assignment
-  // compiles clean and drops `enabled`, so `ARAGON_TODO=0 ARAGON_TODO_FOLLOW=auto`
-  // would quietly re-enable the tool the user turned off.
   const todo = process.env.ARAGON_TODO?.trim().toLowerCase();
   const todoFollow = process.env.ARAGON_TODO_FOLLOW?.trim().toLowerCase();
   if ((todo !== undefined && todo.length > 0) ||
@@ -287,24 +247,6 @@ export function readEnvConfig(): EnvConfig {
     if (Object.keys(section).length > 0) partial.todo = section as PersistedConfig['todo'];
   }
 
-  // ARAGON_BASH_BACKGROUND=0 turns background services off entirely (no
-  // `background` param, no `bash_output`/`bash_kill`, no prompt block, no chip);
-  // ARAGON_BASH_AUTO_BACKGROUND=0 keeps them but stops the classifier firing on
-  // an unset `background`. Parsed by the POSITIVE list, exactly as
-  // ARAGON_FULLSCREEN / ARAGON_MOUSE / ARAGON_PLAN / ARAGON_TEAM / ARAGON_TODO
-  // are - NOT by `envBool` below, which uses a negative list.
-  //
-  // Both pass the test every env var in this file has to pass: an unattended run
-  // in a container with a fixed entrypoint can reach neither a flag nor a config
-  // file, and "do not leave a dev server running in my CI job" is exactly the
-  // kind of decision that channel needs to make.
-  //
-  // ONE ACCUMULATED SECTION, ASSIGNED ONCE - the shape the `team` and `todo`
-  // branches above already use, and NOT two `if` blocks each assigning
-  // `partial.bash` (the `todo` P1-4 trap). THE CAST IS WHAT WOULD MAKE THAT
-  // MISTAKE SILENT: a second assignment compiles clean and drops the first key,
-  // so `ARAGON_BASH_BACKGROUND=0 ARAGON_BASH_AUTO_BACKGROUND=0` would quietly
-  // re-register the tools the user turned off.
   const bashBackground = process.env.ARAGON_BASH_BACKGROUND?.trim().toLowerCase();
   const bashAuto = process.env.ARAGON_BASH_AUTO_BACKGROUND?.trim().toLowerCase();
   if ((bashBackground !== undefined && bashBackground.length > 0) ||
@@ -327,22 +269,6 @@ export function readEnvConfig(): EnvConfig {
     if (Object.keys(section).length > 0) partial.bash = section as PersistedConfig['bash'];
   }
 
-  // ARAGON_RETRY=0 is the kill switch for API retry; ARAGON_RETRY_MAX=<n>
-  // overrides the count. Parsed by the POSITIVE list, exactly as
-  // ARAGON_FULLSCREEN / ARAGON_MOUSE / ARAGON_PLAN / ARAGON_TEAM / ARAGON_TODO
-  // are — NOT by `envBool` below, which uses a negative list.
-  //
-  // TWO VARS ONLY, and no third for the delays: every env var in this file exists
-  // because a flag and a config file are BOTH unreachable in the channel it
-  // serves, and nobody tunes a backoff multiplier from a container entrypoint.
-  //
-  // `>= 0`, NOT `> 0`, and the difference is the whole point (R-16).
-  // `ARAGON_TEAM_MAX` above guards `parsed > 0`, which is right for a fan-out
-  // width and wrong here: `0` is this key's documented floor AND its kill switch,
-  // so a `> 0` guard would drop `ARAGON_RETRY_MAX=0` on the floor and leave the
-  // user with the default 10. "Left ABSENT when unparseable" still holds and
-  // still matters — an unparseable value must not look permanently supplied, or
-  // the config file can never win again.
   const retry = process.env.ARAGON_RETRY?.trim().toLowerCase();
   const retryMax = process.env.ARAGON_RETRY_MAX?.trim();
   if ((retry !== undefined && retry.length > 0) || (retryMax !== undefined && retryMax.length > 0)) {
@@ -359,26 +285,6 @@ export function readEnvConfig(): EnvConfig {
     if (Object.keys(section).length > 0) partial.retry = section as PersistedConfig['retry'];
   }
 
-  // ARAGON_FAST=1 turns the fast model tier on; the other three name it
-  // (fast-model-tier §4.3). Parsed by the POSITIVE list, exactly as
-  // ARAGON_FULLSCREEN / ARAGON_MOUSE / ARAGON_PLAN / ARAGON_TEAM / ARAGON_TODO /
-  // ARAGON_RETRY are — NOT by `envBool` below, whose NEGATIVE list disagrees with
-  // it on values like `ARAGON_FAST=disable`.
-  //
-  // FOUR VARS, AND DELIBERATELY NO `ARAGON_FAST_REVIEW_EVERY` / `_MAX_CHARS` /
-  // `_DELEGATE` (D-14). The rule this file states is that an environment variable
-  // exists only where a flag AND a config file are BOTH unreachable — a
-  // container, an ssh session, being spawned by another tool. "Which model, and
-  // is it on" passes that test; tuning a review cadence does not, and every key
-  // that fails it is documentation debt plus a fifth place for the value to
-  // disagree with itself.
-  //
-  // ONE ACCUMULATED SECTION, ASSIGNED ONCE — the shape the `team`, `todo` and
-  // `retry` branches above all use, and NOT four `if` blocks each assigning
-  // `partial.fast`. THE CAST IS WHAT WOULD MAKE THAT MISTAKE SILENT: a second
-  // assignment compiles clean and drops `enabled`, so
-  // `ARAGON_FAST=1 ARAGON_FAST_MODEL=x` would quietly resolve with the tier off
-  // (the P1-4 defect this file records for `todo`).
   const fast = process.env.ARAGON_FAST?.trim().toLowerCase();
   const fastProvider = process.env.ARAGON_FAST_PROVIDER?.trim();
   const fastModel = process.env.ARAGON_FAST_MODEL?.trim();
@@ -401,25 +307,6 @@ export function readEnvConfig(): EnvConfig {
     if (Object.keys(section).length > 0) partial.fast = section as PersistedConfig['fast'];
   }
 
-  // ARAGON_COMPACTION=0 turns context compaction off; the other two tune it
-  // (context-auto-compaction §4.3). Parsed by the POSITIVE list, exactly as
-  // ARAGON_FULLSCREEN / ARAGON_MOUSE / ARAGON_PLAN / ARAGON_TEAM / ARAGON_TODO /
-  // ARAGON_RETRY / ARAGON_FAST are — NOT by `envBool` below, whose NEGATIVE list
-  // disagrees with it on values like `ARAGON_COMPACTION=disable`.
-  //
-  // THREE VARS, AND DELIBERATELY NO `ARAGON_COMPACTION_ON_FAILURE` /
-  // `_USE_FAST_TIER` / `_WARN_THRESHOLD`. The rule this file states is that an
-  // environment variable exists only where a flag AND a config file are BOTH
-  // unreachable — a container, an ssh session, being spawned by another tool.
-  // "Is it on, when does it fire, and how much does it keep" passes that test;
-  // "what should it do if the summarizer 500s" does not, and every key that fails
-  // it is documentation debt plus a fifth place for the value to disagree with
-  // itself.
-  //
-  // ONE ACCUMULATED SECTION, ASSIGNED ONCE — the shape the four branches above
-  // all use, and NOT three `if` blocks each assigning `partial.compaction`. THE
-  // CAST IS WHAT WOULD MAKE THAT MISTAKE SILENT: a second assignment compiles
-  // clean and drops `enabled`.
   const compaction = process.env.ARAGON_COMPACTION?.trim().toLowerCase();
   const compactionThreshold = process.env.ARAGON_COMPACTION_THRESHOLD?.trim();
   const compactionKeepTurns = process.env.ARAGON_COMPACTION_KEEP_TURNS?.trim();
@@ -499,23 +386,12 @@ export function readEnvConfig(): EnvConfig {
     }
   }
 
-  // Render bounds (tui-render-performance §5.3). Same channel story as
-  // ARAGON_FULLSCREEN: a container or a wrapper that owns argv can reach neither
-  // a flag nor a config file, and a session that freezes is exactly the case
-  // where the user needs a knob they can turn from the outside.
-  //
-  // ARAGON_TRANSCRIPT_RETAIN / ARAGON_MAX_RENDER_INTERVAL_MS are left ABSENT
-  // when unparseable rather than written as a default, so the config file can
-  // still win — the rule `ARAGON_TEAM_MAX` above records.
   const retain = process.env.ARAGON_TRANSCRIPT_RETAIN?.trim();
   if (retain !== undefined && retain.length > 0) {
     const parsed = Number.parseInt(retain, 10);
     if (Number.isFinite(parsed) && parsed > 0) partial.transcriptRetain = parsed;
   }
 
-  // Parsed by the POSITIVE list, exactly as ARAGON_FULLSCREEN / ARAGON_MOUSE /
-  // ARAGON_PLAN / ARAGON_TEAM / ARAGON_TODO are — NOT by `envBool` below, which
-  // uses a negative list. The two readers disagree on `ARAGON_RENDER_GOVERNOR=disable`.
   const governor = process.env.ARAGON_RENDER_GOVERNOR?.trim().toLowerCase();
   if (governor !== undefined && governor.length > 0) {
     partial.renderGovernor =
@@ -528,12 +404,6 @@ export function readEnvConfig(): EnvConfig {
     if (Number.isFinite(parsed) && parsed > 0) partial.maxRenderIntervalMs = parsed;
   }
 
-  // ARAGON_DIFF_RENDER=0 restores the pre-fix full-frame repaint;
-  // ARAGON_SYNC_OUTPUT=0 drops the DEC 2026 envelope (tui-input-flicker-fix
-  // §5.3). Parsed by the POSITIVE list, exactly as ARAGON_FULLSCREEN /
-  // ARAGON_MOUSE / ARAGON_PLAN / ARAGON_TEAM / ARAGON_TODO / ARAGON_RENDER_GOVERNOR
-  // are — NOT by `envBool` below, whose NEGATIVE list disagrees with it on values
-  // like `ARAGON_DIFF_RENDER=disable`.
   const diffRender = process.env.ARAGON_DIFF_RENDER?.trim().toLowerCase();
   if (diffRender !== undefined && diffRender.length > 0) {
     partial.diffRender =

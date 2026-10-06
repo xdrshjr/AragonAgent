@@ -39,7 +39,6 @@ const { AgentController, DENY_ALL_APPROVAL } = await import('../agent/controller
 const { loadSession, normalizeLoadedEntries, saveSession } = await import(
   '../session/persist.js'
 );
-const { computeSettledCount } = await import('../ui/Transcript.js');
 const { buildSubagentTools } = await import('../team/subagent.js');
 const { TeamBus } = await import('../team/bus.js');
 const {
@@ -152,12 +151,6 @@ describe('AC-33: a session saved mid-run resumes settled and interrupted', () =>
     expect(card.kind === 'todo' && card.live).toBe(false);
     expect(card.kind === 'todo' && card.interrupted).toBe(true);
     expect(loaded.todos).toHaveLength(3);
-  });
-
-  it('a live card blocks the settled boundary; a loaded one does not', () => {
-    const tail: Entry = { id: 'e2', kind: 'notice', level: 'info', text: 'x' };
-    expect(computeSettledCount([liveCard, tail], {})).toBe(0);
-    expect(computeSettledCount([...normalizeLoadedEntries([liveCard]), tail], {})).toBe(1);
   });
 
   it('SESSION_VERSION stays 1, and a pre-feature file simply has no todos', () => {

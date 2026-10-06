@@ -1,3 +1,4 @@
+import type { SubmitMessageOptions } from '../agent/prompt-options.js';
 /**
  * `/todo follow` and the `/todo continue` rewrite
  * (todo-plan-followthrough §4.3 / AC-16, AC-17).
@@ -40,7 +41,7 @@ interface Harness {
   persisted: Partial<TodoConfig>[];
   notices: string[];
   toasts: string[];
-  submits: { text: string; opts?: { userInitiated?: boolean } }[];
+  submits: { text: string; opts?: SubmitMessageOptions }[];
   /** How many times `setTodoConfig` rebuilt the prompt (§4.3 / P2-10). */
   rebuilds: () => number;
 }
@@ -58,7 +59,7 @@ function harness(
   const persisted: Partial<TodoConfig>[] = [];
   const notices: string[] = [];
   const toasts: string[] = [];
-  const submits: { text: string; opts?: { userInitiated?: boolean } }[] = [];
+  const submits: { text: string; opts?: SubmitMessageOptions }[] = [];
 
   const controller = {
     getTodoConfig: () => todo,
@@ -92,7 +93,7 @@ function harness(
         persistConfig: (patch: { todo?: Partial<TodoConfig> }) => {
           if (patch.todo) persisted.push(patch.todo);
         },
-        submit: (text: string, opts?: { userInitiated?: boolean }) =>
+        submit: (text: string, opts?: SubmitMessageOptions) =>
           submits.push({ text, opts }),
         followBudget: over.budget ?? emptyBudget(),
       }) as unknown as CommandContext,
@@ -189,7 +190,7 @@ describe('/todo continue', () => {
     // record the same event twice, in the more verbose of the two forms.
     const h = harness({ snapshot: PLAN });
     await runSlashInput(registry, '/todo continue', h.ctx);
-    expect(h.submits[0]!.opts).toEqual({ userInitiated: false });
+    expect(h.submits[0]!.opts).toEqual({ userInitiated: false, todoPolicy: 'continue' });
   });
 
   it('still refuses while running, and with nothing left', async () => {

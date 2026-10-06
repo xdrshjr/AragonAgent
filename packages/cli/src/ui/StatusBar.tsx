@@ -16,6 +16,7 @@
  */
 
 import React from 'react';
+import stringWidth from 'string-width';
 import { Box, Text, useStdout } from 'ink';
 import type { Theme } from './theme.js';
 import type { TermCapabilities } from './capabilities.js';
@@ -33,6 +34,7 @@ import { TODO_LIMITS } from '../todo/limits.js';
 import { PROC_LIMITS } from '../proc/limits.js';
 
 interface StatusBarProps {
+  interruptHint?: string;
   model: string;
   provider: string;
   usageTotal: UsageTotal;
@@ -63,17 +65,7 @@ interface StatusBarProps {
    * Ctrl+L redraw carrier — invariant I-5 (spec §4.13). See `redrawChar`.
    */
   redrawNonce?: number;
-  /**
-   * The session mode. THIS IS THE GUARANTEED MODE INDICATOR (plan-mode §6.4 /
-   * P1-6): the composer chip disappears on a short terminal, under
-   * `hints: false`, and in inline render mode, but `StatusBar` renders in both
-   * `AppShell` branches and its left cluster has no opt-out and no width gate.
-   *
-   * Design intent, stated here so it survives a later refactor: the status bar
-   * must ALWAYS name a non-default mode; the chip may. Do not give this a
-   * `cols >= N` breakpoint, and do not move it into the right cluster — those
-   * children are flexible and drop characters under pressure.
-   */
+
   agentMode?: AgentMode;
   /** Non-null while a deferred `plan -> build` waits for `agent_end`. */
   pendingAgentMode?: AgentMode | null;
@@ -319,6 +311,12 @@ export function StatusBar(props: StatusBarProps): React.ReactElement {
       ? `${MODE_LABEL[agentMode]} ${glyphs.arrowRight} ${MODE_LABEL[pendingAgentMode]}`
       : MODE_LABEL[agentMode];
 
+  const actionHints = [running ? (props.interruptHint ?? 'Esc abort') : '',
+    servicesActive ? `Ctrl+C stop ${servicesActive.live}` : '',
+    scrolledLines > 0 ? 'PgDn down' : ''].filter(Boolean).join(' | ');
+  const hintCols = actionHints ? Math.min(Math.max(0, cols - 1), stringWidth(actionHints) + 2) : 0;
+  const detailCols = Math.max(0, cols - 1 - hintCols);
+
   return (
     // `flexShrink={0}` on the left cluster is not cosmetic. When the two clusters
     // over-subscribe the row, yoga shrinks the flexible children and Ink's text
@@ -326,110 +324,113 @@ export function StatusBar(props: StatusBarProps): React.ReactElement {
     // and "? hel" rather than truncating cleanly at one end. Pinning the left
     // cluster keeps the run status and model intact and makes the degradation
     // land in one predictable place.
-    <Box flexDirection="row" justifyContent="space-between" flexShrink={0}>
-      <Box flexDirection="row" flexShrink={0}>
-        <Text color={running ? theme.toolRunning : theme.toolDone}>
-          {redrawChar(redrawNonce)}
-          {statusGlyph} {running ? 'running' : 'idle'}
-        </Text>
-        {modeWord && (
-          <Text color={theme.accent} bold>
-            {'  '}
-            {modeWord}
+    <Box width={cols} flexDirection="row" justifyContent="space-between" flexShrink={0} height={1}
+      overflow="hidden">
+      <Box width={1} flexShrink={0}><Text>{redrawChar(redrawNonce)}</Text></Box>
+      {hintCols > 0 && (
+        <Box width={hintCols} flexShrink={0} overflow="hidden">
+          <Text wrap="truncate" color={theme.noticeWarn}>
+            {actionHints}{'  '}
           </Text>
-        )}
-        {teamActive && (
-          <Text color={theme.toolRunning} bold>
-            {'  '}
-            {cols >= TEAM_LIMITS.statusCompactCols
-              ? `agents ${teamActive.running}/${teamActive.total}`
-              : `[${teamActive.running}]`}
+        </Box>
+      )}
+      <Box display={detailCols > 0 ? 'flex' : 'none'} width={detailCols} flexShrink={0}
+        flexDirection="row" justifyContent="space-between" overflow="hidden">
+        <Box flexDirection="row" flexShrink={0} overflow="hidden">
+          <Text color={running ? theme.toolRunning : theme.toolDone}>
+            {statusGlyph} {running ? 'running' : 'idle'}
           </Text>
-        )}
-        {retryActive && (
-          <Text color={theme.noticeWarn} bold>
-            {'  '}
-            {formatRetryChip(retryActive, cols)}
-          </Text>
-        )}
-        {todoActive && (
-          <Text color={theme.accent}>
-            {'  '}
-            {cols >= TODO_LIMITS.statusCompactCols
-              ? `todo ${todoActive.done}/${todoActive.total}`
-              : `[${todoActive.done}/${todoActive.total}]`}
-          </Text>
-        )}
-        {servicesActive && (
-          <Text color={theme.accent}>
-            {'  '}
-            {cols >= PROC_LIMITS.statusCompactCols
-              ? `svc ${servicesActive.live}`
-              : `[${servicesActive.live}]`}
-          </Text>
-        )}
-        {cols >= 60 && (
-          <Text color={theme.muted}>
-            {'  '}
-            {provider}:{model}
-          </Text>
-        )}
-        {thinkingLevel !== 'off' && cols >= 72 && (
-          <Text color={theme.accent}>  think:{thinkingLevel}</Text>
-        )}
-      </Box>
+          {modeWord && (
+            <Text color={theme.accent} bold>
+              {'  '}
+              {modeWord}
+            </Text>
+          )}
+          {teamActive && (
+            <Text color={theme.toolRunning} bold>
+              {'  '}
+              {cols >= TEAM_LIMITS.statusCompactCols
+                ? `agents ${teamActive.running}/${teamActive.total}`
+                : `[${teamActive.running}]`}
+            </Text>
+          )}
+          {retryActive && (
+            <Text color={theme.noticeWarn} bold>
+              {'  '}
+              {formatRetryChip(retryActive, cols)}
+            </Text>
+          )}
+          {todoActive && (
+            <Text color={theme.accent}>
+              {'  '}
+              {cols >= TODO_LIMITS.statusCompactCols
+                ? `todo ${todoActive.done}/${todoActive.total}`
+                : `[${todoActive.done}/${todoActive.total}]`}
+            </Text>
+          )}
+          {servicesActive && (
+            <Text color={theme.accent}>
+              {'  '}
+              {cols >= PROC_LIMITS.statusCompactCols
+                ? `svc ${servicesActive.live}`
+                : `[${servicesActive.live}]`}
+            </Text>
+          )}
+          {cols >= 60 && (cols >= 110 || (!running && !servicesActive && scrolledLines === 0)) && (
+            <Text color={theme.muted}>
+              {'  '}
+              {provider}:{model}
+            </Text>
+          )}
+          {thinkingLevel !== 'off' && cols >= 72 && (
+            <Text color={theme.accent}>  think:{thinkingLevel}</Text>
+          )}
+        </Box>
 
-      <Box flexDirection="row">
-        {compactionActive && cols >= COMPACTION_LIMITS.statusCompactCols && (
-          <Text color={compactionActive.inFlight ? theme.accent : theme.muted}>
-            {compactionActive.inFlight ? 'compacting' : 'compact'}
-            {'  '}
-          </Text>
-        )}
-        {fastActive && cols >= FAST_LIMITS.statusCompactCols && (
-          <Text color={theme.muted}>
-            fast
-            {fastActive.inFlight ? '*' : ''}
-            {'  '}
-          </Text>
-        )}
-        {ecoRung > 0 && cols >= ECO_MIN_COLS && (
-          <Text color={theme.muted}>eco{'  '}</Text>
-        )}
-        {scrolledLines > 0 && (
-          <Text color={theme.noticeWarn}>
-            {glyphs.arrowUp}
-            {scrolledLines}
-            {'  '}
-          </Text>
-        )}
-        {cols >= 60 && (
-          <Text>
-            <Text color={theme.muted}>[</Text>
-            <Text color={gauge.fillColor}>{gauge.filled}</Text>
-            <Text color={gauge.trackColor}>{gauge.empty}</Text>
-            <Text color={theme.muted}>] </Text>
-          </Text>
-        )}
-        <Text color={theme.muted}>{pctLabel}</Text>
-        {cols >= ABSOLUTE_PAIR_MIN_COLS && (
-          <Text color={theme.muted}>  {absolutePair}</Text>
-        )}
-        {cols >= SESSION_TOTAL_MIN_COLS && <Text color={theme.muted}>  {tokens}</Text>}
-        <Text color={theme.muted}>  {formatCost(usageTotal.costUsd)}</Text>
-        {running && (
-          <Text color={theme.muted}>
-            {tokPerSec > 0 && cols >= 72 ? `  ${tokPerSec} tok/s` : ''}  {formatDuration(elapsedMs)}
-          </Text>
-        )}
-        {/*
-          The keybinding hint cluster that used to live here is GONE (§4.6). It
-          duplicated the composer's hint row — on a 110x24 terminal both were on
-          screen at once — and its 31 columns are what forced the odd `cols >=
-          110` breakpoint and pushed the bar into the character-dropping regime
-          described above. The status bar now shows state; the composer shows
-          keys. `redrawChar` above is unrelated to the hint and must stay (I-5).
-        */}
+        <Box flexDirection="row">
+          {compactionActive && cols >= COMPACTION_LIMITS.statusCompactCols && (
+            <Text color={compactionActive.inFlight ? theme.accent : theme.muted}>
+              {compactionActive.inFlight ? 'compacting' : 'compact'}
+              {'  '}
+            </Text>
+          )}
+          {fastActive && cols >= FAST_LIMITS.statusCompactCols && (
+            <Text color={theme.muted}>
+              fast
+              {fastActive.inFlight ? '*' : ''}
+              {'  '}
+            </Text>
+          )}
+          {ecoRung > 0 && cols >= ECO_MIN_COLS && (
+            <Text color={theme.muted}>eco{'  '}</Text>
+          )}
+          {scrolledLines > 0 && (
+            <Text color={theme.noticeWarn}>
+              {glyphs.arrowUp}
+              {scrolledLines}
+              {'  '}
+            </Text>
+          )}
+          {cols >= 60 && (
+            <Text>
+              <Text color={theme.muted}>[</Text>
+              <Text color={gauge.fillColor}>{gauge.filled}</Text>
+              <Text color={gauge.trackColor}>{gauge.empty}</Text>
+              <Text color={theme.muted}>] </Text>
+            </Text>
+          )}
+          <Text color={theme.muted}>{pctLabel}</Text>
+          {cols >= ABSOLUTE_PAIR_MIN_COLS && (
+            <Text color={theme.muted}>  {absolutePair}</Text>
+          )}
+          {cols >= SESSION_TOTAL_MIN_COLS && <Text color={theme.muted}>  {tokens}</Text>}
+          <Text color={theme.muted}>  {formatCost(usageTotal.costUsd)}</Text>
+          {running && (
+            <Text color={theme.muted}>
+              {tokPerSec > 0 && cols >= 72 ? `  ${tokPerSec} tok/s` : ''}  {formatDuration(elapsedMs)}
+            </Text>
+          )}
+        </Box>
       </Box>
     </Box>
   );

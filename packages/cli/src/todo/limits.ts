@@ -40,16 +40,6 @@ export const TODO_LIMITS = {
   /** Below this many terminal columns the status-bar counter degrades to `[3/7]`. */
   statusCompactCols: 100,
   /**
-   * Below this many columns the inline strip drops its `+N done` suffix
-   * (todo-plan-followthrough §3.7 / D-19).
-   *
-   * NAMED RATHER THAN INLINED, and the reason is that it sits between two other
-   * real bounds — `statusCompactCols` (100) above and `MIN_FULLSCREEN_COLS` (40)
-   * in `frame.ts` — with nothing to tell a reader whether a bare `80` in the
-   * component was a third policy or a typo for one of them.
-   */
-  stripDoneCols: 80,
-  /**
    * Consecutive user turns an UNFINISHED list survives without a `todo_write`
    * before `beginUserTurn()` drops it (§3.2 / P1-7). Three keeps the common
    * interruption sequence ("wait, explain X" / "and Y?" / "ok, continue")

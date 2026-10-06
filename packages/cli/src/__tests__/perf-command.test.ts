@@ -23,6 +23,7 @@ const registry = new CommandRegistry();
 registerBuiltinCommands(registry);
 
 const SNAPSHOT: PerfSnapshot = {
+  mode: 'fullscreen',
   rung: 2,
   intervalMs: 80,
   lastCommitMs: 61.4,
@@ -34,7 +35,7 @@ const SNAPSHOT: PerfSnapshot = {
   heightsMeasured: 412,
   heightsEstimated: 6,
   cols: 132,
-  mode: 'fullscreen',
+
   viewportRows: 44,
   offset: 0,
 };
@@ -174,5 +175,61 @@ describe('the snapshot channel', () => {
     expect(readPerfSnapshot()).toEqual(SNAPSHOT);
     setPerfSnapshotProvider(null);
     expect(readPerfSnapshot()).toBeNull();
+  });
+});
+
+describe('the scrollbar line (T16)', () => {
+  const BAR = {
+    trackCol: 80, trackRows: 20, mouseOn: true, frameReady: true,
+    thumb: { start: 3, size: 5 }, unicode: true, edgeEl: 'skipped' as const,
+  };
+
+  it('is absent when no scrollbar record is supplied', () => {
+    expect(formatPerfReport(SNAPSHOT)).not.toContain('scrollbar');
+  });
+
+  it('prints one self-check line with every cause separated', () => {
+    const report = formatPerfReport({ ...SNAPSHOT, scrollbar: BAR });
+    expect(report).toContain(
+      'scrollbar  col=80 rows=20 mouse=on frameReady=yes thumb=3+5 glyphs=unicode edge-el=skipped',
+    );
+    expect(report).not.toContain('waiting for a full frame');
+  });
+
+  it('explains "visible but not draggable" when the frame is not confirmed', () => {
+    const report = formatPerfReport({ ...SNAPSHOT, scrollbar: { ...BAR, frameReady: false } });
+    expect(report).toContain('frameReady=no');
+    expect(report).toContain('waiting for a full frame matching 80x24');
+  });
+
+  it('treats mouse off as an expected degradation, not a wait', () => {
+    const report = formatPerfReport({
+      ...SNAPSHOT, scrollbar: { ...BAR, mouseOn: false, frameReady: false, thumb: null, unicode: false, edgeEl: 'n/a' },
+    });
+    expect(report).toContain('mouse=off');
+    expect(report).toContain('thumb=none glyphs=ascii edge-el=n/a');
+    expect(report).not.toContain('waiting for a full frame');
+  });
+
+  it('stays ASCII', () => {
+    const report = formatPerfReport({ ...SNAPSHOT, scrollbar: { ...BAR, frameReady: false } });
+    expect(report).not.toMatch(/[^\x00-\x7f]/);
+  });
+
+  it('reads the live bridge lazily', async () => {
+    const { createScrollbarBridge } = await import('../ui/scrollbar-controller.js');
+    const { readScrollbarPerf } = await import('../commands/perf.js');
+    let mouse = true;
+    const bridge = createScrollbarBridge(() => mouse);
+    const read = () => readScrollbarPerf({ bridge, diffRender: true, unicode: true })!;
+    expect(read()).toMatchObject({ trackCol: null, mouseOn: true, frameReady: false, thumb: null });
+    bridge.geometry = { trackTop: 2, trackCol: 80, trackRows: 20, contentRows: 100, offset: 0,
+      thumb: { start: 1, size: 4 }, revision: 1 };
+    bridge.frameReady = true;
+    mouse = false;
+    expect(read()).toMatchObject({ trackCol: 80, trackRows: 20, mouseOn: false, frameReady: true,
+      thumb: { start: 1, size: 4 }, edgeEl: 'skipped' });
+    expect(readScrollbarPerf({ bridge: undefined, diffRender: true, unicode: true })).toBeUndefined();
+    expect(readScrollbarPerf({ bridge, diffRender: false, unicode: true })!.edgeEl).toBe('n/a');
   });
 });

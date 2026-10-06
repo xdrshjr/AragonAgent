@@ -52,6 +52,8 @@ this repository is written to at run time.
 [`@aragon-agent/cli`](./packages/cli) is a Claude-Code / Codex-style interactive
 terminal UI built on top of the engine. Run `aragon` in any directory for a
 full-screen, keyboard-driven chat with a built-in filesystem/shell toolset.
+The full-screen TUI is the only interactive layout; `-p`, `exec` and piped input
+remain available for headless use.
 
 <p align="center">
   <img src="./logo/screenshot.png" width="900"

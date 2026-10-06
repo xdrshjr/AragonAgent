@@ -840,7 +840,9 @@ const COMMANDS: SlashCommand[] = [
         // slash history already has. Putting this canned paragraph under the
         // composer's up-arrow as well would be the same event recorded twice, in
         // the more verbose of the two forms (AC-17).
-        ctx.submit(buildContinuationMessage(snapshot), { userInitiated: false });
+        ctx.submit(buildContinuationMessage(snapshot), {
+          userInitiated: false, todoPolicy: 'continue',
+        });
         return;
       }
 

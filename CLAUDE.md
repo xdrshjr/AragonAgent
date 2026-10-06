@@ -3,7 +3,7 @@
 This project has a pre-generated index for quick codebase understanding.
 
 - **Location:** `.claude-index/index.md`
-- **Last Updated:** 2026-08-17
+- **Last Updated:** 2026-10-06
 - **Contents:** Project overview, feature map, file index, exported symbols, module dependencies
 
 **Usage:** Read `.claude-index/index.md` to quickly understand the project structure before making changes. The index provides a navigation map of the codebase without needing to explore every file.
@@ -12,7 +12,7 @@ This project has a pre-generated index for quick codebase understanding.
 
 ## Clean Code Guidelines
 
-<!-- project-indexer:cleancode:begin v1.1.0 -->
+<!-- project-indexer:cleancode:begin v1.2.0 -->
 <!--
   cleancode-template.md — rendered into CLAUDE.md by project-indexer (Step 5b).
   Authoring rules:

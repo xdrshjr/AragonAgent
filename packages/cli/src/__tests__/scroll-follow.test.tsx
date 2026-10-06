@@ -12,7 +12,8 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import React from 'react';
-import { Text } from 'ink';
+import { Box, Text } from 'ink';
+import { createTerminalHarness, settleTerminal } from './helpers/terminal-harness.js';
 import { render } from 'ink-testing-library';
 import { ScrollViewport } from '../ui/layout/ScrollViewport.js';
 import { emptyTailState } from '../ui/layout/follow-state.js';
@@ -116,5 +117,55 @@ describe('ScrollViewport — the adapter', () => {
     await delay(20);
     expect(lastFrame()).toContain('body');
     unmount();
+  });
+});
+
+
+describe('unified follow with actual Yoga height', () => {
+  it('combines output and footer shrink before clamping the old position', async () => {
+    const terminal = createTerminalHarness();
+    const sink = { current: emptyTailState() };
+    let offset = 0;
+    const node = (body: number, footer: number, nonce: number) => <Box height={20} width={80}>
+      <ScrollViewport theme={THEME} caps={CAPS} tailRowsRef={sink}
+        intent={{ kind: 'lineUp', repeat: 60, nonce }}
+        onScrolledLinesChange={(n) => { offset = n; }}
+        footer={<Box height={footer} flexShrink={0}><Text>editor</Text></Box>}>
+        <Box height={body} flexShrink={0}><Text>messages</Text></Box>
+      </ScrollViewport></Box>;
+    try {
+      terminal.mount(node(70, 10, 0)); await settleTerminal();
+      terminal.rerender(node(70, 10, 1)); await settleTerminal();
+      expect(offset).toBe(60);
+      sink.current.rows = 5;
+      terminal.rerender(node(75, 0, 1)); await settleTerminal();
+      expect(offset).toBe(55);
+    } finally { terminal.dispose(); }
+  });
+  it('freezes resume during an overlay and starts a full timer after restoration', async () => {
+    const terminal = createTerminalHarness();
+    const sink = { current: emptyTailState() };
+    let offset = 0;
+    const node = (active: boolean, body: number, nonce: number) => <Box height={20} width={80}>
+      <ScrollViewport theme={THEME} caps={CAPS} active={active} tailRowsRef={sink}
+        resumeMs={250} intent={{ kind: 'lineUp', repeat: 10, nonce }}
+        onScrolledLinesChange={(n) => { offset = n; }} footer={<Text>editor</Text>}>
+        <Box height={body} flexShrink={0}><Text>messages</Text></Box>
+      </ScrollViewport></Box>;
+    try {
+      terminal.mount(node(true, 100, 0)); await settleTerminal();
+      terminal.rerender(node(true, 100, 1)); await settleTerminal();
+      sink.current.rows = 5;
+      terminal.rerender(node(true, 105, 1)); await settleTerminal();
+      expect(offset).toBe(15);
+      terminal.rerender(node(false, 105, 2)); await delay(300);
+      expect(offset).toBe(15);
+      sink.current.rows = 9;
+      terminal.rerender(node(false, 109, 2)); await settleTerminal();
+      terminal.rerender(node(true, 109, 2)); await settleTerminal();
+      expect(offset).toBe(19);
+      await delay(270);
+      expect(offset).toBe(0);
+    } finally { terminal.dispose(); }
   });
 });

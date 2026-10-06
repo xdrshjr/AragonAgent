@@ -3,6 +3,8 @@
  * input is routed here instead of to the agent; `//` is the literal-`/` escape.
  */
 
+import type { SubmitMessageOptions } from '../agent/prompt-options.js';
+
 import type { AgentController } from '../agent/controller.js';
 import type { AgentMode } from '../agent/agent-mode.js';
 import type { NoticeLevel, Overlay, ToastLevel, ViewAction, ViewState } from '../agent/reducer.js';
@@ -44,7 +46,7 @@ export interface CommandContext {
    * (P1-5): `builtins.ts` reaches `submitMessage` only through here, so
    * `/todo continue` cannot opt out of prompt history without it.
    */
-  submit: (text: string, opts?: { userInitiated?: boolean }) => void;
+  submit: (text: string, opts?: SubmitMessageOptions) => void;
   /**
    * The live auto-continue budget, for `/todo status`'s `(2/25 used)` clause
    * (todo-plan-followthrough §4.3).
@@ -91,7 +93,7 @@ export interface CommandContext {
   /**
    * Mouse capture, for `/mouse` (tui-selection-and-scroll-follow §6.2 / G3).
    *
-   * OPTIONAL, and legitimately absent: inline mode, `--no-mouse`, a non-TTY, a
+   * OPTIONAL, and legitimately absent: `--no-mouse`, a non-TTY, a
    * Windows console that cannot deliver reports, and every test that builds this
    * context by literal. `/mouse` has to have something honest to say when it is
    * missing, which is the same reason `update` above it is optional.
@@ -103,7 +105,7 @@ export interface CommandContext {
    * NOT `process.stdout.write`. In full-screen mode stdout is a `Proxy` in front
    * of the frame differ, and an unrecognised chunk there is counted as a foreign
    * write and prints a diagnostic at the user the first time they copy anything
-   * (P1-6). Absent in inline mode and with `--no-diff-render`, where the real
+   * (P1-6). Absent with `--no-diff-render`, where the real
    * stream is handed over directly.
    */
   writeForeign?: (text: string) => void;

@@ -494,8 +494,10 @@ function Assert-CliPackContents {
 }
 
 function Invoke-ReleaseChecks($PackageState) {
-  Invoke-NpmCommand @('test')
+  # Tests inspect dist entry points (including post-build shebangs), so rebuild
+  # before testing rather than validating stale or partially compiled output.
   Invoke-NpmCommand @('run', 'build')
+  Invoke-NpmCommand @('test')
   Invoke-NpmCommand @('run', 'verify:dist', '-w', 'packages/core')
   # Brand gate. Must run AFTER `npm run build` (or it scans a stale/absent dist)
   # and BEFORE `npm publish` (or it is decorative). Invoked as an npm script, not

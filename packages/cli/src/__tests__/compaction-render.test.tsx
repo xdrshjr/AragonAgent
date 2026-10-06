@@ -28,7 +28,6 @@ import {
   type ViewAction,
   type ViewState,
 } from '../agent/reducer.js';
-import { computeSettledCount } from '../ui/Transcript.js';
 import { entryRevision, estimateEntryRows } from '../ui/layout/virtual-window.js';
 import { renderTranscriptText } from '../ui/transcript-text.js';
 import { normalizeLoadedEntries } from '../session/persist.js';
@@ -594,15 +593,6 @@ function compactionEntry(over: Partial<Extract<Entry, { kind: 'compaction' }>> =
 }
 
 describe('the new kind is plumbed everywhere it has to be', () => {
-  it('C-8 — a LIVE card blocks the settled boundary', () => {
-    const live = Array.from({ length: 10 }, (_, i) =>
-      i === 0 ? compactionEntry({ id: 'c1', live: true }) : { id: `n${i}`, kind: 'notice' as const, level: 'info' as const, text: 'x' },
-    );
-    expect(computeSettledCount(live, {})).toBe(0);
-    const settled = [...live];
-    settled[0] = compactionEntry({ id: 'c1', live: false });
-    expect(computeSettledCount(settled, {})).toBeGreaterThan(0);
-  });
 
   it('C-8 — persist normalizes a live card away on load, and says it did not apply', () => {
     const [loaded] = normalizeLoadedEntries([compactionEntry({ live: true, applied: true })]);

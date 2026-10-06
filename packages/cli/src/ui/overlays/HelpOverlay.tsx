@@ -23,7 +23,9 @@ function keyRows(times: string): [string, string][] {
   return [
     ['Enter', 'Submit (idle) / queue steering (running); re-pins to the newest output'],
     ['Alt+Enter / Shift+Enter', 'Insert newline'],
-    ['Esc', 'Abort run / close overlay'],
+    ['Esc', 'Close menu / overlay'],
+    ['Esc twice', 'Interrupt run (within 1.5s)'],
+    ['Esc again', 'Force-stop after requesting interruption'],
     // BOTH KEYS ARE LISTED HERE, and this row is why (shift-tab-mode-toggle-
     // still-dead-on-windows, review R-7). The hint row above the composer is the
     // other place the fallback is named, and it has two off-switches - a short
@@ -41,7 +43,9 @@ function keyRows(times: string): [string, string][] {
     // Drag-select is the one affordance here a user cannot discover by pressing
     // a key, so it has to be named somewhere they can look it up. The one-shot
     // startup notice is the other place, and it scrolls away.
-    ['Drag (left button)', 'Select text on screen; releasing copies it'],
+    ['Drag right edge', 'Scroll messages and input together; type to return'],
+    ['Run status row', 'Spinner and steer / interrupt keys, above the input during a run'],
+    ['Drag text (left button)', 'Select text on screen; releasing copies it'],
     ['Up / Down', 'Prompt history (empty input)'],
     // Pasting is the one affordance here with no key of its own, so the only
     // place a user can learn what happened to their 218 lines is this row.

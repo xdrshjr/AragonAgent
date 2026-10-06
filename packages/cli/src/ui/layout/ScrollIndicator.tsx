@@ -22,14 +22,15 @@ import type { TermCapabilities } from '../capabilities.js';
 import { pickGlyphs } from '../glyphs.js';
 import type { ThumbRange } from './scroll-indicator.js';
 
-/** Below this width a column of content is worth more than the affordance. */
-export const MIN_INDICATOR_COLS = 50;
+/** Smallest supported fullscreen width; every usable chat frame reserves the column. */
+export const MIN_INDICATOR_COLS = 40;
 
 export interface ScrollIndicatorProps {
   /** Viewport height in rows, as measured by `ScrollViewport`. */
   rows: number;
   /** `null` when the content fits — the rail is drawn as bare track. */
   thumb: ThumbRange | null;
+  dragging?: boolean;
   theme: Theme;
   caps: TermCapabilities;
 }
@@ -37,6 +38,7 @@ export interface ScrollIndicatorProps {
 export function ScrollIndicator({
   rows,
   thumb,
+  dragging = false,
   theme,
   caps,
 }: ScrollIndicatorProps): React.ReactElement {
@@ -47,7 +49,7 @@ export function ScrollIndicator({
   for (let i = 0; i < count; i += 1) {
     const onThumb = !!thumb && i >= thumb.start && i < thumb.start + thumb.size;
     cells.push(
-      <Text key={i} color={onThumb ? theme.primary : theme.border}>
+      <Text key={i} color={onThumb ? theme.primary : theme.muted} bold={onThumb && dragging}>
         {onThumb ? glyphs.scrollThumb : glyphs.scrollTrack}
       </Text>,
     );

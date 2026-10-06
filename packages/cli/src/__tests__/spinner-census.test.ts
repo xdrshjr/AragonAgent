@@ -86,23 +86,33 @@ describe('AC-9: every animated site takes the suppression signal', () => {
   });
 });
 
-describe('AC-11: App wires one raw flag and four widened ones', () => {
+describe('AC-11: App wires one raw flag and three widened ones', () => {
   const app = readFileSync(join(UI, 'App.tsx'), 'utf8');
   const count = (needle: string): number => app.split(needle).length - 1;
 
-  it('gives the raw config flag to the activity line and to nothing else', () => {
-    // D-5: `ActivityLine` reads the flag TWICE — once for its spinner and once
-    // for `pickActivityPhrase`'s rotation — so the widened value would freeze
-    // the phrase at the first word of every run. That is why the asymmetry
-    // exists, and why "exactly one" is the number rather than "zero".
-    expect(count('reducedMotion={reducedMotion}')).toBe(1);
+  it('gives the raw config flag to the activity row and to nothing else', () => {
+    // D-5: the activity label reads the flag TWICE - once for its spinner and once
+    // for `pickActivityPhrase`'s rotation - so the widened value would freeze the
+    // phrase at the first word of every run. That is why the asymmetry exists, and
+    // why "exactly one" is the number rather than "zero".
+    //
+    // The ONE place is now the `runActivity` object, built once and handed to
+    // BOTH mount points (the run status row above the input and the fixed bottom
+    // row): neither mount point may spell its own copy.
+    const literal = app.match(/const runActivity: RunActivity = \{([\s\S]*?)\n {2}\};/);
+    expect(literal).not.toBeNull();
+    expect(literal![1]!.match(/\breducedMotion\b/g)).toHaveLength(1);
+    expect(literal![1]).toMatch(/\n\s+reducedMotion,/);
+    expect(count('reducedMotion={reducedMotion}')).toBe(0);
+    expect(count('{...runActivity}')).toBe(1);
+    expect(count('activity: runActivity')).toBe(1);
   });
 
-  it('gives the widened value to all four view consumers', () => {
-    // The transcript twice (full-screen and inline), plus both panels. If a
-    // fifth animated consumer is added, this number moves WITH it — deliberately
+  it('gives the widened value to all three view consumers', () => {
+    // The transcript and both panels. If a
+    // fourth animated consumer is added, this number moves WITH it — deliberately
     // brittle, because the failure it guards is silent in every other test.
-    expect(count('reducedMotion={viewReducedMotion}')).toBe(4);
+    expect(count('reducedMotion={viewReducedMotion}')).toBe(3);
   });
 
   it('derives the suppression signal from the activity row mount condition, once', () => {
@@ -116,7 +126,12 @@ describe('AC-11: App wires one raw flag and four widened ones', () => {
     // Matched as a pattern rather than as a literal slice: the line break and
     // its indentation are the formatter's business, and a scan that a reflow
     // can turn red teaches the next reader to delete it.
-    expect(app).toMatch(/activity=\{\s*activityVisible \? \(/);
+    //
+    // The fixed bottom row is the SECOND mount point: it takes the life signal
+    // only while the run status row is not on screen, and that single boolean is
+    // `runRowShown`, derived once from `runRowEnabled`.
+    expect(app).toMatch(/activity=\{\s*activityVisible && !runRowShown \? \(/);
+    expect(count('const runRowShown = runRowEnabled && activityRowVisible;')).toBe(1);
     expect(app).not.toMatch(/activity=\{\s*running && !overlayNode \? \(/);
   });
 });

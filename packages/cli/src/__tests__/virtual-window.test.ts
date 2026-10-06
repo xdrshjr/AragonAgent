@@ -382,3 +382,20 @@ describe('estimateEntryRows — the user entry cap (T-32 / I-13)', () => {
     expect(estimateEntryRows(wide, 40, 'compact', false)).toBeGreaterThan(1);
   });
 });
+
+
+describe('document footer projection', () => {
+  it('projects the footer into the visible message interval before overscan', () => {
+    const base = { entries: entries(100), heightOf: () => 1, viewportRows: 20,
+      overscan: 2, trailingContentRows: 6 };
+    expect(selectWindow({ ...base, offset: 0 }))
+      .toMatchObject({ startIndex: 84, endIndex: 100 });
+    expect(selectWindow({ ...base, offset: 10 }))
+      .toMatchObject({ startIndex: 74, endIndex: 98 });
+  });
+  it('keeps only the tail overscan when the editor fills the visible interval', () => {
+    const result = selectWindow({ entries: entries(10000), heightOf: () => 1,
+      viewportRows: 20, offset: 0, overscan: 2, trailingContentRows: 50 });
+    expect(result.endIndex - result.startIndex).toBeLessThanOrEqual(3);
+  });
+});

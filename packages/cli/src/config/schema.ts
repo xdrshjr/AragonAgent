@@ -1553,7 +1553,6 @@ export interface PersistedConfig {
   /** Replace spinners with a static glyph for calmer, low-motion output. */
   reducedMotion: boolean;
   /** Full-screen TUI (still subject to the automatic downgrades in §4.1). */
-  fullscreen: boolean;
   /** Replay a plain-text session summary after leaving the alternate screen. */
   exitTranscript: boolean;
   /** Entries reachable by scrolling; older ones show the "collapsed" line (I-3). */
@@ -1591,8 +1590,7 @@ export interface PersistedConfig {
    * transcript, whatever row the pointer is on (wheel-scrolls-transcript-only
    * §4.1).
    *
-   * A PLAIN BOOLEAN, not a `fullscreen`-style tri-state: there are no
-   * heuristics for an explicit `true` to override (D-10).
+   * A plain boolean: persisted values and per-run overrides use the same meaning.
    */
   mouse: boolean;
   /**
@@ -1660,7 +1658,6 @@ export const DEFAULT_CONFIG: PersistedConfig = {
   contextWindow: null,
   theme: 'auto',
   reducedMotion: false,
-  fullscreen: true,
   exitTranscript: true,
   transcriptWindow: DEFAULT_TRANSCRIPT_WINDOW,
   transcriptRetain: DEFAULT_TRANSCRIPT_RETAIN,
@@ -1798,17 +1795,6 @@ export interface CliConfig {
   contextWindow: number | null;
   theme: ThemeName;
   reducedMotion: boolean;
-  /**
-   * TRI-STATE, and deliberately so (spec §4.1 vs §6.2):
-   *   `false`     — an explicit opt-out from any layer; always inline.
-   *   `true`      — an explicit FORCE, only from `--fullscreen` / `ARAGON_FULLSCREEN=1`;
-   *                 overrides the TERM/CI/size heuristics.
-   *   `undefined` — no explicit choice (including a config file holding the
-   *                 default `true`); full-screen with the heuristics live.
-   * Folding the persisted default into `true` would turn every user's config
-   * file into a permanent "ignore the CI and TERM=dumb downgrades" switch.
-   */
-  fullscreen?: boolean;
   /** Replay a plain-text summary on exit (full-screen only — see §4.4). */
   exitTranscript: boolean;
   /** Entries reachable by scrolling; older ones show the "collapsed" line (I-3). */

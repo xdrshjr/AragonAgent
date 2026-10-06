@@ -25,6 +25,12 @@
  *    trailing `CSI K` removes only the residue a longer previous line left, and
  *    the trailing SGR reset before it stops a BCE terminal painting that residue
  *    in whatever background colour the line ended inside.
+ *    `CSI K` IS EMITTED ONLY WHEN THE LINE IS NARROWER THAN THE TERMINAL. A row
+ *    that already fills every column (the unified scrollbar paints the last one)
+ *    has no residue to clear, and on terminals that keep the cursor ON the last
+ *    column after writing it (a pending-wrap flag rather than a virtual column
+ *    N+1) the EL would erase the cell that was just written. `cols` unknown keeps
+ *    the old always-EL behaviour (`paintLine`).
  *  - I-5 · Every emitted batch ends parked on row `H+1`. Ink's own
  *    `previousLineCount` is computed from the string IT produced and is
  *    unaffected by what we actually wrote, so a later pass-through's
@@ -38,7 +44,10 @@
  *    mode of it firing spuriously is one extra full repaint.
  */
 
+import stringWidth from 'string-width';
+import stripAnsi from 'strip-ansi';
 import { MIN_FULLSCREEN_ROWS } from './layout/frame.js';
+import { matchInkErasePrefix } from './frame-parser.js';
 
 // ---------------------------------------------------------------------------
 // Constants — exact, so no call site ever re-derives an escape sequence.
@@ -59,21 +68,25 @@ const ERASE_DOWN = `${CSI}J`;
 const SYNC_BEGIN = `${CSI}?2026h`;
 const SYNC_END = `${CSI}?2026l`;
 
-/**
- * `eraseLines(n)` for any n ≥ 1, anchored at the start of the chunk.
- *
- * FALLBACK ONLY (P2-3). Whenever `prev !== null` the differ already knows the
- * exact prefix it expects — `eraseLinesPrefix(prev.length + 1)` is a
- * deterministic string — so the hot path is `chunk.startsWith(expected)`:
- * linear, unambiguous, and it collapses step 7's `erased !== prev.length + 1`
- * test into the same comparison. This regex is reached only on the first
- * diffable chunk after a session start or an `invalidate()`, where no
- * expectation exists yet.
- */
-const ERASE_PREFIX_RE = /^(?:\x1b\[2K(?:\x1b\[1A)?)+\x1b\[G/;
-
 function cursorTo(row: number): string {
   return `${CSI}${row};1H`;
+}
+
+/**
+ * One addressed row: `CUP · SGR0 · line · SGR0 [· CSI K]` (I-4).
+ *
+ * The trailing `CSI K` clears residue a longer previous line left behind, so it is
+ * only meaningful when the line is narrower than the terminal. A line that already
+ * fills `cols` columns ends with the cursor in the pending-wrap state, where some
+ * terminals run EL from the LAST column and erase the cell just written; those
+ * rows get no EL. Width is measured exactly as Ink measures it (`string-width` over
+ * the ANSI-stripped text) and only for rows that changed, so it costs at most one
+ * measurement per changed viewport row. `cols` unknown => the original always-EL.
+ */
+function paintLine(row: number, line: string, cols: number | undefined): string {
+  const head = cursorTo(row) + SGR_RESET + line + SGR_RESET;
+  if (cols !== undefined && stringWidth(stripAnsi(line)) >= cols) return head;
+  return head + ERASE_TO_EOL;
 }
 
 /**
@@ -94,10 +107,6 @@ export function eraseLinesPrefix(count: number): string {
   return out + CURSOR_LEFT;
 }
 
-function countErases(prefix: string): number {
-  return prefix.split(ERASE_LINE).length - 1;
-}
-
 // ---------------------------------------------------------------------------
 // Public contracts (§5.5)
 // ---------------------------------------------------------------------------
@@ -111,6 +120,13 @@ export interface FrameDifferOptions {
    * on resize. `undefined` ⇒ stand down and pass through.
    */
   rows: () => number | undefined;
+  /**
+   * Live terminal width, read on every paint and never cached (like `rows`).
+   * Absent or non-finite => every changed row ends in `CSI K` (the original
+   * behaviour); finite => rows whose display width is >= `cols` skip the EL so
+   * the last column (the scrollbar) is never erased (I-4).
+   */
+  cols?: () => number | undefined;
   /** Raised once, on the 0→1 edge of `fallbacks` (§5.6). */
   onFirstFallback?: () => void;
   /**
@@ -322,9 +338,7 @@ export function createFrameDiffer(options: FrameDifferOptions): FrameDiffer {
       const expected = eraseLinesPrefix(prev.length + 1);
       if (chunk.startsWith(expected)) return { prefix: expected, erased: prev.length + 1 };
     }
-    const m = ERASE_PREFIX_RE.exec(chunk);
-    if (m === null) return null;
-    return { prefix: m[0], erased: countErases(m[0]) };
+    return matchInkErasePrefix(chunk);
   };
 
   /**
@@ -352,13 +366,18 @@ export function createFrameDiffer(options: FrameDifferOptions): FrameDiffer {
     return emit(wrapSync(payload), lines, raw, lines.length, true);
   };
 
+  /** Terminal width for this paint, or `undefined` when unknown (I-4: always EL). */
+  const liveCols = (): number | undefined => {
+    const cols = options.cols?.();
+    return cols !== undefined && Number.isFinite(cols) ? cols : undefined;
+  };
+
   const diffRepaint = (lines: string[], raw: string[], previous: string[]): string => {
     const out: string[] = [];
+    const cols = liveCols();
     for (let i = 0; i < lines.length; i += 1) {
       // I-4: paint, THEN clear the tail. Never `ERASE_LINE` first.
-      if (lines[i] !== previous[i]) {
-        out.push(cursorTo(i + 1) + SGR_RESET + lines[i] + SGR_RESET + ERASE_TO_EOL);
-      }
+      if (lines[i] !== previous[i]) out.push(paintLine(i + 1, lines[i]!, cols));
     }
     // DEFENSIVE ONLY, not a live path (P2-4). `log-update.js:13-15` returns early
     // on an identical frame, so a chunk that reaches here differs by at least one
@@ -390,10 +409,9 @@ export function createFrameDiffer(options: FrameDifferOptions): FrameDiffer {
 
     const painted = applyDecorate(rawPrev);
     const out: string[] = [];
+    const cols = liveCols();
     for (let i = 0; i < painted.length; i += 1) {
-      if (painted[i] !== prev[i]) {
-        out.push(cursorTo(i + 1) + SGR_RESET + painted[i] + SGR_RESET + ERASE_TO_EOL);
-      }
+      if (painted[i] !== prev[i]) out.push(paintLine(i + 1, painted[i]!, cols));
     }
     prev = painted;
     if (out.length === 0) return '';

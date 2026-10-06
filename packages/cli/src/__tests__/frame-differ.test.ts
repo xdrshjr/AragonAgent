@@ -8,6 +8,10 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { createFrameDiffer, eraseLinesPrefix, type FrameDiffer } from '../ui/frame-differ.js';
+import React from 'react';
+import { Box, Text } from 'ink';
+import { render } from 'ink-testing-library';
+import { PromptCaret } from '../ui/PromptCaret.js';
 
 const CSI = '\x1b[';
 const SGR_RESET = `${CSI}0m`;
@@ -19,6 +23,34 @@ const SYNC_END = `${CSI}?2026l`;
 const ROWS = 24;
 /** `frameHeight(24)` — what `AppShell` pins the root box to. */
 const HEIGHT = ROWS - 1;
+
+describe('caret frame differential (C-09)', () => {
+  it('writes only the blinking input row and parks at H+1', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const inputRow = HEIGHT - 2;
+    const view = render(React.createElement(Box, { flexDirection: 'column' },
+      ...Array.from({ length: HEIGHT }, (_, index) => React.createElement(Text, { key: index },
+        index === inputRow
+          ? React.createElement(PromptCaret, { text: 'a', active: true, reducedMotion: false, colorLevel: 0, resetKey: {} })
+          : `stable ${index}`)),
+    ));
+    try {
+      const bright = view.lastFrame()!.split('\n');
+      expect(bright).toHaveLength(HEIGHT);
+      const h = harness();
+      h.seed(bright);
+      await vi.advanceTimersByTimeAsync(500);
+      const dark = view.lastFrame()!.split('\n');
+      const output = h.differ.transform(chunk(dark, HEIGHT))!;
+      expect(output).toContain(`${CSI}${inputRow + 1};1H`);
+      expect(output).toContain(`${CSI}${HEIGHT + 1};1H`);
+      expect(output.match(/\x1b\[\d+;1H/g)).toHaveLength(2);
+      expect(output).not.toContain('stable');
+      expect(output).not.toContain(`${CSI}?25h`);
+      expect(output).not.toContain(`${CSI}J`);
+    } finally { view.unmount(); vi.useRealTimers(); }
+  });
+});
 
 function frameBody(lines: string[]): string {
   return `${lines.join('\n')}\n`;
@@ -524,5 +556,100 @@ describe('frame differ — onInvalidate (P1-7)', () => {
     });
     differ.invalidate();
     expect(maxDepth).toBe(1);
+  });
+});
+
+
+describe('shared Ink frame prefix recognition', () => {
+  it('preserves differ seed and erase semantics after parser extraction', async () => {
+    const { parseInkFrame } = await import('../ui/frame-parser.js');
+    const body = 'header\ntrack|\nstatus\n';
+    expect(parseInkFrame(body)).toEqual(['header', 'track|', 'status']);
+    expect(parseInkFrame(eraseLinesPrefix(4) + body)).toEqual(parseInkFrame(body));
+    const differ = createFrameDiffer({ rows: () => 24, sync: false });
+    expect(differ.transform(body)).toBeNull();
+    expect(differ.transform(eraseLinesPrefix(4) + body)).not.toBeNull();
+  });
+});
+
+describe('frame differ - CSI K only for rows narrower than the terminal (T3-T5)', () => {
+  const COLS = 20;
+  const full = 'a'.repeat(COLS);
+  const eolCount = (out: string): number => out.split(ERASE_TO_EOL).length - 1;
+
+  function warm(cols: (() => number | undefined) | undefined) {
+    const differ = createFrameDiffer({
+      sync: false,
+      rows: () => ROWS,
+      ...(cols ? { cols } : {}),
+      decorate: (lines) => lines.map((line) => line),
+    });
+    const base = rowsOf(HEIGHT);
+    differ.transform(frameBody(base));
+    differ.transform(chunk(base, HEIGHT));
+    return { differ, base };
+  }
+
+  it('keeps EL on every changed row when cols is not provided', () => {
+    const { differ, base } = warm(undefined);
+    const next = [...base];
+    next[1] = full;
+    next[2] = 'short';
+    expect(eolCount(differ.transform(chunk(next, HEIGHT))!)).toBe(2);
+  });
+
+  it('keeps EL on every changed row when cols is not finite', () => {
+    const { differ, base } = warm(() => Number.NaN);
+    const next = [...base];
+    next[1] = full;
+    expect(eolCount(differ.transform(chunk(next, HEIGHT))!)).toBe(1);
+  });
+
+  it('skips EL at width cols and cols+1 but keeps it at cols-1', () => {
+    const { differ, base } = warm(() => COLS);
+    const next = [...base];
+    next[1] = full; // exactly cols
+    next[2] = `${full}b`; // overflow row
+    next[3] = full.slice(1); // cols - 1
+    const out = differ.transform(chunk(next, HEIGHT))!;
+    expect(eolCount(out)).toBe(1);
+    expect(out).toContain(`${full.slice(1)}${SGR_RESET}${ERASE_TO_EOL}`);
+    expect(out).not.toContain(`${full}${SGR_RESET}${ERASE_TO_EOL}`);
+  });
+
+  it('measures display width so a CJK row that exactly fills the line skips EL', () => {
+    const { differ, base } = warm(() => COLS);
+    const next = [...base];
+    next[1] = '\u4e2d'.repeat(COLS / 2); // 10 chars, 20 columns
+    next[2] = '\u4e2d'.repeat(COLS / 2 - 1); // 9 chars, 18 columns
+    expect(eolCount(differ.transform(chunk(next, HEIGHT))!)).toBe(1);
+  });
+
+  it('ignores SGR escapes when measuring width', () => {
+    const { differ, base } = warm(() => COLS);
+    const next = [...base];
+    next[1] = `${CSI}2m${'a'.repeat(COLS - 1)}${CSI}0m${CSI}1m|${CSI}0m`;
+    expect(eolCount(differ.transform(chunk(next, HEIGHT))!)).toBe(0);
+  });
+
+  it('applies the same rule to repaint() (selection highlight never erases the edge)', () => {
+    let mark = false;
+    const differ = createFrameDiffer({
+      sync: false,
+      rows: () => ROWS,
+      cols: () => COLS,
+      decorate: (lines) => (mark ? lines.map((l, i) => (i === 1 || i === 2 ? `${CSI}7m${l}${CSI}27m` : l)) : lines),
+    });
+    const base = rowsOf(HEIGHT);
+    base[1] = full;
+    base[2] = 'short';
+    differ.transform(frameBody(base));
+    differ.transform(chunk(base, HEIGHT));
+    mark = true;
+    const out = differ.repaint();
+    expect(out).toContain(full);
+    // Row 2 ('short') keeps its EL, the full-width row 1 does not.
+    expect(eolCount(out)).toBe(1);
+    expect(out).toContain(`short${CSI}27m${SGR_RESET}${ERASE_TO_EOL}`);
   });
 });

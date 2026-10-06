@@ -1,12 +1,3 @@
-/**
- * Plain-text session rendering (spec §4.4). Pure, colorless, ANSI-free, so the
- * exit replay can be piped, diffed, or pasted into an issue.
- *
- * Used only by the full-screen exit replay: inline mode already left the real
- * transcript in the terminal's native scrollback, and replaying there would
- * simply print everything twice.
- */
-
 import type { Entry, UsageTotal } from '../agent/reducer.js';
 import { formatCost, formatDuration, formatTokens, promptTokensOf } from '../agent/usage.js';
 import { formatRetryLine } from '../agent/retry-view.js';

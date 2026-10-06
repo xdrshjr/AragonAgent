@@ -13,7 +13,8 @@ import { describe, expect, it } from 'vitest';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import stripAnsi from 'strip-ansi';
-import { ActivityLine } from '../ui/ActivityLine.js';
+import { ActivityLabel, ActivityLine, resolveActivityLabel } from '../ui/ActivityLine.js';
+import { pickGlyphs } from '../ui/glyphs.js';
 import { renderRowsAtWidth } from './render-at-width.js';
 import { getTheme } from '../ui/theme.js';
 import type { TermCapabilities } from '../ui/capabilities.js';
@@ -136,5 +137,47 @@ describe('ActivityLine', () => {
       // be decoration rather than meaning.
       expect(frameOf(RICH, false, 1_200, 'bash')).not.toContain('...');
     });
+  });
+});
+
+describe('ActivityLabel / resolveActivityLabel (T15)', () => {
+  const glyphs = pickGlyphs(RICH);
+  const base = { startedAt: STARTED, elapsedMs: 0, reducedMotion: true };
+
+  it('resolves the three rungs most specific first', () => {
+    expect(resolveActivityLabel({ ...base, compacting: true, runningTool: 'bash' }, glyphs))
+      .toBe(`Compacting context${glyphs.ellipsis}`);
+    expect(resolveActivityLabel({ ...base, runningTool: 'bash' }, glyphs)).toBe('Running bash');
+    expect(resolveActivityLabel(base, glyphs)).toMatch(new RegExp(`${glyphs.ellipsis}$`));
+  });
+
+  it('spinnerLive=false draws the static marker and keeps the phrase rotating', () => {
+    const frameWith = (spinnerLive: boolean | undefined, elapsedMs: number): string => {
+      const view = render(
+        <ActivityLabel
+          startedAt={STARTED}
+          elapsedMs={elapsedMs}
+          reducedMotion={false}
+          spinnerLive={spinnerLive}
+          theme={getTheme('cool', RICH)}
+          caps={RICH}
+        />,
+      );
+      const frame = stripAnsi(view.lastFrame() ?? '');
+      view.unmount();
+      return frame;
+    };
+    expect(frameWith(true, 0)).toMatch(/[⠀-⣿]/);
+    expect(frameWith(undefined, 0)).toMatch(/[⠀-⣿]/); // default is live
+    expect(frameWith(false, 0)).not.toMatch(/[⠀-⣿]/);
+    // Wording still follows the raw flag: a still icon must not freeze the phrase.
+    const early = frameWith(false, 0);
+    const later = Array.from({ length: 40 }, (_, i) => frameWith(false, (i + 1) * 5_000));
+    expect(later.some((frame) => frame !== early)).toBe(true);
+  });
+
+  it('ActivityLine output equals the label with a one-space indent', () => {
+    const line = frameOf(RICH, true, 0, 'bash');
+    expect(line).toBe(` ${pickGlyphs(RICH).spinnerStill} Running bash`);
   });
 });

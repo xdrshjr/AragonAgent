@@ -162,7 +162,7 @@ describe('the estimate matches the rendered row count over 14 shapes', () => {
           thinkingVisible: false,
           reducedMotion: true,
           density: 'compact',
-          mode: 'fullscreen',
+
           theme: THEME,
           caps: CAPS,
           windowSize: 20_000,
