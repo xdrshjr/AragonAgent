@@ -29,8 +29,8 @@
 - Language: TypeScript
 
 ## Index Settings
-- Generated: 2026-10-06
-- Previously Generated: 2026-08-17
+- Generated: 2026-10-07
+- Previously Generated: 2026-10-06
 - Project Root: M:\takoAI\JRAgentMesh\aragon-agent-core
 - Index Version: 1.0
 - Environments Configured: No
@@ -70,3 +70,14 @@ the frame differ and the lazy `/perf` scrollbar getter. New logic lives in
 `ui/run-status-row.ts`, `ui/frame-differ.ts` and `commands/perf.ts`, which keep the default
 thresholds. Reason: the change only moves one existing row and one escape sequence, and a
 wholesale split of these historical files would widen the regression surface.
+
+## TUI 输入、复制与队列终审的历史文件例外
+
+2026-10-07，以 `50de29d0c` 为基线，`packages/cli/src/` 下 `ui/App.tsx`
+2647 行、`agent/controller.ts` 2078 行、`agent/reducer.ts` 2091 行、
+`commands/builtins.ts` 1385 行。本功能仅允许分别净增 40、10、0、20 行，
+用于输入接管、消息 ID 回执和会话切换的既有入口接线；不增加新的大文件。
+这些历史函数的既有尺寸和复杂度保留，避免终审时全面拆分造成额外回归。
+输入事务、队列全文补全、固定行格式化、会话边界验证均独立到小模块，
+新增算法函数仍执行默认阈值。验收与实际行数记录见
+`docs/plans/tui-input-interaction-hardening/code-review.md`。

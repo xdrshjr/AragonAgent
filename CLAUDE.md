@@ -3,7 +3,7 @@
 This project has a pre-generated index for quick codebase understanding.
 
 - **Location:** `.claude-index/index.md`
-- **Last Updated:** 2026-10-06
+- **Last Updated:** 2026-10-07
 - **Contents:** Project overview, feature map, file index, exported symbols, module dependencies
 
 **Usage:** Read `.claude-index/index.md` to quickly understand the project structure before making changes. The index provides a navigation map of the codebase without needing to explore every file.
@@ -23,7 +23,7 @@ This project has a pre-generated index for quick codebase understanding.
     - Placeholders: 1000 60
       5 10 100
       4 TypeScript - TypeScript: Prefer `interface` over `type` for public APIs.
-    - At runtime the skill must ensure no template placeholder leaks into
+    - At runtime the skill must ensure no `{{...}}` placeholder leaks into
       the rendered output. Numeric character counting at runtime is NOT
       required.
 -->

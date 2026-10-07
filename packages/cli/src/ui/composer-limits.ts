@@ -37,16 +37,13 @@ const DRAFT_TIER_MIN_ROWS = 20;
 /**
  * Ceiling on the composer's DRAFT rows at a given terminal height.
  *
- * Non-decreasing in `terminalRows`. Returning `Infinity` reduces the whole
- * height-bound layer to the rung below it (section 12, S4), which is what makes
- * that stage revertible on its own.
+ * Non-decreasing in `terminalRows`, with one quarter of the terminal available
+ * to the draft and an absolute six-row ceiling shared by rendering and budgets.
  */
 export function draftMaxRows(terminalRows: number): number {
   if (!Number.isFinite(terminalRows)) return 3;
-  if (terminalRows >= 30) return 10;
-  if (terminalRows >= DRAFT_TIER_MIN_ROWS) return 6;
-  return 3;
+  return Math.max(1, Math.min(6, Math.floor(terminalRows / 4)));
 }
 
-/** The terminal height at which `draftMaxRows` steps from 3 to 6. Pinned by test. */
+/** Compatibility export for the shared hint visibility threshold. */
 export const DRAFT_MAX_ROWS_HINT_TIER = DRAFT_TIER_MIN_ROWS;

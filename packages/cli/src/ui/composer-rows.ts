@@ -19,7 +19,7 @@
  * mapping the caret depends on impossible to state, let alone compute.
  */
 
-import stringWidth from 'string-width';
+import { buildEditorVisualMap, graphemes, graphemeWidth } from './editor-navigation.js';
 import { tokenSpans } from './paste-tokens.js';
 
 export interface ComposerSegment {
@@ -52,61 +52,9 @@ export interface ComposerLayoutInput {
   readonly active: boolean;
 }
 
-/**
- * Columns a TAB advances to.
- *
- * TABS ARE EXPANDED TO SPACES FOR DISPLAY ONLY -- the buffer keeps the tab, so
- * the model receives exactly what was pasted. The alternative is to emit the raw
- * tab and let the terminal expand it, which puts the terminal's tab stop (8) and
- * this module's column arithmetic in disagreement: the row would overflow its box
- * and the terminal would wrap it a second time, which is the corruption the whole
- * feature exists to remove.
- */
-const TAB_WIDTH = 4;
-
-/**
- * Display width of one code point.
- *
- * The ASCII fast path matters: `layoutComposer` runs on every keystroke and a
- * recalled prompt-history entry can be thousands of characters, so one
- * `string-width` call per character would be the cost this package spent
- * `tui-render-performance` removing.
- */
-function charWidth(ch: string): number {
-  const code = ch.codePointAt(0) ?? 0;
-  if (code >= 0x20 && code < 0x7f) return 1;
-  return stringWidth(ch);
-}
-
-/** Total display width of a run, using the same table the layout used. */
+/** Width of a displayed run, measured by complete graphemes. */
 export function displayWidth(text: string): number {
-  let w = 0;
-  for (const ch of text) w += charWidth(ch);
-  return w;
-}
-
-/** Normalize only the visual projection; the editor keeps its UTF-16 index. */
-function visualCursor(buffer: string, cursor: number): number {
-  let index = Math.max(0, Math.min(buffer.length, cursor));
-  const code = buffer.charCodeAt(index);
-  const previous = buffer.charCodeAt(index - 1);
-  if (code >= 0xdc00 && code <= 0xdfff && previous >= 0xd800 && previous <= 0xdbff) index -= 1;
-  if (index === buffer.length || buffer[index] === '\n') return index;
-  const ch = String.fromCodePoint(buffer.codePointAt(index)!);
-  if (ch === '\t' || charWidth(ch) > 0) return index;
-
-  const start = buffer.lastIndexOf('\n', index - 1) + 1;
-  let nearest = -1;
-  let i = start;
-  while (i < buffer.length && buffer[i] !== '\n') {
-    const point = String.fromCodePoint(buffer.codePointAt(i)!);
-    if (point === '\t' || charWidth(point) > 0) {
-      if (i > index) return nearest >= 0 ? nearest : i;
-      nearest = i;
-    }
-    i += point.length;
-  }
-  return nearest >= 0 ? nearest : i;
+  return graphemes(text).reduce((width, part) => width + graphemeWidth(part.text), 0);
 }
 
 /**
@@ -120,88 +68,26 @@ function visualCursor(buffer: string, cursor: number): number {
  */
 export function layoutComposer(input: ComposerLayoutInput): ComposerLayout {
   const { buffer, active } = input;
-  const cursor = visualCursor(buffer, input.cursor);
-  const cols = Math.max(1, Math.floor(input.cols));
   const maxRows = input.maxRows >= 1 ? Math.floor(input.maxRows) : 1;
-
+  const map = buildEditorVisualMap(input);
+  const cursorRowAbs = active ? map.cursor.row : -1;
+  const cursorCol = map.cursor.column;
   const spans = tokenSpans(buffer);
   let spanIndex = 0;
-  /** Monotonic in `index`, which is why the pointer is safe. */
-  const kindAt = (index: number): 'text' | 'token' => {
-    while (spanIndex < spans.length && spans[spanIndex]!.end <= index) spanIndex += 1;
-    const span = spans[spanIndex];
-    return span && index >= span.start && index < span.end ? 'token' : 'text';
-  };
-
-  const rows: ComposerRow[] = [];
-  let segments: ComposerSegment[] = [];
-  let col = 0;
-  let cursorRowAbs = -1;
-  let cursorCol = 0;
-
-  const breakRow = (): void => {
-    rows.push({ segments });
-    segments = [];
-    col = 0;
-  };
-  const append = (text: string, width: number, kind: 'text' | 'token'): void => {
-    const last = segments[segments.length - 1];
-    if (last && last.kind === kind) segments[segments.length - 1] = { text: last.text + text, kind };
-    else segments.push({ text, kind });
-    col += width;
-  };
-  const ensureRoom = (width: number): void => {
-    if (col > 0 && col + width > cols) breakRow();
-  };
-
-  const length = buffer.length;
-  let i = 0;
-  while (i <= length) {
-    const atCursor = active && i === cursor && cursorRowAbs === -1;
-    if (i === length) {
-      if (atCursor) {
-        ensureRoom(1);
-        cursorRowAbs = rows.length;
-        cursorCol = col;
-      }
-      break;
+  const rows: ComposerRow[] = map.rows.map((cells) => {
+    const segments: ComposerSegment[] = [];
+    for (const cell of cells) {
+      while (spanIndex < spans.length && spans[spanIndex]!.end <= cell.index) spanIndex += 1;
+      const span = spans[spanIndex];
+      const kind = span && cell.index >= span.start && cell.index < span.end ? 'token' : 'text';
+      const last = segments[segments.length - 1];
+      if (last && last.kind === kind) segments[segments.length - 1] = {
+        text: last.text + cell.text, kind,
+      };
+      else segments.push({ text: cell.text, kind });
     }
-    const ch = String.fromCodePoint(buffer.codePointAt(i)!);
-    if (ch === '\n') {
-      if (atCursor) {
-        ensureRoom(1);
-        cursorRowAbs = rows.length;
-        cursorCol = col;
-      }
-      breakRow();
-      i += 1;
-      continue;
-    }
-    const kind = kindAt(i);
-    if (ch === '\t') {
-      let advance = TAB_WIDTH - (col % TAB_WIDTH);
-      if (col > 0 && col + advance > cols) {
-        breakRow();
-        advance = TAB_WIDTH;
-      }
-      if (atCursor) {
-        cursorRowAbs = rows.length;
-        cursorCol = col;
-      }
-      append(' '.repeat(advance), advance, kind);
-      i += 1;
-      continue;
-    }
-    const width = charWidth(ch);
-    ensureRoom(width);
-    if (atCursor) {
-      cursorRowAbs = rows.length;
-      cursorCol = col;
-    }
-    append(ch, width, kind);
-    i += ch.length;
-  }
-  rows.push({ segments });
+    return { segments };
+  });
 
   const totalRows = rows.length;
   const cap = Math.max(1, Math.min(maxRows, totalRows));
@@ -252,8 +138,8 @@ export function splitRowAtColumn(row: ComposerRow, column: number): RowSplit {
   const cells: ComposerSegment[] = [];
   let leading = '';
   for (const segment of row.segments) {
-    for (const ch of segment.text) {
-      if (charWidth(ch) === 0) {
+    for (const { text: ch } of graphemes(segment.text)) {
+      if (graphemeWidth(ch) === 0) {
         const last = cells[cells.length - 1];
         if (last) cells[cells.length - 1] = { ...last, text: last.text + ch };
         else leading += ch;

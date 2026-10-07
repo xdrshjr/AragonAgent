@@ -1495,6 +1495,7 @@ export function parseThresholdInput(raw: string): number | null {
 // ---------------------------------------------------------------------------
 
 export interface PersistedConfig {
+  modelProfiles?: import('./model-profiles.js').ModelProfilesConfig;
   version: number;
   provider: string;
   model: string;
@@ -1754,6 +1755,11 @@ export function stripLegacyStateKeys<T extends object>(raw: T): T {
 // ---------------------------------------------------------------------------
 
 export interface CliConfig {
+  /** A committed model snapshot failed to apply; no further requests may start. */
+  modelSettingsRestartRequired?: boolean;
+  modelProfiles?: import('./model-profiles.js').ModelProfilesConfig;
+  modelProfileState?: import('./model-profiles.js').ModelProfilesRuntime;
+  apiKeyOverrideTarget?: { provider: string; baseUrl: string | null };
   provider: string;
   model: string;
   baseUrl?: string;

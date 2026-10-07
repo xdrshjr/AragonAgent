@@ -10,7 +10,6 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 import type { MouseEvent } from '../input/mouse-events.js';
 import type { MouseSource } from '../input/stdin-filter.js';
 import { createSelectionController } from '../ui/selection/selection-controller.js';
-import type { CopyVia } from '../ui/clipboard.js';
 import { getTheme } from '../ui/theme.js';
 
 const CAPS = { colorLevel: 0, unicode: true } as const;
@@ -20,8 +19,6 @@ const FRAME = ['first line here', 'second line here', 'third line here', 'fourth
 interface Harness {
   emit(event: MouseEvent): void;
   controller: ReturnType<typeof createSelectionController>;
-  copied: string[];
-  toasts: { via: CopyVia; lines: number; chars: number }[];
   repaints: number;
   redraws: number;
   paint(): string[];
@@ -37,8 +34,6 @@ function harness(over: { holdMaxMs?: number; repaintOk?: boolean; selectable?: (
     },
   };
   const state = {
-    copied: [] as string[],
-    toasts: [] as { via: CopyVia; lines: number; chars: number }[],
     repaints: 0,
     redraws: 0,
     holds: [] as boolean[],
@@ -52,11 +47,6 @@ function harness(over: { holdMaxMs?: number; repaintOk?: boolean; selectable?: (
     requestRedraw: () => {
       state.redraws += 1;
     },
-    copy: (text) => {
-      state.copied.push(text);
-      return 'osc52';
-    },
-    onCopied: (via, lines, chars) => state.toasts.push({ via, lines, chars }),
     theme: () => THEME,
     caps: CAPS,
     cols: () => 40,
@@ -73,12 +63,6 @@ function harness(over: { holdMaxMs?: number; repaintOk?: boolean; selectable?: (
     },
     controller,
     paint: () => controller.decorate(FRAME),
-    get copied() {
-      return state.copied;
-    },
-    get toasts() {
-      return state.toasts;
-    },
     get repaints() {
       return state.repaints;
     },
@@ -133,35 +117,120 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe('press → drag → release', () => {
-  it('T-10: copies exactly the dragged text, once', () => {
+describe('settled selection validity', () => {
+  function settle(h: Harness): void {
+    h.emit(press(1, 1));
+    h.emit(drag(6, 1));
+    h.emit(release(6, 1));
+  }
+
+  it('invalidates changed selected cells before notifying a repainting listener', async () => {
+    const h = harness();
+    settle(h);
+    const frame = ['other line here', ...FRAME.slice(1)];
+    const notify = vi.fn(() => h.controller.decorate(frame));
+    h.controller.onHoldChange(notify);
+    expect(h.controller.decorate(frame)).toEqual(frame);
+    expect(h.controller.hasPendingSelection()).toBe(false);
+    expect(notify).not.toHaveBeenCalled();
+    await Promise.resolve();
+    expect(notify).toHaveBeenCalledExactlyOnceWith(false);
+    expect(h.holds).toEqual([true, false]);
+    h.controller.dispose();
+  });
+
+  it('preserves selection when only color or cells outside it change', () => {
+    const h = harness();
+    settle(h);
+    h.controller.decorate(['\x1b[31mfirst\x1b[0m changed', ...FRAME.slice(1)]);
+    expect(h.controller.takeSelection()?.text).toBe('first');
+    h.controller.dispose();
+  });
+
+  it('clears a settled selection on a wheel event even without viewport movement', () => {
+    const h = harness();
+    settle(h);
+    h.emit(wheel());
+    expect(h.controller.hasPendingSelection()).toBe(false);
+    expect(h.holds).toEqual([true, false]);
+    h.controller.dispose();
+  });
+
+  it('does not expose the old selection while a new drag is in progress', () => {
+    const h = harness();
+    settle(h);
+    h.emit(press(8, 2));
+    expect(h.controller.hasPendingSelection()).toBe(false);
+    h.controller.dispose();
+  });
+
+  it('watchdog removes both highlight and hold', () => {
+    vi.useFakeTimers();
+    const h = harness({ holdMaxMs: 100 });
+    h.emit(press(1, 1));
+    h.emit(drag(6, 1));
+    vi.advanceTimersByTime(100);
+    expect(h.paint()).toEqual(FRAME);
+    expect(h.controller.hasPendingSelection()).toBe(false);
+    expect(h.holds).toEqual([true, false]);
+    expect(vi.getTimerCount()).toBe(0);
+    h.controller.dispose();
+  });
+
+  it.each(['reselect', 'dispose'])('does not deliver obsolete release after %s', async (action) => {
+    const h = harness();
+    settle(h);
+    const notify = vi.fn();
+    h.controller.onHoldChange(notify);
+    h.controller.decorate(['other', ...FRAME.slice(1)]);
+    if (action === 'reselect') h.emit(press(1, 2));
+    else h.controller.dispose();
+    await Promise.resolve();
+    expect(notify).not.toHaveBeenCalled();
+    h.controller.dispose();
+  });
+});
+
+describe('press → drag → release (tui-shift-enter-copy-queue 4.2)', () => {
+  it('T-10: settles exactly the dragged text; Ctrl+C takes it once', () => {
     vi.useFakeTimers();
     const h = harness();
     h.emit(press(7, 1)); // row 0, col 6
     h.emit(drag(11, 1)); // row 0, col 10
     vi.advanceTimersByTime(20); // flush the 16 ms motion coalescer
     h.emit(release(11, 1));
-    expect(h.copied).toEqual(['line']);
-    expect(h.toasts).toEqual([{ via: 'osc52', lines: 1, chars: 4 }]);
+    // The release copies NOTHING any more: the highlight is a PROMISE that
+    // waits for the commit key, not a receipt for a copy that happened.
+    expect(h.controller.hasPendingSelection()).toBe(true);
+    expect(h.paint()).not.toEqual(FRAME);
+    expect(h.controller.takeSelection()).toEqual({ text: 'line', lines: 1 });
+    // Consumed exactly once, and the take cleared highlight AND hold.
+    expect(h.controller.takeSelection()).toBeNull();
+    expect(h.controller.hasPendingSelection()).toBe(false);
+    expect(h.paint()).toEqual(FRAME);
     h.controller.dispose();
   });
 
-  it('copies a multi-row selection with linear semantics', () => {
+  it('takes a multi-row selection with linear semantics and its line count', () => {
     vi.useFakeTimers();
     const h = harness();
     h.emit(press(7, 1)); // row 0, col 6
     h.emit(drag(6, 2)); // row 1, col 5
     vi.advanceTimersByTime(20);
     h.emit(release(6, 2));
-    expect(h.copied).toEqual(['line here\nsecon']);
+    expect(h.controller.takeSelection()).toEqual({
+      text: 'line here\nsecon',
+      lines: 2,
+    });
     h.controller.dispose();
   });
 
-  it('holds the viewport for the duration of the drag and lets go on release', () => {
+  it('holds the viewport through the drag AND the pending state; the take releases it', () => {
     // S2's `hold` is what makes a screen-anchored selection HONEST: the rows
     // under the pointer freeze, so the highlight the user sees is the text they
-    // get (D-7). Shipping S3 without it would produce a selection that slides out
-    // from under the pointer during a streaming run.
+    // get (D-7). Since tui-shift-enter-copy-queue (4.2.3) the freeze OUTLIVES
+    // the release -- streaming output must not push the promised rows away
+    // between mouse-up and Ctrl+C -- and the take (or clear) is the exit.
     vi.useFakeTimers();
     const h = harness();
     h.emit(press(7, 1));
@@ -169,6 +238,8 @@ describe('press → drag → release', () => {
     h.emit(drag(11, 1));
     vi.advanceTimersByTime(20);
     h.emit(release(11, 1));
+    expect(h.holds).toEqual([true]); // STILL held after mouse-up
+    h.controller.takeSelection();
     expect(h.holds).toEqual([true, false]);
     h.controller.dispose();
   });
@@ -189,13 +260,13 @@ describe('press → drag → release', () => {
 });
 
 describe('the cases that must NOT copy', () => {
-  it('T-11: a plain click copies nothing and leaves no one-cell highlight', () => {
+  it('T-11: a plain click settles nothing and leaves no one-cell highlight', () => {
     vi.useFakeTimers();
     const h = harness();
     h.emit(press(7, 1));
     h.emit(release(7, 1));
-    expect(h.copied).toEqual([]);
-    expect(h.toasts).toEqual([]);
+    expect(h.controller.hasPendingSelection()).toBe(false);
+    expect(h.controller.takeSelection()).toBeNull();
     // Nothing painted: `decorate` is the identity again.
     expect(h.paint()).toEqual(FRAME);
     h.controller.dispose();
@@ -208,7 +279,7 @@ describe('the cases that must NOT copy', () => {
     h.emit(drag(11, 1));
     vi.advanceTimersByTime(20);
     h.emit(release(11, 1));
-    expect(h.copied).toEqual([]);
+    expect(h.controller.hasPendingSelection()).toBe(false);
     expect(h.holds).toEqual([]);
     expect(h.paint()).toEqual(FRAME);
     h.controller.dispose();
@@ -271,7 +342,7 @@ describe('I-9 — a highlight must never outlive the rows it sits on', () => {
     expect(h.holds).toEqual([true, false]);
     expect(h.paint()).toEqual(FRAME);
     h.emit(release(11, 1));
-    expect(h.copied).toEqual([]);
+    expect(h.controller.hasPendingSelection()).toBe(false);
     h.controller.dispose();
   });
 
@@ -288,8 +359,45 @@ describe('I-9 — a highlight must never outlive the rows it sits on', () => {
   });
 });
 
+describe('the settled state exits (tui-shift-enter-copy-queue 4.2.3)', () => {
+  function settle(): ReturnType<typeof harness> {
+    vi.useFakeTimers();
+    const h = harness();
+    h.emit(press(7, 1));
+    h.emit(drag(11, 1));
+    vi.advanceTimersByTime(20);
+    h.emit(release(11, 1));
+    expect(h.controller.hasPendingSelection()).toBe(true);
+    return h;
+  }
+
+  it('`clear()` releases the hold and drops the highlight', () => {
+    const h = settle();
+    expect(h.holds).toEqual([true]);
+    h.controller.clear();
+    expect(h.holds).toEqual([true, false]);
+    expect(h.paint()).toEqual(FRAME);
+    expect(h.controller.takeSelection()).toBeNull();
+    h.controller.dispose();
+  });
+
+  it('`setEnabled(false)` releases the hold too (overlay opens)', () => {
+    const h = settle();
+    h.controller.setEnabled(false);
+    expect(h.holds).toEqual([true, false]);
+    expect(h.paint()).toEqual(FRAME);
+    h.controller.dispose();
+  });
+
+  it('`dispose()` releases the hold even with a selection pending', () => {
+    const h = settle();
+    h.controller.dispose();
+    expect(h.holds).toEqual([true, false]);
+  });
+});
+
 describe('T-29 — the lost-release watchdog (I-11)', () => {
-  it('releases `hold` after `holdMaxMs` of stillness and KEEPS the selection', () => {
+  it('releases hold and removes the stale highlight after holdMaxMs of stillness', () => {
     // ═══ THE FREEZE THIS CATCHES IS SILENT AND PERMANENT ═══
     //
     // Three ways to never get a release: the button comes up while the terminal
@@ -308,9 +416,9 @@ describe('T-29 — the lost-release watchdog (I-11)', () => {
 
     vi.advanceTimersByTime(30_001);
     expect(h.holds).toEqual([true, false]);
-    // The selection SURVIVES: the user may still want to copy it, and throwing it
-    // away would turn a terminal quirk into lost work.
-    expect(h.paint()).toEqual(painted);
+    // A lost release cannot leave a highlight which Ctrl+C cannot consume.
+    expect(h.controller.hasPendingSelection()).toBe(false);
+    expect(h.paint()).toEqual(FRAME);
     h.controller.dispose();
   });
 
@@ -387,8 +495,9 @@ describe('decorate', () => {
     h.emit(drag(1, 1));
     vi.advanceTimersByTime(20);
     h.emit(release(1, 1));
-    expect(h.copied).toHaveLength(1);
-    expect(h.copied[0]).toContain('first line here');
+    const payload = h.controller.takeSelection();
+    expect(payload).not.toBeNull();
+    expect(payload?.text).toContain('first line here');
     h.controller.dispose();
   });
 });

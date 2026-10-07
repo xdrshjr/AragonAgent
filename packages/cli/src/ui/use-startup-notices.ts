@@ -29,8 +29,12 @@ import { getLogger } from '../logging/logger.js';
  *
  * `1` = the first text that names DRAG-SELECT and `/mouse`. `0` = the 0.6.2 text
  * that taught the Shift bypass, recorded back when this was a boolean.
+ * `2` = the Ctrl+C-to-copy text (tui-shift-enter-copy-queue 4.4): releasing
+ * no longer copies, and every user who learned the old gesture -- which is
+ * every user who has a version recorded at all -- has to be told the new
+ * one, once.
  */
-export const MOUSE_NOTICE_VERSION = 1;
+export const MOUSE_NOTICE_VERSION = 2;
 
 /**
  * The one-shot mouse notice (tui-selection-and-scroll-follow §5.2 row 29).
@@ -54,8 +58,8 @@ function mouseNoticeText(selectEnabled: boolean): string {
     );
   }
   return (
-    'Mouse wheel scrolls the transcript, and dragging selects text - releasing ' +
-    'copies it. /mouse off hands the mouse back to your terminal for this session.'
+    'Mouse wheel scrolls the transcript; drag to select, then Ctrl+C to copy. ' +
+    '/mouse off hands the mouse back to your terminal for this session.'
   );
 }
 

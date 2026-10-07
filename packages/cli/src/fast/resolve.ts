@@ -19,6 +19,7 @@
  * longer uses.
  */
 
+import type { ModelRole } from '../config/model-profiles.js';
 import type { ModelRef } from '@aragon-agent/core';
 import { isAdapterProvider, type CliConfig } from '../config/schema.js';
 import type { FastTier } from './types.js';
@@ -34,7 +35,7 @@ import type { FastTier } from './types.js';
  */
 export function resolveFastTier(
   config: CliConfig,
-  hasKey: (providerId: string) => boolean,
+  hasKey: (providerId: string, role?: ModelRole) => boolean,
 ): FastTier {
   const fast = config.fast;
 
@@ -55,7 +56,7 @@ export function resolveFastTier(
   // 4 / 5. Both are reported separately because they send the user to two
   //        different settings.
   if (!isAdapterProvider(provider)) return { ok: false, reason: 'no_adapter' };
-  if (!hasKey(provider)) return { ok: false, reason: 'no_key' };
+  if (!hasKey(provider, 'fast')) return { ok: false, reason: 'no_key' };
 
   // 6. A fast tier on the SAME provider inherits the session's base URL: a user
   //    pointing the CLI at a gateway means both models, not one. A fast tier on
@@ -65,6 +66,8 @@ export function resolveFastTier(
   const baseUrl =
     explicitBaseUrl.length > 0
       ? explicitBaseUrl
+      : config.modelProfiles?.fastId && !config.modelProfileState?.fast.invalid
+      ? undefined
       : provider === config.provider
       ? config.baseUrl
       : undefined;

@@ -19,11 +19,15 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
+import { PassThrough } from 'node:stream';
+import { fileURLToPath } from 'node:url';
+import { render as renderInk } from 'ink';
 import { cleanup, render } from 'ink-testing-library';
 import { PromptInput } from '../ui/PromptInput.js';
 import { getTheme } from '../ui/theme.js';
 import { pickGlyphs } from '../ui/glyphs.js';
-import { PASTE_CLOSE, PASTE_OPEN } from '../input/limits.js';
+import { ENTER_NEWLINE_FRAME, PASTE_CLOSE, PASTE_OPEN, PASTE_MAX_BYTES } from '../input/limits.js';
+import { createStdinFilter } from '../input/stdin-filter.js';
 import stringWidth from 'string-width';
 import stripAnsi from 'strip-ansi';
 import type { TermCapabilities } from '../ui/capabilities.js';
@@ -53,10 +57,168 @@ function mount() {
       cwd={process.cwd()}
       theme={THEME}
       caps={CAPS}
-      onSubmit={vi.fn()}
+      onSubmit={vi.fn((_text: string) => ({ accepted: true }))}
     />,
   );
 }
+
+describe('visual navigation and completion context', () => {
+  const props = { isActive: true, running: false, history: ['old'],
+    commands: [{ name: 'help', description: 'Help' }], cwd: process.cwd(),
+    theme: THEME, caps: CAPS };
+
+  it('moves across soft wraps using actual content columns in one commit', async () => {
+    const onSubmit = vi.fn(() => ({ accepted: true }));
+    const view = render(<CountedPromptInput {...props} cols={16} onSubmit={onSubmit} />);
+    await delay(10);
+    view.stdin.write('abcdefghijklm'); await delay(10);
+    const before = renderCount;
+    view.stdin.write('\x1b[A'); await delay(10);
+    expect(renderCount - before).toBe(1);
+    view.stdin.write('!'); await delay(10);
+    view.stdin.write('\r'); await delay(10);
+    expect(onSubmit).toHaveBeenCalledWith('abc!defghijklm');
+  });
+
+  it('preserves the target visual column across a short logical line', async () => {
+    const onSubmit = vi.fn(() => ({ accepted: true }));
+    const view = render(<PromptInput {...props} onSubmit={onSubmit} />);
+    await delay(10);
+    view.stdin.write(`${PASTE_OPEN}abcdef\nx\nabcdef${PASTE_CLOSE}`); await delay(10);
+    view.stdin.write('\x1b[A'); await delay(10);
+    view.stdin.write('\x1b[A'); await delay(10);
+    view.stdin.write('!'); await delay(10);
+    view.stdin.write('\r'); await delay(10);
+    expect(onSubmit).toHaveBeenCalledWith('abcdef!\nx\nabcdef');
+  });
+
+  it('reports only visible completion kind transitions, including budget loss', async () => {
+    const onCompletionContextChange = vi.fn();
+    const onSubmit = vi.fn(() => ({ accepted: true }));
+    const view = render(<PromptInput {...props} onSubmit={onSubmit}
+      onCompletionContextChange={onCompletionContextChange} />);
+    await delay(10);
+    expect(onCompletionContextChange).toHaveBeenLastCalledWith('none');
+    view.stdin.write('/'); await delay(10);
+    expect(onCompletionContextChange).toHaveBeenLastCalledWith('slash');
+    const calls = onCompletionContextChange.mock.calls.length;
+    view.stdin.write('\x1b[B'); await delay(10);
+    expect(onCompletionContextChange).toHaveBeenCalledTimes(calls);
+    view.rerender(<PromptInput {...props} onSubmit={onSubmit} popupMaxHeight={0}
+      onCompletionContextChange={onCompletionContextChange} />);
+    await delay(10);
+    expect(onCompletionContextChange).toHaveBeenLastCalledWith('none');
+  });
+
+  it('does not re-report the same completion for a changed callback identity', async () => {
+    const report = vi.fn();
+    const onSubmit = vi.fn(() => ({ accepted: true }));
+    const view = render(<PromptInput {...props} onSubmit={onSubmit}
+      onCompletionContextChange={(value) => report(value)} />);
+    await delay(10);
+    view.rerender(<PromptInput {...props} onSubmit={onSubmit}
+      onCompletionContextChange={(value) => report(value)} />);
+    await delay(10);
+    expect(report).toHaveBeenCalledExactlyOnceWith('none');
+  });
+
+  it('reports file completion and clears it while an overlay owns focus', async () => {
+    const onCompletionContextChange = vi.fn();
+    const onSubmit = vi.fn(() => ({ accepted: true }));
+    const cwd = fileURLToPath(new URL('../input/', import.meta.url));
+    const view = render(<PromptInput {...props} cwd={cwd} onSubmit={onSubmit}
+      onCompletionContextChange={onCompletionContextChange} />);
+    await delay(10);
+    view.stdin.write('@keymap'); await delay(350);
+    expect(onCompletionContextChange).toHaveBeenLastCalledWith('file');
+    view.rerender(<PromptInput {...props} cwd={cwd} isActive={false} onSubmit={onSubmit}
+      onCompletionContextChange={onCompletionContextChange} />);
+    await delay(10);
+    expect(onCompletionContextChange).toHaveBeenLastCalledWith('none');
+    view.rerender(<PromptInput {...props} cwd={cwd} onSubmit={onSubmit}
+      onCompletionContextChange={onCompletionContextChange} />);
+    await delay(10);
+    expect(onCompletionContextChange).toHaveBeenLastCalledWith('file');
+    view.stdin.write('\x1b'); await delay(10);
+    expect(onCompletionContextChange).toHaveBeenLastCalledWith('none');
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it.each(['draft', `a${ENTER_NEWLINE_FRAME}b`])('preserves new draft %j at both edges', async (draft) => {
+    const onSubmit = vi.fn(() => ({ accepted: true }));
+    const view = render(<PromptInput {...props} onSubmit={onSubmit} />);
+    await delay(10);
+    view.stdin.write(draft); await delay(10);
+    for (const key of ['\x1b[A', '\x1b[A', '\x1b[A', '\x1b[B', '\x1b[B', '\x1b[B']) {
+      view.stdin.write(key); await delay(5);
+    }
+    view.stdin.write('\r'); await delay(10);
+    expect(onSubmit).toHaveBeenCalledWith(draft.replace(ENTER_NEWLINE_FRAME, '\n'));
+  });
+
+  it('navigates a recalled draft visually before continuing history and exits history on edit', async () => {
+    const onSubmit = vi.fn(() => ({ accepted: true }));
+    const view = render(<PromptInput {...props} history={['old', 'abc\nx']}
+      onSubmit={onSubmit} />);
+    await delay(10);
+    for (const key of ['\x1b[A', '\x1b[A', '!', '\x1b[A', '\r']) {
+      view.stdin.write(key); await delay(10);
+    }
+    expect(onSubmit).toHaveBeenCalledWith('a!bc\nx');
+  });
+
+  it('drops the preferred visual column after resize', async () => {
+    const onSubmit = vi.fn(() => ({ accepted: true }));
+    const view = render(<PromptInput {...props} cols={30} onSubmit={onSubmit} />);
+    await delay(10);
+    view.stdin.write(`${PASTE_OPEN}abcdef\nx\nabcdef${PASTE_CLOSE}`); await delay(10);
+    view.stdin.write('\x1b[A'); await delay(10);
+    view.rerender(<PromptInput {...props} cols={31} onSubmit={onSubmit} />);
+    await delay(10);
+    for (const key of ['\x1b[A', '!', '\r']) {
+      view.stdin.write(key); await delay(10);
+    }
+    expect(onSubmit).toHaveBeenCalledWith('a!bcdef\nx\nabcdef');
+  });
+
+  it('retains conservative backward Delete when the filter capability is absent', async () => {
+    const onSubmit = vi.fn(() => ({ accepted: true }));
+    const view = render(<PromptInput {...props} onSubmit={onSubmit} />);
+    await delay(10);
+    for (const key of ['abc', '\x1b[D', '\x1b[3~', '\r']) {
+      view.stdin.write(key); await delay(10);
+    }
+    expect(onSubmit).toHaveBeenCalledWith('ac');
+  });
+
+  it.each([
+    ['\x7f', 'ac'], ['\x08', 'ac'], ['\x1b[3~', 'ab'],
+    ['\x1b\x7f', 'c'],
+  ])('distinguishes deletion through real Ink for %j', async (key, expected) => {
+    const source = Object.assign(new PassThrough(), {
+      isTTY: true, setRawMode() { return this; }, ref() { return this; },
+      unref() { return this; },
+    });
+    const filter = createStdinFilter(source as unknown as NodeJS.ReadStream,
+      { mouse: false, paste: false });
+    const output = Object.assign(new PassThrough(), { columns: 80, rows: 24, isTTY: true });
+    output.resume();
+    const onSubmit = vi.fn(() => ({ accepted: true }));
+    const app = renderInk(<PromptInput {...props} deleteDisambiguated onSubmit={onSubmit} />, {
+      stdin: filter.stdin, stdout: output as unknown as NodeJS.WriteStream,
+      stderr: output as unknown as NodeJS.WriteStream, exitOnCtrlC: false, patchConsole: false,
+    });
+    try {
+      await delay(20);
+      for (const input of ['abc', '\x1b[D', key, '\r']) {
+        source.write(input); await delay(20);
+      }
+      expect(onSubmit).toHaveBeenCalledWith(expected);
+    } finally {
+      app.unmount(); app.cleanup(); filter.dispose(); source.destroy(); output.destroy();
+    }
+  });
+});
 
 describe('PromptInput commit count (AC-4)', () => {
   it('renders exactly once per printable character', async () => {
@@ -108,12 +270,114 @@ describe('PromptInput commit count (AC-4)', () => {
   });
 });
 
+  describe('newline intents through the mounted editor (tui-shift-enter-copy-queue 3.5)', () => {
+    const props = {
+      isActive: true, running: false, history: [],
+      commands: [{ name: 'help', description: 'Show help' }], cwd: process.cwd(),
+      theme: THEME, caps: { colorLevel: 3, unicode: true } as TermCapabilities,
+      onSubmit: vi.fn((_text: string) => ({ accepted: true })),
+    };
+
+    it('a Shift+Enter frame inserts a newline and does NOT submit', async () => {
+      const onSubmit = vi.fn((_text: string) => ({ accepted: true }));
+      const view = render(<PromptInput {...props} onSubmit={onSubmit} />);
+      await delay(10);
+      view.stdin.write('ab');
+      await delay(10);
+      view.stdin.write(ENTER_NEWLINE_FRAME);
+      await delay(10);
+      view.stdin.write('cd');
+      await delay(10);
+      // Two DRAFT rows on screen: the frame became a real line break, and
+      // Enter (submit) was never triggered by it.
+      const rows = view.lastFrame()!.split('\n');
+      const abRow = rows.findIndex((r) => r.includes('ab'));
+      const cdRow = rows.findIndex((r) => r.includes('cd'));
+      expect(abRow).toBeGreaterThan(-1);
+      expect(cdRow).toBeGreaterThan(abRow);
+      expect(onSubmit).not.toHaveBeenCalled();
+    });
+
+    it('a frame merged into one chunk with keystrokes keeps byte order', async () => {
+      const view = render(<PromptInput {...props} />);
+      await delay(10);
+      view.stdin.write(`a${ENTER_NEWLINE_FRAME}b`);
+      await delay(10);
+      // 'a' and 'b' on separate rows, in that order.
+      const rows = view.lastFrame()!.split('\n');
+      const aRow = rows.findIndex((r) => r.includes('a'));
+      const bRow = rows.findIndex((r) => r.includes('b'));
+      expect(aRow).toBeGreaterThan(-1);
+      expect(bRow).toBeGreaterThan(aRow);
+    });
+
+    it('a paste frame and an enter frame in ONE chunk keep both, in byte order', async () => {
+      // THE ROUTING BUG THIS PINS: Ink drains its buffer in one `read()`,
+      // so the filter's write for a paste and its write for a Shift+Enter
+      // arrive as ONE `input` carrying both frame families. The paste
+      // branch's `splitPasteFrames` strips the enter frame's NUL and
+      // inserts its letter as ordinary text -- a stray `n` and no
+      // newline; only `mergeWithPasteRuns` interleaves both families.
+      const onSubmit = vi.fn((_text: string) => ({ accepted: true }));
+      const view = render(<PromptInput {...props} onSubmit={onSubmit} />);
+      await delay(10);
+      view.stdin.write(`p${PASTE_OPEN}ast${PASTE_CLOSE}${ENTER_NEWLINE_FRAME}tail`);
+      await delay(10);
+      const rows = view.lastFrame()!.split('\n');
+      const pasteRow = rows.findIndex((r) => r.includes('past'));
+      const tailRow = rows.findIndex((r) => r.includes('tail'));
+      expect(pasteRow).toBeGreaterThan(-1);
+      expect(tailRow).toBeGreaterThan(pasteRow); // the newline landed between them
+      // The frame's letter never leaks as visible text.
+      expect(rows.some((r) => r.includes('ntail'))).toBe(false);
+      expect(onSubmit).not.toHaveBeenCalled();
+    });
+    it('a bare LF (Ctrl+J) is a newline too', async () => {
+      const onSubmit = vi.fn((_text: string) => ({ accepted: true }));
+      const view = render(<PromptInput {...props} onSubmit={onSubmit} />);
+      await delay(10);
+      view.stdin.write('x');
+      await delay(10);
+      view.stdin.write('\n');
+      await delay(10);
+      view.stdin.write('y');
+      await delay(10);
+      const rows = view.lastFrame()!.split('\n');
+      expect(rows.findIndex((r) => r.includes('x'))).toBeGreaterThan(-1);
+      expect(rows.findIndex((r) => r.includes('y'))).toBeGreaterThan(
+        rows.findIndex((r) => r.includes('x')),
+      );
+      expect(onSubmit).not.toHaveBeenCalled();
+    });
+
+    it('ONE frame chunk costs ONE render (the one-dispatch rule)', async () => {
+      renderCount = 0;
+      const view = render(
+        <CountedPromptInput
+          isActive
+          running={false}
+          history={[]}
+          commands={[]}
+          cwd={process.cwd()}
+          theme={THEME}
+          caps={CAPS}
+          onSubmit={vi.fn((_text: string) => ({ accepted: true }))}
+        />,
+      );
+      await delay(10);
+      const baseline = renderCount;
+      view.stdin.write(`a${ENTER_NEWLINE_FRAME}b`);
+      await delay(10);
+      expect(renderCount - baseline).toBe(1);
+    });
+  });
+
 describe('caret integration and escape ownership', () => {
   const props = {
     isActive: true, running: false, history: [],
     commands: [{ name: 'help', description: 'Show help' }], cwd: process.cwd(),
     theme: THEME, caps: { colorLevel: 0, unicode: true } as TermCapabilities,
-    onSubmit: vi.fn(),
+    onSubmit: vi.fn((_text: string) => ({ accepted: true })),
   };
 
   it('blinks the empty placeholder without parent work', async () => {
@@ -123,12 +387,12 @@ describe('caret integration and escape ownership', () => {
     const view = render(<CountedPromptInput {...props}
       onDraftChange={onDraftChange} onPopupRowsChange={onPopupRowsChange} />);
     await delay(10);
-    expect(view.lastFrame()).toContain('_end a message');
+    expect(view.lastFrame()).toContain('_\u5165\u4efb\u52a1\u6216\u95ee\u9898');
     const renders = renderCount;
     const draftCalls = onDraftChange.mock.calls.length;
     const popupCalls = onPopupRowsChange.mock.calls.length;
     await vi.advanceTimersByTimeAsync(500);
-    expect(view.lastFrame()).toContain('Send a message');
+    expect(view.lastFrame()).toContain('\u8f93\u5165\u4efb\u52a1\u6216\u95ee\u9898');
     await vi.advanceTimersByTimeAsync(1500);
     expect(renderCount).toBe(renders);
     expect(onDraftChange).toHaveBeenCalledTimes(draftCalls);
@@ -153,7 +417,7 @@ describe('caret integration and escape ownership', () => {
 
   it('resets after edit, movement and backspace without changing submitted text', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn((_text: string) => ({ accepted: true }));
     const view = render(<PromptInput {...props} onSubmit={onSubmit} />);
     await delay(10);
     view.stdin.write('ab');
@@ -178,16 +442,16 @@ describe('caret integration and escape ownership', () => {
     await delay(10);
     await vi.advanceTimersByTimeAsync(500);
     view.rerender(<PromptInput {...props} running />);
-    expect(view.lastFrame()).toContain('Type to steer');
-    expect(view.lastFrame()).toContain('Esc twice to interrupt');
+    expect(view.lastFrame()).toContain('\u8f93\u5165\u8865\u5145\u8bf4\u660e');
+    expect(view.lastFrame()).not.toContain('Esc');
     Object.defineProperty(view.stdout, 'columns', { value: 50, configurable: true });
     view.rerender(<PromptInput {...props} running />);
-    expect(view.lastFrame()).toContain('_ype to steer');
+    expect(view.lastFrame()).toContain('_\u5165\u8865\u5145\u8bf4\u660e');
     view.rerender(<PromptInput {...props} isActive={false} />);
-    expect(view.lastFrame()).toContain('Send a message');
+    expect(view.lastFrame()).toContain('\u8f93\u5165\u4efb\u52a1\u6216\u95ee\u9898');
     expect(vi.getTimerCount()).toBe(0);
     view.rerender(<PromptInput {...props} reducedMotion />);
-    expect(view.lastFrame()).toContain('_end a message');
+    expect(view.lastFrame()).toContain('_\u5165\u4efb\u52a1\u6216\u95ee\u9898');
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -213,7 +477,7 @@ describe('caret integration and escape ownership', () => {
   it.each([0, 3] as const)('keeps zero-width row budgets and submissions stable at color level %s', async (colorLevel) => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     const body = 'e\u0301\n\u0301\n\u0301e\nxe\u0301';
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn((_text: string) => ({ accepted: true }));
     const onDraftChange = vi.fn();
     const view = render(<PromptInput {...props} caps={{ ...props.caps, colorLevel }}
       onSubmit={onSubmit} onDraftChange={onDraftChange} />);
@@ -249,7 +513,7 @@ describe('paste through the composer (section 5.4)', () => {
   const OPEN = PASTE_OPEN;
   const CLOSE = PASTE_CLOSE;
 
-  function mountWith(onSubmit: (text: string) => void) {
+  function mountWith(onSubmit: (text: string) => { accepted: boolean }) {
     return render(
       <CountedPromptInput
         isActive
@@ -266,7 +530,7 @@ describe('paste through the composer (section 5.4)', () => {
 
   it('T-25: a 218-line paste becomes ONE token, one draft row, and submits in full', async () => {
     const body = Array.from({ length: 218 }, (_, i) => `line ${i}`).join('\n');
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn((_text: string) => ({ accepted: true }));
     const { stdin, lastFrame, unmount } = mountWith(onSubmit);
     await delay(10);
 
@@ -289,7 +553,7 @@ describe('paste through the composer (section 5.4)', () => {
 
   it('T-26: a 4-line paste is inserted VERBATIM, with no token at all', async () => {
     const body = 'alpha\nbeta\ngamma\ndelta';
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn((_text: string) => ({ accepted: true }));
     const { stdin, lastFrame, unmount } = mountWith(onSubmit);
     await delay(10);
 
@@ -310,7 +574,7 @@ describe('paste through the composer (section 5.4)', () => {
   it('AC-1: a paste carrying newlines sends exactly ONE message, never more', async () => {
     // Defect A, stated as the user experiences it: fifteen chunks that are each
     // exactly "\r" used to send fifteen messages.
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn((_text: string) => ({ accepted: true }));
     const { stdin, unmount } = mountWith(onSubmit);
     await delay(10);
 
@@ -375,7 +639,7 @@ describe('paste through the composer (section 5.4)', () => {
         cwd={process.cwd()}
         theme={THEME}
         caps={CAPS}
-        onSubmit={vi.fn()}
+        onSubmit={vi.fn((_text: string) => ({ accepted: true }))}
         onDraftChange={(next) => reported.push(next.rows)}
       />,
     );
@@ -386,7 +650,7 @@ describe('paste through the composer (section 5.4)', () => {
       stdin.write(`${OPEN}${body}${CLOSE}`);
       await delay(20);
       if (i < 3) {
-        stdin.write(String.fromCharCode(27, 13));
+        stdin.write(ENTER_NEWLINE_FRAME);
         await delay(20);
       }
     }
@@ -416,7 +680,7 @@ describe('paste through the composer (section 5.4)', () => {
 describe('editing returns to the unified document tail', () => {
   it('excludes viewport keys before popup navigation and accepts one paste interaction', async () => {
     const interaction = vi.fn();
-    const submit = vi.fn();
+    const submit = vi.fn((_text: string) => ({ accepted: true }));
     const view = render(<PromptInput isActive cursorVisible={false} cols={39}
       running={false} history={[]} commands={[{ name: 'help', description: 'Help' }]}
       cwd={process.cwd()} theme={THEME} caps={CAPS} onSubmit={submit}
@@ -435,5 +699,162 @@ describe('editing returns to the unified document tail', () => {
     view.stdin.write('\r'); await delay(20);
     expect(submit).toHaveBeenCalledExactlyOnceWith('hello world');
     view.unmount();
+  });
+});
+
+
+describe('合并输入的同步接管事务', () => {
+  it.each(['burst', 'bracketed'])('真实过滤器拒绝 %s 超限块且不提交旧稿', async (kind) => {
+    const source = Object.assign(new PassThrough(), {
+      isTTY: true, setRawMode() { return this; }, ref() { return this; },
+      unref() { return this; },
+    });
+    const onSubmit = vi.fn((_text: string) => ({ accepted: true }));
+    const warn = vi.fn();
+    const filter = createStdinFilter(source as unknown as NodeJS.ReadStream,
+      { mouse: false, paste: true }, undefined, warn);
+    const output = Object.assign(new PassThrough(), { columns: 80, rows: 24, isTTY: true });
+    output.resume();
+    const app = renderInk(<PromptInput isActive running={false} history={[]} commands={[]}
+      cwd={process.cwd()} theme={THEME} caps={CAPS} onSubmit={onSubmit} />, {
+      stdin: filter.stdin, stdout: output as unknown as NodeJS.WriteStream,
+      stderr: output as unknown as NodeJS.WriteStream, exitOnCtrlC: false, patchConsole: false,
+    });
+    try {
+      await delay(20);
+      source.write('old');
+      await delay(20);
+      const body = 'x'.repeat(PASTE_MAX_BYTES + 1);
+      const paste = kind === 'bracketed' ? `\x1b[200~${body}\x1b[201~` : body;
+      source.write(`${paste}\x1b[13utail`);
+      await delay(20);
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledTimes(1);
+      source.write('next');
+      await delay(20);
+      source.write('\r');
+      await delay(20);
+      expect(onSubmit).toHaveBeenCalledExactlyOnceWith('oldnext');
+    } finally {
+      app.unmount();
+      app.cleanup();
+      filter.dispose();
+      source.destroy();
+      output.destroy();
+    }
+  });
+
+  function mountTransaction(onSubmit = vi.fn((_text: string) => ({ accepted: true }))) {
+    renderCount = 0;
+    const onNotice = vi.fn();
+    const view = render(<CountedPromptInput isActive running={false} history={[]}
+      commands={[{ name: 'help', description: 'Help' }]} cwd={process.cwd()}
+      theme={THEME} caps={CAPS} onSubmit={onSubmit} onNotice={onNotice} />);
+    return { ...view, onSubmit, onNotice };
+  }
+
+  it('提交当前局部正文一次，其余输入留稿，仅更新一次编辑器', async () => {
+    const view = mountTransaction();
+    await delay(10);
+    const baseline = renderCount;
+    view.stdin.write(`a${ENTER_NEWLINE_FRAME}b\rc\rd`);
+    await delay(10);
+    expect(view.onSubmit).toHaveBeenCalledExactlyOnceWith('a\nb');
+    expect(view.lastFrame()).toContain('cd');
+    expect(renderCount - baseline).toBe(1);
+    expect(view.onNotice).toHaveBeenCalledExactlyOnceWith('warn',
+      'More input is kept in the draft; press Enter to send.');
+  });
+
+  it.each(['reject', 'throw'])('%s 保留原稿与本块新增输入', async (mode) => {
+    const onSubmit = vi.fn(() => {
+      if (mode === 'throw') throw new Error('Unavailable');
+      return { accepted: false, reason: 'Unavailable' };
+    });
+    const view = mountTransaction(onSubmit);
+    await delay(10);
+    view.stdin.write('old');
+    await delay(10);
+    view.stdin.write(`a${ENTER_NEWLINE_FRAME}b\rc`);
+    await delay(10);
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith('olda\nb');
+    expect(view.lastFrame()).toContain('olda');
+    expect(view.lastFrame()).toContain('bc');
+    expect(view.onNotice).toHaveBeenCalledWith('error', 'Unavailable');
+  });
+
+  it('paste 后合并 CR 提交展开后的全文', async () => {
+    const view = mountTransaction();
+    await delay(10);
+    view.stdin.write(`${PASTE_OPEN}a\nb${PASTE_CLOSE}\r`);
+    await delay(10);
+    expect(view.onSubmit).toHaveBeenCalledExactlyOnceWith('a\nb');
+  });
+
+  it('混合 bare slash 使用局部候选，Shift+Enter 不执行候选', async () => {
+    const view = mountTransaction();
+    await delay(10);
+    view.stdin.write('/he\r');
+    await delay(10);
+    expect(view.onSubmit).toHaveBeenCalledExactlyOnceWith('/help');
+    view.onSubmit.mockClear();
+    view.stdin.write(`/he${ENTER_NEWLINE_FRAME}tail`);
+    await delay(10);
+    expect(view.onSubmit).not.toHaveBeenCalled();
+    view.stdin.write('\r');
+    await delay(10);
+    expect(view.onSubmit).toHaveBeenCalledExactlyOnceWith('/he\ntail');
+  });
+
+  it.each([0, 1, 2])('光标位置 %i 的修饰 Enter 恰好插入一个 LF', async (cursor) => {
+    const view = mountTransaction();
+    await delay(10);
+    view.stdin.write('ab');
+    await delay(10);
+    for (let index = 2; index > cursor; index -= 1) {
+      view.stdin.write('\x1b[D');
+      await delay(5);
+    }
+    view.stdin.write(ENTER_NEWLINE_FRAME);
+    await delay(10);
+    view.stdin.write('\r');
+    await delay(10);
+    expect(view.onSubmit).toHaveBeenCalledExactlyOnceWith(
+      'ab'.slice(0, cursor) + '\n' + 'ab'.slice(cursor),
+    );
+  });
+
+  it('补全打开时全局翻页和 Shift+Tab 不修改草稿', async () => {
+    const view = mountTransaction();
+    await delay(10);
+    view.stdin.write('/he');
+    await delay(10);
+    const baseline = renderCount;
+    for (const key of ['\x1b[Z', '\x1b[5~', '\x1b[6~']) {
+      view.stdin.write(key);
+      await delay(5);
+    }
+    expect(renderCount).toBe(baseline);
+    expect(view.onSubmit).not.toHaveBeenCalled();
+    view.stdin.write('\r');
+    await delay(10);
+    expect(view.onSubmit).toHaveBeenCalledExactlyOnceWith('/help');
+  });
+
+  it('保稿候选粘贴超限时整块拒绝，不调用提交也不更新编辑器', async () => {
+    const view = mountTransaction();
+    await delay(10);
+    view.stdin.write('old');
+    await delay(10);
+    const baseline = renderCount;
+    const paste = `${PASTE_OPEN}${'x'.repeat(401)}${PASTE_CLOSE}`;
+    view.stdin.write(`${paste.repeat(32)}\r${paste}`);
+    await delay(10);
+    expect(view.onSubmit).not.toHaveBeenCalled();
+    expect(renderCount).toBe(baseline);
+    expect(view.onNotice).toHaveBeenCalledWith('warn', expect.stringContaining('Too many'));
+    view.stdin.write('\r');
+    await delay(10);
+    expect(view.onSubmit).toHaveBeenCalledExactlyOnceWith('old');
   });
 });

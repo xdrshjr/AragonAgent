@@ -121,6 +121,12 @@ switch ($command) {
     exit 0
   }
   'test' {
+    if ($env:ARAGON_FAKE_NPM_FAIL_TEST_WORKSPACE -and
+        ((-not ($NpmArgs -contains '-w')) -or
+         (Get-Workspace $NpmArgs) -eq $env:ARAGON_FAKE_NPM_FAIL_TEST_WORKSPACE)) {
+      [Console]::Error.WriteLine("Test failure in $env:ARAGON_FAKE_NPM_FAIL_TEST_WORKSPACE")
+      exit 1
+    }
     exit 0
   }
   'run' {

@@ -50,6 +50,9 @@ import {
 } from './schema.js';
 import { loadDotenv, readEnvConfig, readEnvDisabledSkills } from './env.js';
 import { readConfigFile } from './store.js';
+import { projectModelProfiles, resolveModelProfileState, resolveModelRoleKey }
+  from './model-profile-resolution.js';
+import type { ModelRole } from './model-profiles.js';
 import { getConfigPath } from './app-paths.js';
 import { setHistoryEnabled } from './prompt-history.js';
 import { setEntryRetain } from '../agent/entry-limits.js';
@@ -784,11 +787,17 @@ export function loadConfig(flags: CliFlags = {}): CliConfig {
   loadDotenv(cwd);
 
   const read = readConfigFile();
-  const file: Partial<PersistedConfig> = read.config ?? {};
+  const projection = projectModelProfiles(read.config ?? {});
+  const file: Partial<PersistedConfig> = projection.file;
   const env = readEnvConfig();
 
   if (read.parseError) {
     getLogger().error('config', 'config_parse_failed', { error: read.parseError });
+  }
+  if (projection.issues.length) {
+    getLogger().warn('config', 'model_profiles_invalid', {
+      error: 'Invalid model profiles; using custom connections. Repair with aragon config edit.',
+    });
   }
 
   const provider =
@@ -946,6 +955,7 @@ export function loadConfig(flags: CliFlags = {}): CliConfig {
   setEntryRetain(transcriptRetain);
 
   const config: CliConfig = {
+    modelProfiles: projection.issues.length ? undefined : file.modelProfiles,
     provider,
     model,
     baseUrl,
@@ -1012,7 +1022,12 @@ export function loadConfig(flags: CliFlags = {}): CliConfig {
     unicode: caps.unicode,
     apiKeyOverride: flags.apiKey && flags.apiKey.trim().length > 0 ? flags.apiKey.trim() : undefined,
   };
-
+  config.modelProfileState = resolveModelProfileState(
+    config, config.modelProfiles, projection.issues.length > 0,
+  );
+  if (config.apiKeyOverride && (config.modelProfiles?.mainId || config.modelProfiles?.fastId)) {
+    config.apiKeyOverrideTarget = { provider, baseUrl: baseUrl?.trim() || null };
+  }
   recordResolvedConfig(config);
   return config;
 }
@@ -1056,11 +1071,8 @@ function recordResolvedConfig(config: CliConfig): void {
  * Build the `getApiKey(providerId)` resolver the core `Agent` consumes.
  * The one-shot `--api-key` override wins, but only for the active provider.
  */
-export function makeGetApiKey(config: CliConfig): (providerId: string) => string | undefined {
-  return (providerId: string) => {
-    if (config.apiKeyOverride && providerId === config.provider) {
-      return config.apiKeyOverride;
-    }
-    return config.apiKeys[providerId];
-  };
+export function makeGetApiKey(
+  config: CliConfig, role: ModelRole = 'main',
+): (providerId: string) => string | undefined {
+  return (providerId) => resolveModelRoleKey({ config, role, providerId });
 }

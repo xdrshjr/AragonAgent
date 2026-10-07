@@ -7,6 +7,15 @@ were written.
 
 ## Unreleased
 
+### TUI 输入与排队可靠性
+
+- Shift+Enter 与粘贴按输入顺序处理；普通 Enter 保持弹层兼容，混合输入最多提交一次，
+  余稿及拒绝提交的正文保留。结束输入流时完整排空，不泄漏内部控制标记。
+- 超限粘贴拒绝同一外部输入块的正文和 Enter，避免误提交旧稿；未闭合粘贴继续按正文消费。
+- 拖选后仅 Ctrl+C 复制；文字变化与丢失鼠标释放时取消无效高亮，避免卡住视口。
+- 固定 Queue 状态行按消息 ID 回执更新，支持窄屏、暂停与多条消息计数。
+- 保存和退出保留所有未发送全文；恢复先验证存档，旧 queued 作为警告展示且不自动重放。
+
 ### Removed
 
 - Removed the inline terminal UI and its automatic downgrade rules. Interactive

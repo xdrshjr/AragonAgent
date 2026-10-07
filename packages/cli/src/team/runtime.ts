@@ -18,6 +18,7 @@
  * stream.
  */
 
+import type { ModelRole } from '../config/model-profiles.js';
 import type { ProviderRegistry, SkillRegistry, ToolPolicyDecision, ToolPolicyVerdict } from '@aragon-agent/core';
 import type { AgentMode } from '../agent/agent-mode.js';
 import type { CliConfig } from '../config/schema.js';
@@ -48,7 +49,7 @@ export interface TeamRuntimeDeps {
   providerRegistry: ProviderRegistry;
   getCwd: () => string;
   getMode: () => AgentMode;
-  getApiKey: (providerId: string) => string | undefined;
+  getApiKey: (providerId: string, role?: ModelRole) => string | undefined;
   skillRegistry?: SkillRegistry;
   alwaysBlock?: () => string;
   toolPolicy?: () => ToolPolicyDecision;

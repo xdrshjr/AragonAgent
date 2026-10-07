@@ -1,3 +1,11 @@
+import {
+  createModelSettingsDraft, saveModelSettings, reloadModelSettings,
+  type ModelSettingsSnapshot,
+} from './model-profile-settings.js';
+import type {
+  ModelSettingsDraft, ModelSettingsPatch, ModelSettingsSaveResult,
+} from '../config/model-profile-store.js';
+import { randomUUID } from 'node:crypto';
 /**
  * AgentController — builds the core `Agent`, wires the built-in toolset, and
  * exposes a small run/abort/steer surface plus the pre-flight validation that
@@ -42,6 +50,8 @@ import {
   isAdapterProvider,
   toRetryPolicy,
 } from '../config/schema.js';
+import type { ModelRole } from '../config/model-profiles.js';
+import { resolveModelProfileState } from '../config/model-profile-resolution.js';
 import { makeGetApiKey } from '../config/load.js';
 import { updatePersistedConfig } from '../config/store.js';
 import { createBuiltinTools, type ConfirmRequest } from '../tools/index.js';
@@ -362,6 +372,9 @@ export class AgentController {
   // and a `Set`.
   // -----------------------------------------------------------------------
 
+  private settingsRevision = 0;
+  private modelSettingsBlocked = false;
+  private preparedSystemPrompt: string | undefined;
   private readonly contextMeter: ContextMeter;
 
   // -----------------------------------------------------------------------
@@ -413,8 +426,11 @@ export class AgentController {
    * Cleared at the next `agent_start`.
    */
   private abortRequested = false;
-  /** User messages queued since the last `turn_start` (§3.5.4a guard 2). */
-  private userSteerCount = 0;
+  /** Only exact acceptance receipts release user messages from reviewer protection. */
+  private readonly pendingUserSteering = new Set<string>();
+  /** Session changes must not make a delayed receipt match a new message. */
+  private readonly steeringPrefix = randomUUID();
+  private steeringSequence = 0;
 
   constructor(private config: CliConfig, deps: ControllerDeps = {}) {
     this.cwd = config.cwd;
@@ -467,7 +483,7 @@ export class AgentController {
     // ONCE (C-2). `FastWiring` re-runs the same pure function in its own
     // constructor; the two agree by construction because they read the same
     // config through the same resolver.
-    const fastTier = resolveFastTier(config, (id) => this.hasApiKey(id));
+    const fastTier = resolveFastTier(config, (id, role) => this.hasApiKey(id, role));
     const fastRegistered = fastTier.ok;
 
     // --- Team mode ---------------------------------------------------------
@@ -493,11 +509,12 @@ export class AgentController {
                     ...(this.config.baseUrl ? { baseUrl: this.config.baseUrl } : {}),
                   },
                   thinkingLevel: this.config.thinkingLevel,
+                  role: 'main',
                 },
           providerRegistry: this.providerRegistry,
           getCwd: () => this.cwd,
           getMode: () => this.effectiveMode,
-          getApiKey: (id) => this.resolveKey(id),
+          getApiKey: (id, role) => this.resolveKey(id, role),
           // `skill_find` only, and the lead's always-on bodies. See the long
           // note in `subagent.ts` for why `skill` itself is withheld (D-16).
           ...(this.skillsEnabled
@@ -724,8 +741,8 @@ export class AgentController {
     this.compaction = config.compaction.enabled
       ? new CompactionWiring({
           getConfig: () => this.config,
-          hasKey: (id) => this.hasApiKey(id),
-          getApiKey: (id) => this.resolveKey(id),
+          hasKey: (id, role) => this.hasApiKey(id, role),
+          getApiKey: (id, role) => this.resolveKey(id, role),
           getModelInfoFor: (ref) => this.getModelInfoFor(ref),
           isPricedModel: (ref) => this.isPricedModel(ref),
           getMessages: () => this.agent.state.messages,
@@ -806,25 +823,16 @@ export class AgentController {
     this.fast = fastRegistered
       ? new FastWiring({
           getConfig: () => this.config,
-          hasKey: (id) => this.hasApiKey(id),
-          getApiKey: (id) => this.resolveKey(id),
+          hasKey: (id, role) => this.hasApiKey(id, role),
+          getApiKey: (id, role) => this.resolveKey(id, role),
           isPricedModel: (ref) => this.isPricedModel(ref),
           subscribe: (listener) => this.agent.subscribe(listener),
           complete: (providerId, request) => this.providerRegistry.complete(providerId, request),
-          // THE REVIEWER GOES THROUGH THIS METHOD, NOT `agent.steer()` DIRECTLY,
-          // so its own block is counted alongside the user's — which is what
-          // `userSteerCount` would otherwise mis-report and what would make
-          // guard 2 clear a queue it does not own (D-21).
-          //
-          // It is decremented back out below: the counter must answer "did the
-          // USER queue anything", and the reviewer's own message is not that.
-          steer: (text) => {
-            this.steer(text);
-            this.userSteerCount -= 1;
-          },
+          // Reviewer advice shares skill activation, but cannot own a user ID.
+          steer: (text) => this.enqueueSteering(text, false),
           isRunning: () => this.isRunning(),
           isAbortRequested: () => this.abortRequested,
-          userSteerCount: () => this.userSteerCount,
+          userSteerCount: () => this.pendingUserSteering.size,
           clearAllQueues: () => this.clearAllQueues(),
           notify: (level, text) => deps.notify?.(level, text),
           onPromptChanged: () => this.rebuildSystemPrompt(),
@@ -832,11 +840,13 @@ export class AgentController {
       : null;
 
     // The two guards' bookkeeping, and the only reason this class subscribes to
-    // its own agent. `turn_start` is where a user steer stops being pending;
+    // its own agent. A receipt is where a user steer stops being pending;
     // `agent_start` is where a requested abort stops being in force.
     this.agent.subscribe((event) => {
       if (event.type === 'agent_start') this.abortRequested = false;
-      if (event.type === 'turn_start') this.userSteerCount = 0;
+      if (event.type === 'steering_accepted') {
+        for (const id of event.ids) this.pendingUserSteering.delete(id);
+      }
       // The authoritative result arrives with this event, so from this instant
       // the tail is superseded and its slot must be released (§3.1.1). Clearing
       // HERE rather than on read is what keeps the store's size a function of
@@ -863,8 +873,8 @@ export class AgentController {
     if (problem) deps.notify?.('warn', problem);
   }
 
-  private resolveKey(providerId: string): string | undefined {
-    return makeGetApiKey(this.config)(providerId);
+  private resolveKey(providerId: string, role: ModelRole = 'main'): string | undefined {
+    return makeGetApiKey(this.config, role)(providerId);
   }
 
   /**
@@ -898,14 +908,17 @@ export class AgentController {
   // rules that out — so if you add a third caller, route it through here.
   // -----------------------------------------------------------------------
 
-  private composeSystemPrompt(): string {
+  private composeSystemPrompt(config: CliConfig = this.config): string {
+    const tier = resolveFastTier(config, (id, role) => !!makeGetApiKey(config, role)(id));
+    const fastAvailable = config === this.config ? this.fast?.available() === true
+      : this.fast?.isRegistered() && config.fast.enabled && tier.ok;
     return buildSystemPrompt({
       cwd: this.cwd,
       tools: this.tools,
       skillsBlock: this.skillsEnabled ? this.skills.catalogBlock() + this.skills.alwaysBlock() : '',
       agentMode: this.effectiveMode,
       planInteractive: this.planInteractive,
-      planMaxAskRounds: this.config.planModeMaxAskRounds,
+      planMaxAskRounds: config.planModeMaxAskRounds,
       // BOTH flags, and both are required (§4.5). `teamRegistered` false means
       // there is no `task` tool to advertise; `teamEnabled` false means the user
       // turned it off for this session. Advertising in either case would
@@ -913,13 +926,13 @@ export class AgentController {
       teamBlock:
         this.teamRegistered && this.teamEnabled
           ? buildTeamBlock({
-              maxSubagents: this.config.team.maxSubagents,
-              maxConcurrent: this.config.team.maxConcurrent,
+              maxSubagents: config.team.maxSubagents,
+              maxConcurrent: config.team.maxConcurrent,
               // One cross-reference sentence, present only when the capability
               // is (§3.8). `this.fast` is null during the FIRST compose (the
               // wiring needs the Agent), which is why the constructor composes
               // again once it exists.
-              fastDelegation: this.fast?.delegationAvailable() === true,
+              fastDelegation: !!fastAvailable && config.fast.delegate,
             })
           : '',
       // BOTH FLAGS, exactly as team mode uses both, and for the identical
@@ -930,7 +943,7 @@ export class AgentController {
       todoBlock:
         this.todoRegistered && this.todoEnabled
           ? buildTodoBlock({
-              panelVisible: this.todoPanelCapable && this.config.todo.panel,
+              panelVisible: this.todoPanelCapable && config.todo.panel,
             })
           : '',
       // The SAME two flags one more time, plus the live resolution — all three
@@ -938,11 +951,11 @@ export class AgentController {
       // returns `''` when neither capability is on, so a user who turned both
       // off pays nothing for the tier being technically live.
       fastBlock:
-        this.fast && this.fast.available()
+        fastAvailable
           ? buildFastBlock({
-              model: this.fast.fastRef()?.modelId ?? '',
-              delegate: this.config.fast.delegate,
-              review: this.config.fast.review,
+              model: tier.ok ? tier.ref.modelId : '',
+              delegate: config.fast.delegate,
+              review: config.fast.review,
             })
           : '',
       // ONE FLAG, unlike team/todo's two: there is no live on/off switch for
@@ -959,7 +972,7 @@ export class AgentController {
   }
 
   private rebuildSystemPrompt(): void {
-    this.agent.setSystemPrompt(this.composeSystemPrompt());
+    this.agent.setSystemPrompt(this.preparedSystemPrompt ?? this.composeSystemPrompt());
   }
 
   /** Re-render the prompt from the current skill set and tell the UI. */
@@ -982,8 +995,10 @@ export class AgentController {
    * Read-only CLI-layer helper for the Header/Welcome key-status dot (P1-1);
    * does not touch `@aragon-agent/core`.
    */
-  hasApiKey(provider?: string): boolean {
-    const key = this.resolveKey(provider ?? this.config.provider);
+  hasApiKey(provider?: string, role: ModelRole = 'main'): boolean {
+    const activeProvider = role === 'fast'
+      ? this.config.fast.provider || this.config.provider : this.config.provider;
+    const key = this.resolveKey(provider ?? activeProvider, role);
     return !!key && key.trim().length > 0;
   }
 
@@ -993,6 +1008,7 @@ export class AgentController {
    * re-memoizes the palette (P1-1). Does not touch `@aragon-agent/core`.
    */
   setTheme(name: ThemeName): void {
+    this.settingsRevision += 1;
     this.config = { ...this.config, theme: name };
   }
 
@@ -1018,6 +1034,8 @@ export class AgentController {
   // -----------------------------------------------------------------------
 
   preflight(): PreflightResult {
+    if (this.modelSettingsBlocked) return { ok: false, kind: 'config',
+      message: 'Settings were saved but not fully applied. Restart before sending requests.' };
     const provider = this.config.provider;
     if (!isAdapterProvider(provider)) {
       return {
@@ -1056,6 +1074,9 @@ export class AgentController {
    */
   async prompt(text: string, options: PromptOptions = {}): Promise<PromptOutcome> {
     // Capture BEFORE stopping: synchronous abort listeners may cancel this request.
+    if (this.modelSettingsBlocked) {
+      return { status: 'not-started', reason: 'failed' };
+    }
     const request = ++this.startupSequence;
     try {
       if (this.agent.state.isRunning) {
@@ -1265,20 +1286,28 @@ export class AgentController {
     this.procs.reapSync();
   }
 
+  /** Queue automation/user guidance with the same protection as visible input. */
   steer(text: string): void {
-    // Mid-run interjection: promote the queue, keep what is already in force
-    // (D-G3). Clearing here would make "ask a follow-up" the way around the
-    // ceiling; skipping the promotion would miss slash commands, which the TUI
-    // routes through `steer` whenever the agent happens to be running.
+    this.enqueueSteering(text, true);
+  }
+
+  /** Return the opaque ID used by the view to match Core's acceptance receipt. */
+  queueUserMessage(text: string): string {
+    return this.enqueueSteering(text, true)!;
+  }
+
+  private enqueueSteering(text: string, user: boolean): string | undefined {
+    // Both reviewer and user guidance can activate queued skill frames.
     if (this.skillsEnabled) this.skills.absorbPendingFrames();
-    // COUNTED so the reviewer can prove it owns the queue before clearing it
-    // (§3.5.4a guard 2 / D-21). This method is the only other writer of
-    // `steeringQueue` in the package, and `Agent` exposes no way to remove ONE
-    // message — so `userSteerCount === 0` is the only sound licence for
-    // `clearAllQueues()`, and with a user message in there the reviewer must
-    // leave its own residue rather than destroy something the user typed.
-    this.userSteerCount += 1;
-    this.agent.steer(text);
+    const id = user ? `${this.steeringPrefix}:${++this.steeringSequence}` : undefined;
+    if (id !== undefined) this.pendingUserSteering.add(id);
+    try {
+      this.agent.steer(text, id);
+    } catch (error) {
+      if (id !== undefined) this.pendingUserSteering.delete(id);
+      throw error;
+    }
+    return id;
   }
 
   followUp(text: string): void {
@@ -1424,6 +1453,7 @@ export class AgentController {
    * honestly by checking `isTeamRegistered()` first.
    */
   setTeamEnabled(enabled: boolean): void {
+    this.settingsRevision += 1;
     this.teamEnabled = enabled;
     this.rebuildSystemPrompt();
   }
@@ -1439,6 +1469,7 @@ export class AgentController {
    */
   setTeamConfig(patch: Partial<TeamConfig>): TeamConfig {
     const team = clampTeamConfig({ ...this.config.team, ...patch });
+    this.settingsRevision += 1;
     this.config = { ...this.config, team };
     this.rebuildSystemPrompt();
     return team;
@@ -1507,6 +1538,7 @@ export class AgentController {
    * reports that honestly by checking `isTodoRegistered()` first.
    */
   setTodoEnabled(enabled: boolean): void {
+    this.settingsRevision += 1;
     this.todoEnabled = enabled;
     this.rebuildSystemPrompt();
   }
@@ -1531,6 +1563,7 @@ export class AgentController {
    */
   setTodoConfig(patch: Partial<TodoConfig>): TodoConfig {
     const todo = clampTodoConfig({ ...this.config.todo, ...patch });
+    this.settingsRevision += 1;
     this.config = { ...this.config, todo };
     this.rebuildSystemPrompt();
     return todo;
@@ -1592,6 +1625,7 @@ export class AgentController {
    */
   setRetryConfig(patch: Partial<RetryConfig>): RetryConfig {
     const retry = clampRetryConfig({ ...this.config.retry, ...patch });
+    this.settingsRevision += 1;
     this.config = { ...this.config, retry };
     this.providerRegistry.setRetryPolicy(toRetryPolicy(retry));
     return retry;
@@ -1601,8 +1635,78 @@ export class AgentController {
   // Mutators
   // -----------------------------------------------------------------------
 
+  /** True while any request can still use a model or credential snapshot. */
+  isModelSettingsBusy(): boolean {
+    return this.isRunning() || this.isTeamBusy() || this.getCompactionSnapshot().inFlight
+      || this.getFastStatus().snapshot.inFlight;
+  }
+
+  /** Monotonic revision protects an editor from all intervening settings changes. */
+  getSettingsRevision(): number { return this.settingsRevision; }
+
+  /** Read-only draft creation; no startup migration or credential copying. */
+  createModelSettingsDraft(): ModelSettingsDraft {
+    return createModelSettingsDraft(this.config, this.settingsRevision);
+  }
+
+  /** Save an explicit draft as a single disk/live transaction. */
+  saveModelSettings(draft: ModelSettingsDraft): ModelSettingsSaveResult {
+    return saveModelSettings({ draft, controller: this });
+  }
+
+  /** Legacy commands share the same lossless conversion and atomic save path. */
+  saveModelSettingsPatch(patch: ModelSettingsPatch): ModelSettingsSaveResult {
+    const draft = this.createModelSettingsDraft();
+    draft.profiles = undefined;
+    draft.patch = patch;
+    return this.saveModelSettings(draft);
+  }
+
+  /** Refresh both role connections and credentials while retaining conversation state. */
+  reloadModelSettings(): ModelSettingsSaveResult { return reloadModelSettings(this); }
+
+  /** Prebuild all potentially failing model/prompt work before committing the file. */
+  prepareModelSettingsSnapshot(config: CliConfig): ModelSettingsSnapshot {
+    return { config, model: { providerId: config.provider, modelId: config.model,
+      ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}) },
+      systemPrompt: this.composeSystemPrompt(config) };
+  }
+
+  /** Apply prepared state synchronously, without rebuilding the controller or its history. */
+  applyModelSettingsSnapshot(snapshot: ModelSettingsSnapshot): void {
+    this.preparedSystemPrompt = snapshot.systemPrompt;
+    try {
+      this.config = snapshot.config;
+      this.settingsRevision += 1;
+      this.agent.setModel(snapshot.model);
+      this.agent.setThinkingLevel(snapshot.config.thinkingLevel);
+      this.agent.setMaxTokens(snapshot.config.maxTokens);
+      this.fast?.onConfigChanged(false, snapshot.config.fast.enabled);
+      this.compaction?.onConfigChanged(snapshot.config.compaction.enabled);
+      this.contextMeter.onWindowChanged();
+      this.rebuildSystemPrompt();
+    } finally {
+      this.preparedSystemPrompt = undefined;
+    }
+  }
+
+  /** Potentially failing ordinary-setting side effects are isolated from model application. */
+  applyModelSettingsEffects(): void { getLogger().reconfigure(this.config.log); }
+
+  /** A partially applied model snapshot must never reach another provider request. */
+  blockModelSettingsRequests(): void {
+    this.modelSettingsBlocked = true;
+    this.config.modelSettingsRestartRequired = true;
+  }
+
+  /** The UI uses this before accepting or draining queued prompts. */
+  areModelSettingsBlocked(): boolean { return this.modelSettingsBlocked; }
+
   setModel(provider: string, model: string, baseUrl?: string): void {
+    if (this.isModelSettingsBusy()) throw new Error('Model settings are busy.');
+    this.settingsRevision += 1;
     this.config = { ...this.config, provider, model, baseUrl };
+    this.config.modelProfileState = resolveModelProfileState(this.config);
     this.agent.setModel({ providerId: provider, modelId: model, ...(baseUrl ? { baseUrl } : {}) });
     // NOT NEUTRAL TO THE FAST TIER even when the user never touched a `fast.*`
     // key (§3.9 / RV-3): `fast.provider: ''` and `fast.baseUrl: ''` INHERIT from
@@ -1625,11 +1729,13 @@ export class AgentController {
   }
 
   setThinkingLevel(level: ThinkingLevel): void {
+    this.settingsRevision += 1;
     this.config = { ...this.config, thinkingLevel: level };
     this.agent.setThinkingLevel(level);
   }
 
   setMaxTokens(value: number | undefined): void {
+    this.settingsRevision += 1;
     this.config = { ...this.config, maxTokens: value };
     this.agent.setMaxTokens(value);
   }
@@ -1637,6 +1743,7 @@ export class AgentController {
   setApiKey(provider: string, key: string): void {
     // The Agent resolves keys via `resolveKey(this.config)` at call time, so
     // updating the config here is sufficient — no Agent rebuild needed.
+    this.settingsRevision += 1;
     this.config = {
       ...this.config,
       apiKeys: { ...this.config.apiKeys, [provider]: key },
@@ -1652,6 +1759,7 @@ export class AgentController {
 
   setCwd(cwd: string): void {
     this.cwd = cwd;
+    this.settingsRevision += 1;
     this.config = { ...this.config, cwd };
     // The project scope moved with the cwd, so rescan BEFORE rebuilding — then
     // let the single prompt entry point emit a prompt that reflects both the new
@@ -1773,6 +1881,7 @@ export class AgentController {
 
   clearAllQueues(): void {
     this.agent.clearAllQueues();
+    this.pendingUserSteering.clear();
   }
 
   // -----------------------------------------------------------------------
@@ -1850,6 +1959,7 @@ export class AgentController {
    * `/fast` reports that honestly by checking `isFastRegistered()` first.
    */
   setFastEnabled(enabled: boolean): void {
+    this.settingsRevision += 1;
     this.fast?.setEnabled(enabled);
   }
 
@@ -1867,6 +1977,7 @@ export class AgentController {
    */
   setFastConfig(patch: Partial<FastConfig>): FastConfig {
     const fast = clampFastConfig({ ...this.config.fast, ...patch });
+    this.settingsRevision += 1;
     this.config = { ...this.config, fast };
     // `onConfigChanged` rebuilds the prompt; when there is no wiring (the tier
     // was never registered) nothing has to be rebuilt, because no block is
@@ -1976,6 +2087,7 @@ export class AgentController {
    * on purpose (§3.2).
    */
   setCompactionEnabled(enabled: boolean): void {
+    this.settingsRevision += 1;
     this.compaction?.setEnabled(enabled);
   }
 
@@ -1992,6 +2104,7 @@ export class AgentController {
    */
   setCompactionConfig(patch: Partial<CompactionConfig>): CompactionConfig {
     const compaction = clampCompactionConfig({ ...this.config.compaction, ...patch });
+    this.settingsRevision += 1;
     this.config = { ...this.config, compaction };
     this.compaction?.onConfigChanged();
     return compaction;
@@ -2045,6 +2158,7 @@ export class AgentController {
    * unbypassable. `replaceMessages` validates NOTHING.
    */
   async compactNow(instructions?: string): Promise<{ ok: boolean; reason?: string }> {
+    if (this.modelSettingsBlocked) return { ok: false, reason: 'settings_restart_required' };
     if (!this.compaction) return { ok: false, reason: 'not_registered' };
     const controller = new AbortController();
     const outcome = await this.compaction.compactNow({

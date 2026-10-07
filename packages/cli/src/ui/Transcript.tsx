@@ -11,6 +11,7 @@ import { separationRows, type DensityMode } from './density.js';
 import type { Entry, NoticeLevel } from '../agent/reducer.js';
 import { EntryFrame } from './entries/EntryFrame.js';
 import { UserEntry } from './entries/UserEntry.js';
+import { QueuedEntry } from './entries/QueuedEntry.js';
 import { AssistantEntry } from './entries/AssistantEntry.js';
 import { ToolCard, statusColor, toolEntryGlyph } from './entries/ToolCard.js';
 import { TeamCard, teamCardColor } from './entries/TeamCard.js';
@@ -127,6 +128,15 @@ function EntryViewImpl({
   switch (entry.kind) {
     case 'user':
       return frame(glyphs.user, theme.user, <UserEntry text={entry.text} theme={theme} caps={caps} />);
+    case 'queued':
+      // `theme.muted`: quieter than a user message, louder than a notice --
+      // the row exists to be noticed UNTIL it is accepted, then rewritten in
+      // place by `turnStart` (5.2.3).
+      return frame(
+        glyphs.queued,
+        theme.muted,
+        <QueuedEntry text={entry.text} theme={theme} caps={caps} />,
+      );
     case 'assistant': {
       const animate = entry.streaming && !reducedMotion && caps.unicode;
       return frame(

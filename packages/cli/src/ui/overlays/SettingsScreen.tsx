@@ -8,7 +8,7 @@
  * otherwise.
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useReducer, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import {
   DEFAULT_MAX_OUTPUT_TOKENS,
@@ -30,6 +30,15 @@ import type { TermCapabilities } from '../capabilities.js';
 import { pickGlyphs } from '../glyphs.js';
 import { OverlayFrame } from '../layout/OverlayFrame.js';
 import { stripPasteFrames } from '../paste-frames.js';
+import { stripEnterFrames } from '../enter-frames.js';
+import type { ModelSettingsDraft, ModelSettingsPatch,
+  ModelSettingsSaveResult } from '../../config/model-profile-store.js';
+import { emptyModelProfiles } from '../../config/model-profiles.js';
+import { registerSecret } from '../../logging/secret-registry.js';
+import { ModelProfilePicker, useProfileScroll } from './ModelProfilePicker.js';
+import { ModelProfileEditor } from './ModelProfileEditor.js';
+import { createModelProfileState, createCustomProfile, modelProfileReducer,
+  profileUsers } from './model-profile-state.js';
 
 export interface SettingsValues {
   provider: string;
@@ -116,7 +125,11 @@ interface SettingsScreenProps {
   onScrollClamp?: (offset: number) => void;
   theme: Theme;
   caps: TermCapabilities;
-  onSave: (values: SettingsValues) => void;
+  onSave?: (values: SettingsValues) => void;
+  draft?: ModelSettingsDraft;
+  onProfileSave?: (draft: ModelSettingsDraft) => ModelSettingsSaveResult;
+  onClose?: () => void;
+  onReload?: () => ModelSettingsDraft;
   /**
    * `API retries` READ-ONLY row (llm-api-retry-backoff §6.9), e.g. `10` or `off`.
    *
@@ -399,7 +412,12 @@ export function effectiveCapLine(values: Pick<SettingsValues, 'provider' | 'mode
   return `Effective: ${resolution.value}`;
 }
 
-export function SettingsScreen({
+export function SettingsScreen(props: SettingsScreenProps): React.ReactElement {
+  return props.draft ? <ProfileSettingsScreen {...props} draft={props.draft} />
+    : <LegacySettingsScreen {...props} />;
+}
+
+function LegacySettingsScreen({
   initial,
   apiKeys,
   maxRows,
@@ -452,7 +470,7 @@ export function SettingsScreen({
       return;
     }
     if (key.return) {
-      onSave(values);
+      onSave?.(values);
       return;
     }
     if (field.kind === 'enum') {
@@ -475,7 +493,13 @@ export function SettingsScreen({
       // `controller.setApiKey()`. The user is told the settings were saved and
       // every request afterwards fails to authenticate with nothing on screen to
       // explain it. Pasting IS how a key enters this process.
-      const text = stripPasteFrames(input);
+      // `stripEnterFrames` INSIDE (tui-shift-enter-copy-queue 3.5): the same
+      // broadcast carries the newline frame a Shift+Enter produced, and this
+      // composition order is the one that leaves no NUL in the field -- the
+      // outer paste strip removes the frame's newline for a single-line field
+      // exactly as it removes a bare Ctrl+J today, while the reverse order
+      // would leak the frame's letter as visible text.
+      const text = stripPasteFrames(stripEnterFrames(input));
       if (text.length === 0) return;
       setValues((prev) => ({ ...prev, [field.key]: String(prev[field.key]) + text }));
     }
@@ -583,4 +607,318 @@ export function SettingsScreen({
       caps={caps}
     />
   );
+}
+
+const PROFILE_FIELDS = FIELDS.filter((field) => ![
+  'provider', 'model', 'baseUrl', 'apiKey', 'fastProvider', 'fastModel', 'fastEnabled',
+].includes(field.key));
+
+function profileSettingsValues(initial: SettingsValues,
+  draft: ModelSettingsDraft): SettingsValues {
+  const file = draft.baseline;
+  return { ...initial, provider: file.provider ?? initial.provider,
+    model: file.model ?? initial.model,
+    baseUrl: file.baseUrl ?? '', apiKey: '', fastModel: file.fast?.model ?? '',
+    fastProvider: file.fast?.provider || FAST_INHERIT_PROVIDER };
+}
+
+/** Only fields changed by the user belong in a settings transaction. */
+export function readDirtySettings(initial: SettingsValues,
+  values: SettingsValues): ModelSettingsPatch {
+  const patch: ModelSettingsPatch = {};
+  const dirty = (key: FieldKey) => initial[key] !== values[key];
+  if (dirty('provider')) patch.provider = values.provider;
+  if (dirty('model')) patch.model = values.model.trim();
+  if (dirty('baseUrl')) patch.baseUrl = values.baseUrl.trim();
+  if (dirty('apiKey') && values.apiKey.trim()) {
+    patch.apiKeys = { [values.provider]: values.apiKey.trim() };
+  }
+  if (dirty('thinkingLevel')) patch.thinkingLevel = values.thinkingLevel;
+  if (dirty('showThinking')) patch.showThinking = values.showThinking === 'on';
+  if (dirty('liveToolOutput')) patch.liveToolOutput = values.liveToolOutput === 'on';
+  if (dirty('logLevel')) patch.log = { level: values.logLevel };
+  if (dirty('maxTokens')) {
+    const parsed = parseMaxTokensInput(values.maxTokens);
+    if (parsed.kind === 'invalid') throw new Error('Max tokens: use a number or auto.');
+    patch.maxTokens = parsed.kind === 'auto' ? null : parsed.value;
+  }
+  const fast: Partial<FastConfig> = {};
+  const parsedFast = readFastSettings(values);
+  if (dirty('fastModel')) fast.model = parsedFast.model;
+  if (dirty('fastProvider')) fast.provider = parsedFast.provider;
+  if (dirty('fastEnabled')) fast.enabled = parsedFast.enabled;
+  if (dirty('fastReview')) {
+    if (parsedFast.review === undefined) throw new Error('Fast review: use a turn count or off.');
+    fast.review = parsedFast.review;
+    if (parsedFast.reviewEveryTurns !== undefined) {
+      fast.reviewEveryTurns = parsedFast.reviewEveryTurns;
+    }
+  }
+  if (dirty('fastReviewBudget')) {
+    if (parsedFast.reviewMaxPerSession === undefined) {
+      throw new Error('Fast budget: use a number.');
+    }
+    fast.reviewMaxPerSession = parsedFast.reviewMaxPerSession;
+  }
+  if (Object.keys(fast).length) patch.fast = fast;
+  const compaction: Partial<CompactionConfig> = {};
+  const parsedCompaction = readCompactionSettings(values);
+  const mapping = { compactionEnabled: 'enabled', compactionThreshold: 'threshold',
+    compactionKeepTurns: 'keepRecentTurns', compactionSubagents: 'subagents',
+    compactionArchive: 'archive' } as const;
+  for (const [field, key] of Object.entries(mapping)) {
+    if (!dirty(field as FieldKey)) continue;
+    const value = parsedCompaction[key];
+    if (value === undefined) {
+      const label = FIELDS.find((item) => item.key === field)!.label;
+      throw new Error(`${label}: use a number.`);
+    }
+    Object.assign(compaction, { [key]: value });
+  }
+  if (Object.keys(compaction).length) patch.compaction = compaction;
+  return patch;
+}
+
+function saveError(result: ModelSettingsSaveResult): string {
+  if (result.persisted) return 'Saved; not fully applied. Close and restart. Save disabled.';
+  const errors: Record<string, string> = {
+    busy: 'Busy. Wait for running work to finish, then save again.',
+    conflict: 'Config changed elsewhere. Reload before saving.',
+    read_failed: 'Cannot read config. Repair with aragon config edit, then reload.',
+    write_failed: 'Could not save. Your changes are still here; retry Save.',
+    invalid: 'Invalid settings. Review the highlighted field and retry.',
+  };
+  return errors[result.code ?? ''] ?? 'Could not save. Review settings and retry.';
+}
+
+type ProfileSettingsProps = SettingsScreenProps & { draft: ModelSettingsDraft };
+
+function useProfileSettingsState(props: ProfileSettingsProps) {
+  const [state, dispatch] = useReducer(modelProfileReducer, props.draft, createModelProfileState);
+  const [initial, setInitial] = useState(() => profileSettingsValues(props.initial, props.draft));
+  const [values, setValues] = useState(initial);
+  const [index, setIndex] = useState(0);
+  const [error, setError] = useState<string>();
+  const [persisted, setPersisted] = useState(false);
+  const [confirmIndex, setConfirmIndex] = useState(0);
+  const [reloadPending, setReloadPending] = useState(false);
+  const offset = useProfileScroll(props, index);
+  const previousPage = useRef(state.page);
+  useEffect(() => {
+    const previous = previousPage.current;
+    previousPage.current = state.page;
+    if (state.page !== 'root' || previous === 'discard-confirm') return;
+    setIndex(0);
+    props.onScrollClamp?.(0);
+  }, [state.page]);
+  const library = state.draft.profiles ?? emptyModelProfiles();
+  const glyphs = pickGlyphs(props.caps);
+  const dirty = state.dirty || Object.keys(values).some((key) =>
+    values[key as FieldKey] !== initial[key as FieldKey]);
+  const fields = [FIELDS.find((item) => item.key === 'fastEnabled')!,
+    ...FIELDS.filter((item) => library.mainId === null
+      && ['provider', 'model', 'baseUrl', 'apiKey'].includes(item.key)),
+    ...FIELDS.filter((item) => library.fastId === null
+      && ['fastModel', 'fastProvider'].includes(item.key)), ...PROFILE_FIELDS];
+  const count = fields.length + 5;
+  const field = fields[index - 3];
+  const readError = state.draft.readError;
+  const confirming = state.page === 'delete-confirm' || state.page === 'discard-confirm';
+  return { state, dispatch, initial, setInitial, values, setValues, index, setIndex,
+    error, setError, persisted, setPersisted, confirmIndex, setConfirmIndex,
+    reloadPending, setReloadPending, offset, library, glyphs, dirty, fields, count,
+    field, readError, confirming };
+}
+
+type ProfileSettingsState = ReturnType<typeof useProfileSettingsState>;
+
+function saveProfileSettings(props: ProfileSettingsProps, view: ProfileSettingsState): void {
+  const { persisted, readError, initial, values, fields, state,
+    setError, setIndex, setPersisted } = view;
+  if (persisted || readError || !props.onProfileSave) return;
+  let patch: ModelSettingsPatch;
+  try { patch = readDirtySettings(initial, values); }
+  catch (failure) {
+    const message = (failure as Error).message;
+    setError(message);
+    const at = fields.findIndex((item) => message.startsWith(`${item.label}:`));
+    if (at >= 0) setIndex(at + 3);
+    return;
+  }
+  const result = props.onProfileSave({
+    ...state.draft, patch: { ...state.draft.patch, ...patch },
+  });
+  if (!result.ok) { setError(saveError(result)); setPersisted(result.persisted); }
+}
+
+function reloadProfileSettings(props: ProfileSettingsProps, view: ProfileSettingsState): void {
+  const { dispatch, setInitial, setValues, setError, setIndex, setReloadPending } = view;
+  if (!props.onReload) return;
+  const next = props.onReload();
+  dispatch({ type: 'reload', draft: next });
+  const live = next.liveBaseline;
+  const refreshed = { ...props.initial, provider: live.provider, model: live.model,
+    baseUrl: live.baseUrl ?? '', thinkingLevel: live.thinkingLevel,
+    showThinking: live.showThinking ? 'on' : 'off',
+    liveToolOutput: live.liveToolOutput ? 'on' : 'off',
+    maxTokens: live.maxTokens === undefined ? '' : String(live.maxTokens),
+    logLevel: live.log?.level ?? props.initial.logLevel,
+    ...(live.fast ? fastSettingsFrom(live.fast) : {}),
+    ...(live.compaction ? compactionSettingsFrom(live.compaction) : {}),
+  } as SettingsValues;
+  const nextValues = profileSettingsValues(refreshed, next);
+  setInitial(nextValues); setValues(nextValues); setError(undefined); setIndex(0);
+  setReloadPending(false);
+}
+
+function cancelProfileSettings(props: ProfileSettingsProps, view: ProfileSettingsState,
+  reloading = false): void {
+  const { persisted, dirty, setReloadPending, setConfirmIndex, dispatch } = view;
+  if (persisted) { props.onClose?.(); return; }
+  if (!dirty) {
+    if (reloading) reloadProfileSettings(props, view);
+    else props.onClose?.();
+    return;
+  }
+  setReloadPending(reloading); setConfirmIndex(0);
+  dispatch({ type: 'page', page: 'discard-confirm' });
+}
+
+function activateRootSetting(props: ProfileSettingsProps, view: ProfileSettingsState): void {
+  const { index, count, readError, persisted, dispatch } = view;
+  if (index === count - 1) { cancelProfileSettings(props, view, true); return; }
+  if (readError || persisted) return;
+  if (index < 2) dispatch({ type: 'page', page: 'picker', role: index === 0 ? 'main' : 'fast' });
+  else if (index === 2) dispatch({ type: 'page', page: 'manager' });
+  else saveProfileSettings(props, view);
+}
+
+function useRootSettingsInput(props: ProfileSettingsProps, view: ProfileSettingsState): void {
+  const { index, count, field, readError, persisted, values, state, setIndex, setValues } = view;
+  useInput((input, key) => {
+    if (key.escape) { cancelProfileSettings(props, view); return; }
+    if (key.ctrl && input === 's') { saveProfileSettings(props, view); return; }
+    if (key.upArrow || (key.tab && key.shift)) { setIndex((index - 1 + count) % count); return; }
+    if (key.downArrow || key.tab) { setIndex((index + 1) % count); return; }
+    if (key.return) { activateRootSetting(props, view); return; }
+    if (!field || readError || persisted || key.ctrl || key.meta) return;
+    if (field.kind === 'enum') {
+      if (!key.leftArrow && !key.rightArrow) return;
+      const options = field.options!;
+      const at = options.indexOf(String(values[field.key]));
+      setValues({ ...values, ...(field.key === 'provider' ? { apiKey: '' } : {}),
+        [field.key]: options[(at + (key.leftArrow ? -1 : 1) + options.length) % options.length] });
+      return;
+    }
+    const text = stripPasteFrames(stripEnterFrames(input));
+    const value = key.backspace || key.delete
+      ? [...String(values[field.key])].slice(0, -1).join('') : String(values[field.key]) + text;
+    if (field.key === 'apiKey') registerSecret(value);
+    if (key.backspace || key.delete || text) setValues({ ...values, [field.key]: value });
+  }, { isActive: state.page === 'root' });
+}
+
+function useSettingsConfirmationInput(props: ProfileSettingsProps,
+  view: ProfileSettingsState): void {
+  const { state, dispatch, confirmIndex, setConfirmIndex, reloadPending, confirming } = view;
+  useInput((_input, key) => {
+    if (key.escape) { dispatch({ type: 'page', page: state.page === 'delete-confirm'
+      ? 'manager' : 'root' }); return; }
+    if (key.upArrow || key.downArrow || key.leftArrow || key.rightArrow || key.tab) {
+      setConfirmIndex((confirmIndex + 1) % 2); return;
+    }
+    if (!key.return) return;
+    if (state.page === 'delete-confirm') {
+      dispatch(confirmIndex === 1 ? { type: 'confirm-delete' }
+        : { type: 'page', page: 'manager' });
+    } else if (confirmIndex === 0) dispatch({ type: 'page', page: 'root' });
+    else if (reloadPending) reloadProfileSettings(props, view);
+    else props.onClose?.();
+  }, { isActive: confirming });
+}
+
+function renderSettingsConfirmation(props: ProfileSettingsProps,
+  view: ProfileSettingsState): React.ReactElement {
+  const { state, library, confirmIndex, glyphs } = view;
+  const deleting = state.page === 'delete-confirm';
+  const name = library.entries.find((entry) => entry.id === state.deleteId)?.name ?? '';
+  const labels = deleting ? ['Cancel', 'Delete'] : ['Continue', 'Discard'];
+  return <OverlayFrame {...props}
+    title={deleting ? `Delete ${name}?` : 'Discard unsaved changes?'}
+    hint="Enter choose | Esc continue" rows={labels
+      .map((label, at) => <Text key={label} wrap="truncate" color={props.theme.primary}>
+        {confirmIndex === at ? `${glyphs.caret} ` : '  '}{label}
+      </Text>)} scrollOffset={0} />;
+}
+
+function renderProfileSubpage(props: ProfileSettingsProps,
+  view: ProfileSettingsState): React.ReactElement | null {
+  const { state, library, dispatch, setConfirmIndex } = view;
+  if (state.page === 'editor' && state.editor) return <ModelProfileEditor {...props}
+    editor={state.editor} users={profileUsers(library, state.editor.original.id)}
+    error={state.error} dispatch={dispatch} />;
+  if (state.page === 'picker' || state.page === 'manager') return <ModelProfilePicker {...props}
+    profiles={library} savedProfiles={state.draft.baseline.modelProfiles} role={state.role}
+    customProfile={createCustomProfile(state.draft, state.role)}
+    manager={state.page === 'manager'} error={state.error}
+    onSelect={(id) => dispatch({ type: 'select', role: state.role, id })}
+    onCreate={() => dispatch({ type: 'edit', profile: createCustomProfile(state.draft, state.role),
+      bindNew: state.page === 'picker' })}
+    onEdit={(profile) => dispatch({ type: 'edit', profile })}
+    onDuplicate={(id) => dispatch({ type: 'duplicate', id })}
+    onDelete={(id) => { setConfirmIndex(0); dispatch({ type: 'delete', id }); }}
+    onCancel={() => dispatch({ type: 'page', page: 'root' })} />;
+  return null;
+}
+
+function buildRootSettingsRows(props: ProfileSettingsProps,
+  view: ProfileSettingsState): React.ReactElement[] {
+  const { library, fields, values, persisted, readError, index, glyphs, state } = view;
+  const name = (id: string | null) => {
+    const entry = library.entries.find((candidate) => candidate.id === id);
+    if (!entry) return 'Current custom';
+    const missing = !entry.apiKey && !props.apiKeys[entry.provider];
+    return `${entry.name}  ${entry.provider}:${entry.model}${missing ? ' [Missing API key]' : ''}`;
+  };
+  const lines = [`Main profile      ${name(library.mainId)}`,
+    `Fast profile      ${name(library.fastId)}`,
+    `Manage profiles   ${library.entries.length} saved`,
+    ...fields.map((item) => `${item.label.padEnd(18)}${item.key === 'apiKey'
+      ? values.apiKey ? 'Configured (replacement)' : props.apiKeys[values.provider]
+        ? 'Configured (type to replace)' : '(type to set)'
+      : values[item.key] || (item.key === 'maxTokens' ? 'auto' : '(not set)')}`),
+    persisted || readError ? 'Save (disabled)' : 'Save settings', 'Reload settings'];
+  const rows = lines.map((line, at) => <Text key={at} wrap="truncate"
+    color={at === index ? props.theme.accent : props.theme.muted}>
+    {at === index ? `${glyphs.caret} ` : '  '}{line}
+  </Text>);
+  rows.push(<Text key="effective" wrap="truncate" color={props.theme.muted}>
+    {effectiveCapLine(values)}
+  </Text>);
+  const overrides = state.draft.liveBaseline.modelProfileState;
+  if (overrides?.main.overriddenFields.length || overrides?.fast.overriddenFields.length) {
+    rows.push(<Text key="overrides" wrap="truncate" color={props.theme.muted}>
+      Startup overrides active; explicit selection applies now. Restart uses startup overrides.
+    </Text>);
+  }
+  if (props.retrySummary) rows.push(<Text key="retry" wrap="truncate" color={props.theme.muted}>
+    API retries: {props.retrySummary}
+  </Text>);
+  return rows;
+}
+
+function ProfileSettingsScreen(props: ProfileSettingsProps): React.ReactElement {
+  const view = useProfileSettingsState(props);
+  useRootSettingsInput(props, view);
+  useSettingsConfirmationInput(props, view);
+  if (view.confirming) return renderSettingsConfirmation(props, view);
+  const subpage = renderProfileSubpage(props, view);
+  if (subpage) return subpage;
+  const { error, readError, dirty, persisted, index, offset } = view;
+  return <OverlayFrame {...props} rows={buildRootSettingsRows(props, view)} scrollOffset={offset}
+    title={error ?? (readError ? 'Cannot read config. Repair with aragon config edit; Reload.'
+      : dirty ? 'Settings | Unsaved changes' : 'Settings')}
+    hint={persisted ? 'Esc close; restart to apply' : index < 3
+      ? 'Enter select/edit | Ctrl+S save | Esc cancel'
+      : 'Enter save/action | Ctrl+S save | Esc cancel'} />;
 }

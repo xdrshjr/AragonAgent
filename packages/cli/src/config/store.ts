@@ -10,11 +10,15 @@
  * the drift the header of that module warns about.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import process from 'node:process';
 import { getConfigPath, getSessionsDir } from './app-paths.js';
-import { registerSecretsFrom } from '../logging/secret-registry.js';
+import { registerProfileSecrets, registerSecretsFrom } from '../logging/secret-registry.js';
+import { adaptLegacyConnectionPatch, ModelProfileConfigError, readModelSettingsDisk,
+  type ModelSettingsPatch } from './model-profile-store.js';
+import { normalizeModelProfiles, type ModelProfilesConfig } from './model-profiles.js';
 import {
   clampBashConfig,
   CONFIG_VERSION,
@@ -91,23 +95,10 @@ export interface ConfigFileRead {
  * workflow, so the failure mode had to become visible.
  */
 export function readConfigFile(): ConfigFileRead {
-  const file = getConfigPath();
-  if (!existsSync(file)) return { config: null };
-  try {
-    const raw = readFileSync(file, 'utf-8');
-    const parsed = JSON.parse(raw) as unknown;
-    if (parsed && typeof parsed === 'object') {
-      // Retired layout preference: tolerate old files without restoring a UI mode.
-      delete (parsed as Record<string, unknown>).fullscreen;
-      return { config: parsed as Partial<PersistedConfig> };
-    }
-    return { config: null, parseError: `${file} does not contain a JSON object` };
-  } catch (err) {
-    return {
-      config: null,
-      parseError: `${file}: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
+  const read = readModelSettingsDisk();
+  if (!read.ok) return { config: null, parseError: `${getConfigPath()}: ${read.error}` };
+  if (read.parsed) delete (read.parsed as unknown as Record<string, unknown>).fullscreen;
+  return { config: read.parsed };
 }
 
 // ---------------------------------------------------------------------------
@@ -128,10 +119,15 @@ export function writeConfigFile(config: PersistedConfig): void {
   const file = getConfigPath();
   ensureDir(dirname(file));
 
-  const tmp = `${file}.${process.pid}.tmp`;
+  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   const json = `${JSON.stringify(config, null, 2)}\n`;
-  writeFileSync(tmp, json, { encoding: 'utf-8', mode: 0o600 });
-  renameSync(tmp, file);
+  try {
+    writeFileSync(tmp, json, { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
+    renameSync(tmp, file);
+  } catch {
+    try { rmSync(tmp, { force: true }); } catch { /* Only our temporary path is eligible. */ }
+    throw new ModelProfileConfigError('write_failed');
+  }
 
   // rename may not preserve mode on every platform; re-chmod on POSIX.
   if (process.platform !== 'win32') {
@@ -148,12 +144,18 @@ export function writeConfigFile(config: PersistedConfig): void {
  * Unlike `readConfigFile`, this always returns a complete `PersistedConfig`.
  */
 export function loadPersistedConfig(): PersistedConfig {
+  return normalizePersistedConfig(readConfigFile().config ?? {});
+}
+
+/** Fill legacy defaults without projecting bindings or discarding unknown profile data. */
+export function normalizePersistedConfig(input: Partial<PersistedConfig>): PersistedConfig {
   // STRIP BEFORE THE SPREAD, not after. `partial` is the raw file, so any
   // `promptHistory` / `submitCount` / `mouseNoticeSeen` / `recentModels` left
   // on disk would otherwise ride the spread into `merged` and be written back
   // out by `updatePersistedConfig` — the "I deleted it and it grew back" bug
   // that `stripLegacyStateKeys` exists to make impossible (§4.5).
-  const partial = stripLegacyStateKeys(readConfigFile().config ?? {});
+  const partial = stripLegacyStateKeys(input);
+  delete (partial as unknown as Record<string, unknown>).fullscreen;
   return {
     ...DEFAULT_CONFIG,
     ...partial,
@@ -239,16 +241,32 @@ export function loadPersistedConfig(): PersistedConfig {
  * a third SECTION, but it is still one level deep (scalars only), so the same
  * hand-written merge covers it — and it must stay that way for that reason.
  */
-export function updatePersistedConfig(patch: Partial<PersistedConfig>): PersistedConfig {
+export function updatePersistedConfig(
+  patch: ModelSettingsPatch & { modelProfiles?: ModelProfilesConfig },
+): PersistedConfig {
+  const read = readModelSettingsDisk();
+  if (!read.ok) throw new ModelProfileConfigError('read_failed');
+  const adapted = adaptLegacyConnectionPatch({ current: read.config, patch });
+  const merged = mergePersistedConfig(read.config, adapted);
+  writeConfigFile(merged);
+  return merged;
+}
+
+/** Merge an already adapted patch, replacing profile arrays as one complete section. */
+export function mergePersistedConfig(
+  current: PersistedConfig, patch: ModelSettingsPatch & { modelProfiles?: ModelProfilesConfig },
+): PersistedConfig {
   // Registration site 5. Whatever route a key took to get here, this is the one
   // function that writes it to disk, so this is the last place it can be added
   // to the redactor's backstop before it also starts appearing in log records.
   registerSecretsFrom(patch.apiKeys);
-
-  const current = loadPersistedConfig();
+  registerProfileSecrets(patch);
+  const submittedProfiles = patch.modelProfiles === undefined
+    ? {} : { modelProfiles: normalizeModelProfiles(patch.modelProfiles) };
   const merged: PersistedConfig = {
     ...current,
     ...patch,
+    ...submittedProfiles,
     version: CONFIG_VERSION,
     // The write half of the gate: without it `config set maxTokens 900000` puts
     // a number on disk that the read path silently rewrites on every launch.
@@ -307,6 +325,5 @@ export function updatePersistedConfig(patch: Partial<PersistedConfig>): Persiste
     // `bash_output` / `bash_kill` from the next launch onward.
     bash: clampBashConfig({ ...current.bash, ...(patch.bash ?? {}) }),
   };
-  writeConfigFile(merged);
   return merged;
 }

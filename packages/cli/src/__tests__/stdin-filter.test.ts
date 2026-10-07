@@ -3,6 +3,8 @@ import { PassThrough } from 'node:stream';
 import { createStdinFilter, tryCreateStdinFilter } from '../input/stdin-filter.js';
 import type { MouseEvent } from '../input/mouse-events.js';
 import { enterAltScreen } from '../ui/screen.js';
+import { ENTER_NEWLINE_FRAME, PASTE_OPEN, PASTE_CLOSE, PASTE_MAX_BYTES } from '../input/limits.js';
+import { ENTER_SEQUENCES } from '../input/enter-sequences.js';
 
 /** Written as an escape, not a raw byte, so an editor that stripped the control
  *  character could not leave a test that asserts nothing and still passes. */
@@ -10,6 +12,149 @@ const ESC = '\u001B';
 const sgr = (b: number, x: number, y: number): string => `${ESC}[<${b};${x};${y}M`;
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+
+describe('DEL normalization outside paste', () => {
+  it.each([true, false])('keeps CSI Delete but normalizes DEL and split Alt+DEL, paste=%s', (paste) => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste });
+    const sink = drain(filter);
+    try {
+      stream.emit('data', '\x7f');
+      stream.emit('data', '\x1b[3~');
+      stream.emit('data', '\x1b');
+      stream.emit('data', '\x7f');
+      expect(sink.text()).toBe('\x08\x1b[3~\x1b\x08');
+    } finally { filter.dispose(); }
+  });
+});
+
+describe('输入流顺序和结束边界', () => {
+  it('拒绝块尾部未闭合的 bracketed paste 继续吞到结束标记，不泄漏后续内容', () => {
+    const { stream } = fakeStdin();
+    const warn = vi.fn();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true }, undefined, warn);
+    const sink = drain(filter);
+    try {
+      stream.emit('data', `${'x'.repeat(PASTE_MAX_BYTES + 1)}\x1b[13u\x1b[200~first`);
+      stream.emit('data', 'second\x1b[201~\r');
+      expect(sink.text()).toBe('');
+      expect(warn).toHaveBeenCalledTimes(1);
+      stream.emit('data', 'next');
+      expect(sink.text()).toBe('next');
+    } finally { filter.dispose(); }
+  });
+
+  it.each(['burst', 'bracketed'])('%s 超限时整块正文及提交都拒绝，下一次输入仍可用', (kind) => {
+    vi.useFakeTimers();
+    const { stream } = fakeStdin();
+    const warn = vi.fn();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true }, undefined, warn);
+    const sink = drain(filter);
+    const body = 'x'.repeat(PASTE_MAX_BYTES + 1);
+    const paste = kind === 'bracketed' ? `\x1b[200~${body}\x1b[201~` : body;
+    try {
+      stream.emit('data', `before\x1b[13;2u${paste}\x1b[13utail\x1b[13;`);
+      vi.runAllTimers();
+      expect(sink.text()).toBe('');
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+      stream.emit('data', 'next');
+      stream.emit('data', '\r');
+      expect(sink.text()).toBe('next\r');
+    } finally {
+      filter.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(ENTER_SEQUENCES)('$meaning 的全部拆包点与完整输入一致', ({ seq, to }) => {
+    vi.useFakeTimers();
+    try {
+      for (let cut = 1; cut < seq.length; cut += 1) {
+        const { stream } = fakeStdin();
+        const filter = createStdinFilter(stream, { mouse: true, paste: true });
+        const sink = drain(filter);
+        stream.emit('data', 'a\nb');
+        stream.emit('data', seq.slice(0, cut));
+        vi.advanceTimersByTime(1);
+        stream.emit('data', seq.slice(cut));
+        expect(sink.text(), `cut ${cut}`).toBe(`${PASTE_OPEN}a\nb${PASTE_CLOSE}${to}`);
+        filter.dispose();
+      }
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+  it.each([true, false])('过滤外部 NUL，paste=%s', (paste) => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste });
+    const sink = drain(filter);
+    stream.emit('data', '\0');
+    stream.emit('data', 'n');
+    expect(sink.text()).toBe('n');
+    filter.dispose();
+  });
+
+  it('显式修饰值 1 保留 Enter 的 CR 兼容', () => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true });
+    const sink = drain(filter);
+    stream.emit('data', '\x1b[13;1u');
+    expect(sink.text()).toBe('\r');
+    filter.dispose();
+  });
+
+  it.each(['\x1b[13;2u', '\x1b\r'])('burst 后 %j 不泄漏帧正文', (key) => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true });
+    const sink = drain(filter);
+    stream.emit('data', 'a\nb');
+    stream.emit('data', key);
+    expect(sink.text()).toBe(`${PASTE_OPEN}a\nb${PASTE_CLOSE}${ENTER_NEWLINE_FRAME}`);
+    filter.dispose();
+  });
+
+  it.each(['a\nb\x1b[13;', '\x1b[200~a\nb\x1b[20'])('EOF 排空 pending 并且幂等：%j', (raw) => {
+    vi.useFakeTimers();
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true });
+    const sink = drain(filter);
+    try {
+      stream.emit('data', raw);
+      stream.emit('end');
+      const ended = sink.text();
+      const suffix = raw.endsWith('13;') ? '[13;' : '[20';
+      expect(ended).toBe(`${PASTE_OPEN}a\nb${suffix}${PASTE_CLOSE}`);
+      expect(vi.getTimerCount()).toBe(0);
+      stream.emit('close');
+      stream.emit('data', 'late');
+      vi.runAllTimers();
+      expect(sink.text()).toBe(ended);
+    } finally {
+      filter.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it('idle pending 在 EOF 同步排空，dispose 则丢弃且无迟到输出', () => {
+    vi.useFakeTimers();
+    try {
+      for (const dispose of [false, true]) {
+        const { stream } = fakeStdin();
+        const filter = createStdinFilter(stream, { mouse: true, paste: true });
+        const sink = drain(filter);
+        stream.emit('data', '\x1b[13;');
+        if (dispose) filter.dispose();
+        stream.emit('end');
+        stream.emit('close');
+        stream.emit('data', 'late');
+        vi.runAllTimers();
+        expect(sink.text()).toBe(dispose ? '' : '\x1b[13;');
+        expect(vi.getTimerCount()).toBe(0);
+        filter.dispose();
+      }
+    } finally { vi.useRealTimers(); }
+  });
+});
 
 /**
  * T-22 -- THE MOUSE HALF OF THIS FILE IS UNCHANGED, VERBATIM.
@@ -352,6 +497,104 @@ const pasteFilter = (
   real: NodeJS.ReadStream,
   features: Partial<{ mouse: boolean; paste: boolean }> = {},
 ) => createStdinFilter(real, { mouse: true, paste: true, ...features });
+
+describe('createStdinFilter — Enter-family rewrite (tui-shift-enter-copy-queue 3.4)', () => {
+  const NL = '\u0000n';
+
+  it('rewrites a standalone CSI-u Shift+Enter to the newline frame', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write(`${ESC}[13;2u`);
+    await tick();
+
+    expect(sink.text()).toBe(NL);
+    filter.dispose();
+  });
+
+  it('rewrites a sequence that shares its chunk with leading keystrokes', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write(`ab${ESC}[13;5u`);
+    await tick();
+
+    expect(sink.text()).toBe(`ab${NL}`);
+    filter.dispose();
+  });
+
+  it('rewrites Alt+Enter (ESC CR) -- the Tier 2 classifier must not eat it', async () => {
+    // `classifyChunk` calls any chunk longer than one character that contains
+    // a line break a PASTE; without the rewrite-first placement this key would
+    // be buffered as a paste body and its ESC stripped, silently swallowing it.
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write(`${ESC}\r`);
+    await tick();
+
+    expect(sink.text()).toBe(NL);
+    filter.dispose();
+  });
+
+  it('rewrites the modifier-less CSI-u Enter back to a PLAIN CR', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write(`${ESC}[13u`);
+    await tick();
+
+    expect(sink.text()).toBe('\r');
+    filter.dispose();
+  });
+
+  it('reassembles a sequence torn across two chunks (the keep = max hold)', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+    const pipe = stream as unknown as PassThrough;
+
+    pipe.write(`${ESC}[13;`);
+    await tick();
+    expect(sink.text()).toBe(''); // nothing leaks while the hold is open
+    pipe.write('2u');
+    await tick();
+
+    expect(sink.text()).toBe(NL);
+    filter.dispose();
+  });
+
+  it('does NOT rewrite inside a bracketed paste body (I-3 discipline)', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write(`${BEGIN}${ESC}[13;2u${END}`);
+    await tick();
+
+    // The ESC is stripped by `sanitisePaste` like any other C0 byte in a
+    // payload, and nothing is REWRITTEN: a look-alike in pasted text is
+    // content, not a key.
+    expect(sink.text()).toBe(`${OPEN}[13;2u${CLOSE}`);
+    filter.dispose();
+  });
+
+  it('still rewrites in a --no-paste session', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream, { paste: false });
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write(`${ESC}[13;2u`);
+    await tick();
+
+    expect(sink.text()).toBe(NL);
+    filter.dispose();
+  });
+});
 
 describe('createStdinFilter — paste framing', () => {
   it('T-16: frames a bracketed paste and emits zero mouse events', async () => {

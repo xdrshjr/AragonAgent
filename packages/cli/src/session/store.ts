@@ -34,6 +34,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import process from 'node:process';
+import type { ModelRef } from '@aragon-agent/core';
 import { getSessionsDir } from '../config/app-paths.js';
 import { loadSession, saveSession, type SavedSession, type SessionMeta } from './persist.js';
 
@@ -181,7 +182,7 @@ export function resolveSessionRef(idOrPath: string, cwd: string): string | null 
 
 export interface WriteSessionInput {
   id: string;
-  session: Omit<SavedSession, 'version' | 'savedAt' | 'meta'>;
+  session: Omit<SavedSession, 'version' | 'savedAt' | 'meta' | 'model'> & { model: ModelRef };
   meta: SessionMeta;
 }
 

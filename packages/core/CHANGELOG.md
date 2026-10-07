@@ -9,6 +9,13 @@ were written.
 
 ### Added
 
+- **Steering 精确接收回执。** `Agent.steer(text, id?)` 兼容原单参数调用，
+  历史接收后发出 `steering_accepted`，只确认当前批次的 ID；新增类型
+  `SteeringMessage` 和 `SteeringAcceptedEvent`，无新增运行时导出。
+  `drainSteeringItems()` 与原 `drainSteering()` 共用一个队列。
+  接收早于异步压缩，未执行工具先补齐 skipped 结果；无工具响应在结束前再次检查
+  steering，避免流式输出期间提交的消息滞留。回执仅代表历史接收，不代表回答完成。
+
 - **Tail relief — the last rung of the compaction ladder.** `relieveTail` joins
   the root barrel with `TailReliefOptions` and `TailReliefResult` (85 → 86
   runtime exports), and `compaction_end` gains an optional `tailRelief` field.

@@ -8,8 +8,14 @@
  * Agent loop would otherwise exit (end_turn with no pending work).
  */
 
+/** Queued text with an optional host-supplied opaque receipt identifier. */
+export interface SteeringMessage {
+  readonly text: string;
+  readonly id?: string;
+}
+
 export class MessageQueueManager {
-  private readonly steeringQueue: string[] = [];
+  private readonly steeringQueue: SteeringMessage[] = [];
   private readonly followUpQueue: string[] = [];
 
   // -----------------------------------------------------------------------
@@ -17,12 +23,17 @@ export class MessageQueueManager {
   // -----------------------------------------------------------------------
 
   /** Enqueue a high-priority steering message. */
-  pushSteering(message: string): void {
-    this.steeringQueue.push(message);
+  pushSteering(message: string, id?: string): void {
+    this.steeringQueue.push({ text: message, ...(id !== undefined ? { id } : {}) });
   }
 
   /** Drain and return all pending steering messages (empties the queue). */
   drainSteering(): string[] {
+    return this.drainSteeringItems().map((item) => item.text);
+  }
+
+  /** Drain all pending envelopes in FIFO order (empties the same queue). */
+  drainSteeringItems(): SteeringMessage[] {
     return this.steeringQueue.splice(0);
   }
 

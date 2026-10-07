@@ -131,6 +131,16 @@ export interface Glyphs {
   retry: string;
 
   /**
+   * A message queued behind a running turn (tui-shift-enter-copy-queue 5.4).
+   * The rail marker on the `Queue: ...` row.
+   *
+   * HERE rather than in `QueuedEntry`, for the reason this file's header
+   * gives: a literal in a component bypasses `pickGlyphs` entirely and
+   * shows mojibake on a legacy console whatever the capability probe said.
+   */
+  queued: string;
+
+  /**
    * Context compaction (context-auto-compaction §6.3). The rail marker on the
    * compaction card.
    *
@@ -213,6 +223,7 @@ const UNICODE_GLYPHS: Glyphs = {
 
   retry: '↻',
   compaction: '⤓',
+  queued: '◷',
 
   tool: {
     read_file: '▤',
@@ -285,6 +296,7 @@ const ASCII_GLYPHS: Glyphs = {
 
   retry: '[r]',
   compaction: '[c]',
+  queued: '*',
 
   tool: {
     read_file: '=',

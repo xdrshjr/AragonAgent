@@ -43,7 +43,7 @@ import { readConfigFile } from '../config/store.js';
 import { clampLogConfig, type LogConfig } from '../config/schema.js';
 import { clampLogLevel, type LogLevelName } from './levels.js';
 import { Logger, setActiveLogger, type LogScope } from './logger.js';
-import { registerSecretsFrom } from './secret-registry.js';
+import { registerProfileSecrets, registerSecretsFrom } from './secret-registry.js';
 
 /** POSIX signal numbers for the `128 + signo` exit-code convention. */
 const SIGNAL_NUMBERS: Record<string, number> = { SIGINT: 2, SIGTERM: 15, SIGHUP: 1 };
@@ -249,7 +249,9 @@ export function installLogging(opts: InstallLoggingOptions = {}): Logger {
   // Registration site 1 (§4.4.3): whatever the config file already holds. Sites
   // 2, 3, 4 and 5 add the env, the merged view plus `--api-key`, the settings
   // screen, and every persisted write respectively.
-  registerSecretsFrom(readConfigFile().config?.apiKeys ?? undefined);
+  const persisted = readConfigFile().config;
+  registerSecretsFrom(persisted?.apiKeys ?? undefined);
+  registerProfileSecrets(persisted);
 
   const warning = getHomeResolutionWarning();
   if (warning) logger.warn('cli', 'home_resolution_fallback', { reason: warning });
@@ -354,6 +356,7 @@ export interface AgentEventSource {
  */
 export type AgentLogEvent =
   | { type: 'agent_start' }
+  | { type: 'steering_accepted'; ids: readonly string[] }
   | { type: 'agent_end'; messages: unknown[] }
   | { type: 'turn_start' }
   | { type: 'turn_end'; usage?: { inputTokens?: number; outputTokens?: number } }

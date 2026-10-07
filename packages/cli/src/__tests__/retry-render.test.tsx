@@ -255,13 +255,14 @@ describe('StatusBar retry chip (AC-28)', () => {
     return out;
   };
 
-  it('shows `retry 3/10` at 120 columns', () => {
-    expect(bar(120, { attempt: 3, max: 10, secondsLeft: 7 })).toContain('retry 3/10');
+  it('shows the real retry stage and countdown at 120 columns', () => {
+    expect(bar(120, { attempt: 3, max: 10, secondsLeft: 7 })).toContain('等待重试 7s');
   });
 
-  it('degrades to `[r3]` at 80 columns, so the context gauge keeps its columns', () => {
+  it('keeps retry and the complete context pair at 80 columns', () => {
     const narrow = bar(80, { attempt: 3, max: 10, secondsLeft: 7 });
-    expect(narrow).toContain('[r3]');
+    expect(narrow).toContain('重试');
+    expect(narrow).toMatch(/1(?:\.0)?k\/200(?:\.0)?k tok/);
     expect(narrow).not.toContain('retry 3/10');
   });
 

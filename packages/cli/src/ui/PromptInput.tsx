@@ -35,10 +35,18 @@ import {
   type EditorState,
   type InputSegment,
 } from './editor-reducer.js';
-import { hasPasteFrame, splitPasteFrames } from './paste-frames.js';
+import { hasPasteFrame } from './paste-frames.js';
+import {
+  hasEnterFrame,
+  splitEnterFrames,
+} from './enter-frames.js';
+import { planComposerInput, type ComposerInputIntent,
+  type ComposerSubmitResult } from './composer-input.js';
 import { allocatePasteId, expandPastes, expandRangeOverTokens } from './paste-tokens.js';
 import { draftMaxRows } from './composer-limits.js';
 import { layoutComposer, splitRowAtColumn, type ComposerSegment } from './composer-rows.js';
+import { moveVisualCursor, snapGrapheme, stepGrapheme } from './editor-navigation.js';
+import { interactionCopy } from './interaction-copy.js';
 import {
   PASTE_DRAFT_MAX_BYTES,
   PASTE_MAX_BLOCKS,
@@ -72,7 +80,10 @@ interface PromptInputProps {
   /** Total menu rows, including borders and the overflow hint. */
   popupMaxHeight?: number;
   onPopupRowsChange?: (rows: number) => void;
-  onSubmit: (text: string) => void;
+  onCompletionContextChange?: (context: 'none' | 'slash' | 'file') => void;
+  /** True only when the stdin filter normalized DEL before Ink parsed it. */
+  deleteDisambiguated?: boolean;
+  onSubmit: (text: string) => ComposerSubmitResult;
   onHelp?: () => void;
   onEscape?: () => void;
   onEscapeDismiss?: () => void;
@@ -240,6 +251,7 @@ export function draftLimitRefusal(
 const isSpace = (ch: string | undefined): boolean => !!ch && /\s/.test(ch);
 
 function lineStart(buffer: string, cursor: number): number {
+  if (cursor <= 0) return 0;
   const nl = buffer.lastIndexOf('\n', cursor - 1);
   return nl === -1 ? 0 : nl + 1;
 }
@@ -277,7 +289,8 @@ function killRange(
   from: number,
   to: number,
 ): { buffer: string; cursor: number } {
-  const range = expandRangeOverTokens(buffer, from, to);
+  const range = expandRangeOverTokens(buffer,
+    snapGrapheme(buffer, from), snapGrapheme(buffer, to, true));
   return { buffer: buffer.slice(0, range.from) + buffer.slice(range.to), cursor: range.from };
 }
 
@@ -287,18 +300,18 @@ export function applyEdit(
   cursor: number,
   intent: EditIntent,
 ): { buffer: string; cursor: number } {
+  cursor = snapGrapheme(buffer, cursor);
   switch (intent) {
-    // Cursor MOVEMENT is deliberately not token-aware (D-8): arrows, Home/End
-    // and word jumps step by character, because re-deriving `moveVertical` around
-    // a synthetic unit buys a correctness the user cannot notice.
+    // Navigation may enter a token label; insertion and range deletion retain
+    // the existing token snapping and expansion contracts.
     case 'home':
       return { buffer, cursor: lineStart(buffer, cursor) };
     case 'end':
       return { buffer, cursor: lineEnd(buffer, cursor) };
     case 'wordLeft':
-      return { buffer, cursor: prevWord(buffer, cursor) };
+      return { buffer, cursor: snapGrapheme(buffer, prevWord(buffer, cursor)) };
     case 'wordRight':
-      return { buffer, cursor: nextWord(buffer, cursor) };
+      return { buffer, cursor: snapGrapheme(buffer, nextWord(buffer, cursor), true) };
     case 'deleteWordBack':
       return killRange(buffer, prevWord(buffer, cursor), cursor);
     case 'killToStart':
@@ -318,16 +331,8 @@ export function moveVertical(
   cursor: number,
   dir: 'up' | 'down',
 ): { cursor: number } | null {
-  const lines = buffer.split('\n');
-  if (lines.length < 2) return null;
-  const before = buffer.slice(0, cursor);
-  const idx = before.split('\n').length - 1;
-  const col = before.length - (before.lastIndexOf('\n') + 1);
-  const target = dir === 'up' ? idx - 1 : idx + 1;
-  if (target < 0 || target >= lines.length) return null;
-  let start = 0;
-  for (let i = 0; i < target; i += 1) start += lines[i]!.length + 1;
-  return { cursor: start + Math.min(col, lines[target]!.length) };
+  const moved = moveVisualCursor({ buffer, cursor, direction: dir, cols: Number.MAX_SAFE_INTEGER });
+  return moved ? { cursor: moved.cursor } : null;
 }
 
 /**
@@ -383,6 +388,8 @@ export function PromptInput({
   popupMaxRows,
   popupMaxHeight,
   onPopupRowsChange,
+  onCompletionContextChange,
+  deleteDisambiguated = false,
   agentMode,
   onSubmit,
   onHelp,
@@ -426,6 +433,16 @@ export function PromptInput({
     onPopupRowsChange?.(popupLayout.rowCount);
   }, [onPopupRowsChange, popupLayout.rowCount]);
   useLayoutEffect(() => () => onPopupRowsChange?.(0), [onPopupRowsChange]);
+  const completion = popupVisible ? popupKind ?? 'none' : 'none';
+  const completionCallback = useRef(onCompletionContextChange);
+  completionCallback.current = onCompletionContextChange;
+  const lastCompletion = useRef<typeof completion>();
+  useLayoutEffect(() => {
+    if (!onCompletionContextChange || lastCompletion.current === completion) return;
+    lastCompletion.current = completion;
+    onCompletionContextChange?.(completion);
+  }, [onCompletionContextChange, completion]);
+  useLayoutEffect(() => () => completionCallback.current?.('none'), []);
 
   // --- Debounced `@file` scan. ---------------------------------------------
   useEffect(() => {
@@ -494,6 +511,8 @@ export function PromptInput({
   const overflows = wide.hiddenAbove > 0 || wide.hiddenBelow > 0;
   const usableCols = overflows ? Math.max(8, baseCols - OVERFLOW_CELLS - 1) : baseCols;
   const layout = overflows ? measure(usableCols) : wide;
+  const preferredColumnWidth = useRef<number>();
+  useLayoutEffect(() => { preferredColumnWidth.current = undefined; }, [usableCols]);
   const draftRowCount = Math.max(1, layout.rows.length);
   const caretResetKey = useMemo(() => ({}), [buffer, cursor, isActive, usableCols]);
 
@@ -520,18 +539,38 @@ export function PromptInput({
     dispatch({ type: 'insert', text });
   };
 
-  /**
-   * Expand every token back to its payload, then send (D-7 / D-9).
-   *
-   * `onSubmit`'s signature is unchanged, so `Composer`, `App.handleSubmit`,
-   * `runSlashInput` and `submitMessage` are all untouched — and a slash command
-   * therefore sees the EXPANDED text, which is what `/skill foo <pasted body>`
-   * needs. `clear` releases every payload in the same dispatch.
-   */
-  const submit = (text: string) => {
+  const resolveSubmit = (state: EditorState): string | null => {
+    const suggestions = state.dismissed ? null : slashSuggestions(state.buffer, commands);
+    const selectedIndex = Math.min(state.sel, (suggestions?.length ?? 0) - 1);
+    const suggestionLayout = buildAutocompleteLayout({
+      itemCount: isActive ? suggestions?.length ?? 0 : 0,
+      selected: selectedIndex, maxRows: popupMaxRows, maxHeight: popupMaxHeight,
+    });
+    const selected = suggestionLayout.rowCount > 0 ? suggestions?.[selectedIndex] : undefined;
+    const text = selected?.label ?? expandPastes(state.buffer, state.pastes);
+    return text.trim().length > 0 ? text : null;
+  };
+
+  const transact = (intents: ComposerInputIntent[]): void => {
+    const plan = planComposerInput({
+      editor, intents, resolveSubmit, checkPasteLimit: draftLimitRefusal,
+    });
+    if (plan.refusal) { onNotice?.('warn', plan.refusal); return; }
     onInteraction?.();
-    onSubmit(expandPastes(text, editor.pastes));
-    dispatch({ type: 'clear' });
+    let result: ComposerSubmitResult = { accepted: true };
+    if (plan.submission !== undefined) {
+      try {
+        result = onSubmit(plan.submission);
+      } catch (error) {
+        result = { accepted: false, reason: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    dispatch({ type: 'adopt', state: result.accepted ? plan.nextEditor : plan.rejectedEditor });
+    if (!result.accepted) {
+      onNotice?.('error', result.reason ?? 'Message was not accepted; input is kept in the draft.');
+    } else if (plan.notice) {
+      onNotice?.('warn', plan.notice);
+    }
   };
 
   const recallUp = () => {
@@ -570,9 +609,12 @@ export function PromptInput({
 
   const verticalOrHistory = (dir: 'up' | 'down') => {
     onInteraction?.();
-    const moved = moveVertical(buffer, cursor, dir);
+    const moved = moveVisualCursor({ buffer, cursor, cols: usableCols, direction: dir,
+      preferredVisualColumn: preferredColumnWidth.current === usableCols
+        ? editor.preferredVisualColumn : undefined });
     if (moved) {
-      dispatch({ type: 'moveCursor', cursor: moved.cursor });
+      preferredColumnWidth.current = usableCols;
+      dispatch({ type: 'moveCursor', ...moved });
       return;
     }
     // At an edge: recall history only from an empty buffer or while already
@@ -594,6 +636,18 @@ export function PromptInput({
       // appears with a popup open and is therefore easy to ship (AC-P3 / R-P2).
       if (key.tab && key.shift) return;
       if (key.pageUp || key.pageDown || (key.shift && (key.upArrow || key.downArrow))) return;
+      if ((key.return || input === '\r') && (key.meta || key.shift)) {
+        insert('\n');
+        return;
+      }
+
+      if (hasPasteFrame(input) || hasEnterFrame(input) || /[\r\n]/.test(input)) {
+        const intents: ComposerInputIntent[] = splitEnterFrames(input).map((frame) =>
+          frame.kind === 'paste' ? { ...frame, id: allocatePasteId() } : frame,
+        );
+        if (intents.length > 0) transact(intents);
+        return;
+      }
 
       // Popup navigation owns Up/Down/Tab/→/Enter/Esc while it is open.
       if (popupVisible) {
@@ -612,8 +666,7 @@ export function PromptInput({
           return;
         }
         if (key.return && popupKind === 'slash') {
-          const label = popupItems[clampedSel]?.label;
-          if (label) submit(label);
+          transact([{ kind: 'submit' }]);
           return;
         }
         if (key.escape) {
@@ -630,11 +683,15 @@ export function PromptInput({
       }
 
       // Line-editing intents (Home/End/word/kill) recognized from raw keys.
-      const intent = recognize(input, key as KeyState);
+      const intent = key.meta && (key.backspace || key.delete)
+        ? 'deleteWordBack' : recognize(input, key as KeyState);
       if (intent) {
         onInteraction?.();
         const next = applyEdit(buffer, cursor, intent);
-        dispatch({ type: 'replace', buffer: next.buffer, cursor: next.cursor });
+        const moving = intent === 'home' || intent === 'end'
+          || intent === 'wordLeft' || intent === 'wordRight';
+        dispatch(moving ? { type: 'moveCursor', cursor: next.cursor }
+          : { type: 'replace', buffer: next.buffer, cursor: next.cursor });
         return;
       }
 
@@ -646,7 +703,7 @@ export function PromptInput({
           return;
         }
         if (buffer.trim().length === 0) return;
-        submit(buffer);
+        transact([{ kind: 'submit' }]);
         return;
       }
 
@@ -656,20 +713,18 @@ export function PromptInput({
         // unconditional dispatch and a no-op at the left edge returns the same
         // state object — which React bails out on, exactly as the old
         // `if (cursor > 0)` skipped the `setState`s.
-        dispatch({ type: 'backspace' });
+        dispatch({ type: key.delete && deleteDisambiguated ? 'delete' : 'backspace' });
         return;
       }
 
       if (key.leftArrow) {
         onInteraction?.();
-        const step = cursor >= 2 && (buffer.codePointAt(cursor - 2) ?? 0) > 0xffff ? 2 : 1;
-        dispatch({ type: 'moveCursor', cursor: Math.max(0, cursor - step) });
+        dispatch({ type: 'moveCursor', cursor: stepGrapheme(buffer, cursor, 'left') });
         return;
       }
       if (key.rightArrow) {
         onInteraction?.();
-        const step = (buffer.codePointAt(cursor) ?? 0) > 0xffff ? 2 : 1;
-        dispatch({ type: 'moveCursor', cursor: Math.min(buffer.length, cursor + step) });
+        dispatch({ type: 'moveCursor', cursor: stepGrapheme(buffer, cursor, 'right') });
         return;
       }
       // `!key.shift` is load-bearing: Shift+↑/↓ is the viewport's line-scroll
@@ -690,31 +745,6 @@ export function PromptInput({
         return;
       }
 
-      // A PASTE (section 5.4). It sits AFTER every key branch so a paste can
-      // never be shadowed by a key test, and BEFORE `isControlSeq` because a
-      // framed string starts with NUL and would otherwise be dropped.
-      //
-      // The text runs inside `segments` are already sanitised (I-14): Ink drains
-      // its whole buffer in one `read()`, so this same string can carry the `\r`
-      // of a user who pasted and pressed Enter inside the burst window.
-      if (hasPasteFrame(input)) {
-        const runs = splitPasteFrames(input);
-        const segments: InputSegment[] = runs.map((run) =>
-          run.kind === 'paste' ? { kind: 'paste', text: run.text, id: allocatePasteId() } : run,
-        );
-        if (segments.length === 0) return;
-        const refusal = draftLimitRefusal(segments, editor);
-        if (refusal) {
-          // A refusal dispatches NOTHING, so the draft is byte-for-byte
-          // unchanged (AC-9) — and it is never silent (D-11).
-          onNotice?.('warn', refusal);
-          return;
-        }
-        onInteraction?.();
-        dispatch({ type: 'input', segments });
-        return;
-      }
-
       // Printable input — drop any unrecognized control/escape byte.
       if (input && !key.tab && !isControlSeq(input)) insert(input);
     },
@@ -723,11 +753,7 @@ export function PromptInput({
 
   const marker = running ? glyphs.steer : glyphs.caret;
   const markerColor = running ? theme.toolRunning : theme.primary;
-  const placeholder = running
-    ? `Type to steer the run, Esc twice to interrupt${glyphs.ellipsis}`
-    : agentMode === 'plan'
-    ? `Describe what you want to build; I'll research and plan it first${glyphs.ellipsis}`
-    : `Send a message (/ for commands, @ for files)${glyphs.ellipsis}`;
+  const placeholder = running ? interactionCopy.runningPlaceholder : interactionCopy.idlePlaceholder;
   const overflow = overflowChip(layout.hiddenAbove, layout.hiddenBelow, glyphs);
   const tokenColor = theme.hintFg ?? theme.muted;
   const renderSegments = (segments: ComposerSegment[], keyPrefix: string): React.ReactNode[] =>

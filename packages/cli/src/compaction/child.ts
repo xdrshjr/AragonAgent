@@ -29,6 +29,8 @@
  * report are where a child's internals belong.
  */
 
+import { resolveFastTier } from '../fast/resolve.js';
+import type { ModelRole } from '../config/model-profiles.js';
 import type {
   AssistantMessage,
   ContextManager,
@@ -46,8 +48,8 @@ import { COMPACTION_LIMITS } from './limits.js';
 export interface ChildCompactionDeps {
   /** Read LIVE on every call - see `childConfig` below. */
   getConfig: () => CliConfig;
-  hasKey: (providerId: string) => boolean;
-  getApiKey: (providerId: string) => string | undefined;
+  hasKey: (providerId: string, role?: ModelRole) => boolean;
+  getApiKey: (providerId: string, role?: ModelRole) => string | undefined;
   getModelInfoFor: (ref: Pick<ModelRef, 'providerId' | 'modelId'>) => ModelInfo;
   isPricedModel: (ref: Pick<ModelRef, 'providerId' | 'modelId'>) => boolean;
   /** The lead wiring's own transport, reused (D-10 stays true). */
@@ -64,6 +66,7 @@ export interface ChildCompactionDeps {
  * exactly on the cap.
  */
 export interface ChildContextManagerRequest {
+  role?: ModelRole;
   label: string;
   /**
    * The model the child actually runs on.
@@ -144,7 +147,7 @@ export function createChildContextManager(
       ...base,
       provider: req.model.providerId,
       model: req.model.modelId,
-      ...(req.model.baseUrl !== undefined ? { baseUrl: req.model.baseUrl } : {}),
+      baseUrl: req.model.baseUrl,
       compaction: {
         ...base.compaction,
         keepRecentTurns: COMPACTION_LIMITS.childKeepRecentTurns,
@@ -161,6 +164,8 @@ export function createChildContextManager(
   const compactor = new Compactor(
     {
       getConfig: childConfig,
+      mainRole: req.role ?? 'main',
+      resolveFastCandidate: () => resolveFastTier(deps.getConfig(), deps.hasKey),
       hasKey: deps.hasKey,
       getApiKey: deps.getApiKey,
       getModelInfoFor: deps.getModelInfoFor,

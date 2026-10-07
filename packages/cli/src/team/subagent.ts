@@ -11,6 +11,7 @@
  * omission has a reason that is a correctness boundary rather than caution.
  */
 
+import type { ModelRole } from '../config/model-profiles.js';
 import {
   Agent,
   createSkillFindTool,
@@ -86,7 +87,7 @@ export interface SubagentDeps {
   getCwd: () => string;
   /** The lead's live session mode. Read at CALL time, never cached. */
   getMode: () => AgentMode;
-  getApiKey: (providerId: string) => string | undefined;
+  getApiKey: (providerId: string, role?: ModelRole) => string | undefined;
   /**
    * The lead's `SkillRegistry`, used for `skill_find` ONLY.
    *
@@ -132,7 +133,7 @@ export interface SubagentDeps {
    * refuse, and this factory can never build a child against a `ModelRef` the
    * tier stopped resolving twenty minutes ago (RV-3 / R-14).
    */
-  resolveTier?: (tier: FastTierName) => { ref: ModelRef; thinkingLevel: ThinkingLevel };
+  resolveTier?: (tier: FastTierName) => { ref: ModelRef; thinkingLevel: ThinkingLevel; role?: ModelRole };
   /**
    * Build this child its own context manager
    * (context-auto-compaction-hardening §3.4.3 / W3).
@@ -338,6 +339,7 @@ export function createSubagent(
           ...(deps.config.baseUrl ? { baseUrl: deps.config.baseUrl } : {}),
         } as ModelRef,
         thinkingLevel: deps.config.thinkingLevel,
+        role: 'main' as const,
       };
   const model: ModelRef = resolved.ref;
 
@@ -368,6 +370,7 @@ export function createSubagent(
   const contextManager = deps.contextManagerFor?.({
     label: spec.label,
     model,
+    role: resolved.role ?? 'main',
     getMessages: () => agentRef?.state.messages ?? [],
     getSystemPrompt: () => systemPrompt,
     onCompacted: () => {
@@ -384,7 +387,7 @@ export function createSubagent(
     // constructing five of them per dispatch is pure waste.
     providerRegistry: deps.providerRegistry,
     // The lead's closure, so a settings-screen key edit reaches children too.
-    getApiKey: deps.getApiKey,
+    getApiKey: (id) => deps.getApiKey(id, resolved.role ?? 'main'),
     ...(deps.config.maxTokens !== undefined ? { maxTokens: deps.config.maxTokens } : {}),
     timeouts: {
       toolTimeout: deps.config.toolTimeoutMs,

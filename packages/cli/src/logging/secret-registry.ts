@@ -42,6 +42,20 @@ export function registerSecretsFrom(
   for (const value of Object.values(keys)) registerSecret(value);
 }
 
+/** Register dedicated credentials in untrusted parsed config before schema validation. */
+export function registerProfileSecrets(value: unknown): void {
+  if (!value || typeof value !== 'object') return;
+  const profiles = (value as Record<string, unknown>).modelProfiles;
+  if (!profiles || typeof profiles !== 'object') return;
+  const entries = (profiles as Record<string, unknown>).entries;
+  if (!Array.isArray(entries)) return;
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue;
+    const key = (entry as Record<string, unknown>).apiKey;
+    if (typeof key === 'string') registerSecret(key);
+  }
+}
+
 /**
  * Every known secret, LONGEST FIRST.
  *

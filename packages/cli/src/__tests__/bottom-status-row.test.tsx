@@ -80,8 +80,9 @@ describe('BottomStatusRow — full-screen is ALWAYS exactly one row', () => {
     expect(hasPhrase(frame)).toBe(false);
   });
 
-  it('shows the activity line when the row is free', () => {
-    expect(hasPhrase(frameOf([], true))).toBe(true);
+  it('shows permanent action hints when the row is free', () => {
+    expect(hasPhrase(frameOf([], true))).toBe(false);
+    expect(frameOf([], true)).toContain('Esc×2 中断');
   });
 });
 

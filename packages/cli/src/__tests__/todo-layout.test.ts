@@ -23,7 +23,7 @@ function teamSnapshot(count: number, mail = false): TeamSnapshot {
 describe('TODO 共享行预算', () => {
   it('团队八行时右栏仍占完整预算，正文保留其余列', () => {
     expect(buildTodoRailLayout(input)).toMatchObject({
-      visible: true, reason: 'visible', width: 15, rows: 12, contentCols: 85, popupMaxHeight: 1,
+      visible: true, reason: 'visible', width: 15, rows: 12, contentCols: 85, popupMaxHeight: 3,
     });
   });
   it('菜单为正文保留三行，空间不足时菜单不占行', () => {

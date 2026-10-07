@@ -38,6 +38,27 @@ const tool = (id: string): Entry => ({
 });
 
 describe('renderTranscriptText', () => {
+  it('retains every pending body when more than 200 messages await receipts', () => {
+    const entries: Entry[] = Array.from({ length: 260 }, (_, i) =>
+      ({ id: `q${i}`, queueId: `q${i}`, kind: 'queued', text: `unsent-${i}\nbody-${i}` }));
+    entries.splice(100, 0, ...Array.from({ length: 250 }, (_, i) => user(`u${i}`)));
+    const out = renderTranscriptText(entries, OPTS);
+    for (let i = 0; i < 260; i += 1) {
+      expect(out).toContain(`Queued but never sent: unsent-${i}\n`);
+      expect(out).toContain(`body-${i}`);
+    }
+    expect(out).toContain('50 entries omitted');
+    expect(out.indexOf('unsent-0\n')).toBeLessThan(out.indexOf('unsent-259\n'));
+  });
+  it('never folds pending messages out of the middle of a long history', () => {
+    const entries = Array.from({ length: 250 }, (_, i) => user(`e${i}`, `history ${i}`));
+    entries.splice(125, 0, { id: 'pending:a', kind: 'queued', text: 'unsent first\nunsent last' });
+    const out = renderTranscriptText(entries, OPTS);
+    expect(out).toContain('Queued but never sent: unsent first');
+    expect(out).toContain('unsent last');
+    expect(out.match(/unsent first/g)).toHaveLength(1);
+    expect(out).toContain('50 entries omitted');
+  });
   it('emits no ANSI escapes', () => {
     const out = renderTranscriptText([user('u1'), asst('a1'), tool('t1')], OPTS);
     expect(ANSI.test(out)).toBe(false);

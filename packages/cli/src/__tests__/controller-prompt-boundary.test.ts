@@ -35,6 +35,16 @@ afterEach(() => {
 });
 
 describe('prompt startup boundary', () => {
+  it('rolls back only the protection ID of a failed queue submission', () => {
+    const { controller, engine } = setup();
+    const first = controller.queueUserMessage('keep');
+    const protectedIds = (controller as unknown as { pendingUserSteering: Set<string> })
+      .pendingUserSteering;
+    vi.spyOn(engine, 'steer').mockImplementationOnce(() => { throw new Error('unavailable'); });
+    expect(() => controller.queueUserMessage('rejected')).toThrow('unavailable');
+    expect([...protectedIds]).toEqual([first]);
+    expect(controller.queueUserMessage('next')).not.toBe(first);
+  });
   it('a newer prompt invalidates the older pending message', async () => {
     const { controller, engine, prompt } = setup();
     const state = { ...engine.state, isRunning: true };
@@ -158,7 +168,7 @@ describe('mounted App with the real pending-start controller', () => {
     } finally { view.unmount(); }
   });
 
-  it('reset while starting cancels startup and synchronizes the idle view', async () => {
+  it('rejects reset while the old engine is busy, then permits an idle reset', async () => {
     vi.useFakeTimers();
     const { controller, engine, prompt } = setup();
     const state = { ...engine.state, isRunning: false };
@@ -173,11 +183,20 @@ describe('mounted App with the real pending-start controller', () => {
       view.stdin.write('\r'); await flush();
       view.stdin.write('/reset'); await flush();
       view.stdin.write('\r'); await flush();
-      expect(view.lastFrame()).toContain('idle');
+      expect(view.lastFrame()).toContain('Interrupt the current run before switching conversations.');
+      expect(view.lastFrame()).toContain('/reset');
+      expect(controller.getTodoSnapshot()).not.toBeNull();
       expect(view.frames.join('\n')).not.toContain('The run ended without producing a response');
+      // Dismiss the preserved slash palette, then cancel the pending start.
+      view.stdin.write(ESC); await flush();
+      view.stdin.write(ESC); await flush();
+      view.stdin.write(ESC); await flush();
+      expect(view.lastFrame()).toContain('Pending run cancelled.');
       state.isRunning = false;
       release(); await flush();
       expect(prompt).not.toHaveBeenCalled();
+      view.stdin.write('\r'); await flush();
+      expect(controller.getTodoSnapshot()).toBeNull();
       view.stdin.write('new conversation'); await flush();
       view.stdin.write('\r'); await flush();
       expect(prompt).toHaveBeenCalledExactlyOnceWith('new conversation');
@@ -212,6 +231,8 @@ describe('mounted App with the real pending-start controller', () => {
       release(); await flush();
       expect(prompt).not.toHaveBeenCalled();
       expect(notify).not.toHaveBeenCalled();
+      expect(view.lastFrame()).toContain('do not steer');
+      view.stdin.write('\x15'); await flush(); // Explicitly discard the retained draft.
       view.stdin.write('next'); await flush();
       view.stdin.write('\r'); await flush();
       expect(prompt).toHaveBeenCalledExactlyOnceWith('next');
@@ -234,7 +255,7 @@ describe('mounted App with the real pending-start controller', () => {
       view.stdin.write('timeout'); await flush();
       view.stdin.write('\r'); await flush();
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(view.lastFrame()).toContain('idle');
+      expect(view.lastFrame()).toMatch(/失败|结束/);
       expect(notify).toHaveBeenCalledTimes(1);
       expect(ends).not.toHaveBeenCalled();
       expect(controller.getTodoSnapshot()).not.toBeNull();

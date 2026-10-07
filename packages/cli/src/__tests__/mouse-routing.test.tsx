@@ -286,7 +286,7 @@ describe('routing table (§4.1)', () => {
   });
 
   it('scrolls a controlled overlay instead of the transcript', async () => {
-    for (const overlay of ['help', 'settings', 'plan'] as const) {
+    for (const overlay of ['help', 'settings', 'plan', 'queue'] as const) {
       const r = mountRouter(overlay);
       await r.waitUntilSubscribed();
       r.wheel('up', TRANSCRIPT_ROW);
@@ -751,14 +751,14 @@ describe('App (wheel routing end to end)', () => {
     const { lastFrame, unmount } = mountApp(mouse.source);
     await delay(60);
     const before = stripAnsi(lastFrame() ?? '');
-    expect(before).toContain('Send a message');
+    expect(before).toContain('\u8f93\u5165\u4efb\u52a1\u6216\u95ee\u9898');
 
     mouse.wheel('up', TRANSCRIPT_ROW);
     mouse.wheel('up', TRANSCRIPT_ROW);
     await delay(80);
 
     const after = stripAnsi(lastFrame() ?? '');
-    expect(after).toContain('Send a message'); // placeholder, i.e. empty buffer
+    expect(after).toContain('\u8f93\u5165\u4efb\u52a1\u6216\u95ee\u9898'); // placeholder, i.e. empty buffer
     expect(after).not.toContain('newest prompt');
     expect(after).not.toContain('[<'); // I-1, belt and braces
     unmount();
@@ -778,7 +778,7 @@ describe('App (wheel routing end to end)', () => {
     mouse.wheel('up', COMPOSER_ROW);
     await delay(80);
     const afterWheel = stripAnsi(lastFrame() ?? '');
-    expect(afterWheel).toContain('Send a message'); // placeholder, i.e. empty buffer
+    expect(afterWheel).toContain('\u8f93\u5165\u4efb\u52a1\u6216\u95ee\u9898'); // placeholder, i.e. empty buffer
     expect(afterWheel).not.toContain('newest prompt');
     expect(afterWheel).not.toContain('older prompt');
     expect(afterWheel).not.toContain('[<'); // no escape bytes typed into the draft
@@ -829,7 +829,7 @@ describe('App (wheel routing end to end)', () => {
 
     const pinned = stripAnsi(lastFrame() ?? '');
     expect(pinned).toContain('LINE60'); // pinned to the newest output
-    expect(pinned).not.toMatch(/↑\d/); // …so no off-bottom indicator yet
+    expect(pinned).not.toMatch(/\^\d/); // …so no off-bottom indicator yet
 
     for (let i = 0; i < 3; i += 1) {
       mouse.wheel('up', COMPOSER_ROW);
@@ -839,7 +839,7 @@ describe('App (wheel routing end to end)', () => {
 
     const scrolled = stripAnsi(lastFrame() ?? '');
     expect(scrolled).not.toContain('LINE60'); // the tail scrolled away
-    expect(scrolled).toMatch(/↑\d/); // status bar reports the distance
+    expect(scrolled).toMatch(/\^\d/); // status bar reports the distance
     unmount();
   });
 
@@ -902,7 +902,7 @@ describe('first-run selection notice (§6.1)', () => {
       const { lastFrame, unmount } = mountApp(mouse.source, { terminal: SELECT_ON });
       await delay(80);
       const frame = stripAnsi(lastFrame() ?? '');
-      expect(frame).toContain('dragging selects text');
+      expect(frame).toContain('drag to select, then Ctrl+C to copy');
       expect(store.noticeSeenWrites).toContain(MOUSE_NOTICE_VERSION);
       unmount();
     } finally {
@@ -925,7 +925,7 @@ describe('first-run selection notice (§6.1)', () => {
       await delay(80);
       const frame = stripAnsi(lastFrame() ?? '');
       expect(frame).toContain('Drag-select is off');
-      expect(frame).not.toContain('dragging selects text');
+      expect(frame).not.toContain('drag to select, then Ctrl+C to copy');
       expect(store.noticeSeenWrites).toContain(MOUSE_NOTICE_VERSION);
       unmount();
     } finally {
@@ -941,7 +941,7 @@ describe('first-run selection notice (§6.1)', () => {
     const mouse = fakeMouseSource();
     const { lastFrame, unmount } = mountApp(mouse.source, { terminal: SELECT_ON });
     await delay(80);
-    expect(stripAnsi(lastFrame() ?? '')).not.toContain('dragging selects text');
+    expect(stripAnsi(lastFrame() ?? '')).not.toContain('drag to select, then Ctrl+C to copy');
     expect(store.noticeSeenWrites).toHaveLength(0);
     unmount();
   });
@@ -969,7 +969,7 @@ describe('first-run selection notice (§6.1)', () => {
         />,
       );
       await delay(80);
-      expect(stripAnsi(lastFrame() ?? '')).not.toContain('dragging selects text');
+      expect(stripAnsi(lastFrame() ?? '')).not.toContain('drag to select, then Ctrl+C to copy');
       expect(store.noticeSeenWrites).toHaveLength(0);
       unmount();
     } finally {
@@ -1007,7 +1007,7 @@ describe('first-run selection notice (§6.1)', () => {
         />,
       );
       await delay(80);
-      expect(stripAnsi(lastFrame() ?? '')).not.toContain('dragging selects text');
+      expect(stripAnsi(lastFrame() ?? '')).not.toContain('drag to select, then Ctrl+C to copy');
       expect(store.noticeSeenWrites).toHaveLength(0);
       unmount();
     } finally {

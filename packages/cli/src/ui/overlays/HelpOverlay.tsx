@@ -22,7 +22,8 @@ const KEY_PAD = 24;
 function keyRows(times: string): [string, string][] {
   return [
     ['Enter', 'Submit (idle) / queue steering (running); re-pins to the newest output'],
-    ['Alt+Enter / Shift+Enter', 'Insert newline'],
+    ['Alt+Enter / Shift+Enter', 'Newline when supported; the host may intercept either binding'],
+    ['Ctrl+J', 'Newline fallback; /terminal-setup explains Shift+Enter binding'],
     ['Esc', 'Close menu / overlay'],
     ['Esc twice', 'Interrupt run (within 1.5s)'],
     ['Esc again', 'Force-stop after requesting interruption'],
@@ -44,8 +45,14 @@ function keyRows(times: string): [string, string][] {
     // a key, so it has to be named somewhere they can look it up. The one-shot
     // startup notice is the other place, and it scrolls away.
     ['Drag right edge', 'Scroll messages and input together; type to return'],
-    ['Run status row', 'Spinner and steer / interrupt keys, above the input during a run'],
-    ['Drag text (left button)', 'Select text on screen; releasing copies it'],
+    ['Bottom rows', 'Input, fixed action hints, then global runtime / queue / context status'],
+    ['Drag text (left button)', 'Select text on screen; the highlight waits'],
+    ['Ctrl+C (with a selection)', 'Copy the pending selection - does not arm exit'],
+    ['Native terminal selection', 'Copy-on-select is controlled by your terminal settings'],
+    ['Queue / /queue', 'Pending receipt; /queue opens full text, PgUp/PgDn pages, Esc closes'],
+    ['plan>build / build>plan', 'A mode switch pending until the current run ends'],
+    ['/bg / /todo status', 'Show full service and TODO counts when status fields are hidden'],
+    ['Queue paused', 'Unreceived messages persist after interruption until accepted or cancelled'],
     ['Up / Down', 'Prompt history (empty input)'],
     // Pasting is the one affordance here with no key of its own, so the only
     // place a user can learn what happened to their 218 lines is this row.
@@ -73,8 +80,10 @@ const COMMANDS: [string, string][] = [
   ['/cwd [dir]', 'Show or change the tool working directory'],
   ['/save [file]', 'Save the session to JSON'],
   ['/resume [file]', 'Load a saved session'],
-  ['/copy', 'Copy the last answer to the clipboard (OSC 52, so it works over ssh)'],
+  ['/copy', 'Copy last answer; native completion confirmed, OSC 52 request unconfirmed'],
+  ['/queue', 'Read every pending message in full; no replay or queue mutation'],
   ['/mouse [on|off]', 'Release the mouse to your terminal, or take it back'],
+  ['/terminal-setup', 'Show newline key bindings without changing terminal settings'],
   ['/exit', 'Exit'],
 ];
 

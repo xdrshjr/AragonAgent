@@ -330,7 +330,8 @@ describe('the status chip (§6.2)', () => {
     const { lastFrame } = render(
       <StatusBar {...base} compactionActive={{ inFlight: true }} />,
     );
-    expect(lastFrame()).toContain('compacting');
+    expect(lastFrame()).toContain('压缩');
+    expect((lastFrame() ?? '').match(/[⠀-⣿]/g)).toHaveLength(1);
   });
 
   it('is absent entirely when compaction is off for the session', () => {

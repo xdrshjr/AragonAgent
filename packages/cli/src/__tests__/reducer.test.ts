@@ -9,6 +9,8 @@ import {
   type ViewAction,
   type ViewState,
 } from '../agent/reducer.js';
+import { normalizeLoadedEntries } from '../session/persist.js';
+import { entryRetain } from '../agent/entry-limits.js';
 import { promptTokensOf } from '../agent/usage.js';
 import { occupiedTokens } from '../compaction/pressure.js';
 import type { ContextUsageSnapshot } from '../compaction/types.js';
@@ -436,6 +438,137 @@ describe('T14 - `resetConversation` clears spend, never the gauge (I-1)', () => 
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       costUsd: 0,
+    });
+  });
+});
+
+describe('queued steering entries (tui-shift-enter-copy-queue 5.2)', () => {
+  it('ignores an unknown queued ID even when the same receipt accepts a pending ID', () => {
+    const base = viewReducer(initialViewState(), {
+      type: 'steerQueued', queueId: 'live', text: 'live message',
+    });
+    const legacy: Entry = { id: 'old', kind: 'queued', queueId: 'stale', text: 'old message' };
+    const state = { ...base, entries: [legacy, ...base.entries] };
+    const next = viewReducer(state, { type: 'steeringAccepted', ids: ['stale', 'live'] });
+    expect(next.entries[0]).toBe(legacy);
+    expect(next.entries[1]).toMatchObject({ kind: 'user', text: 'live message' });
+    expect(next.pendingSteering).toEqual([]);
+  });
+
+  it('matches identical text by queue ID and keeps stale receipts inert after restore', () => {
+    const queued = fold(initialViewState(), [
+      { type: 'steerQueued', queueId: 'old', text: 'same' },
+      { type: 'steerQueued', queueId: 'new', text: 'same' },
+    ]);
+    const accepted = viewReducer(queued, { type: 'steeringAccepted', ids: ['old', 'old'] });
+    expect(accepted.pendingSteering).toEqual([{ queueId: 'new', text: 'same' }]);
+    expect(accepted.entries.map((entry) => entry.kind)).toEqual(['user', 'queued']);
+    expect(queued.entries[0]!.kind).toBe('queued');
+    const restored = viewReducer(accepted, { type: 'restoreEntries', entries: [] });
+    expect(restored.pendingSteering).toEqual([]);
+    expect(viewReducer(restored, { type: 'steeringAccepted', ids: ['new'] })).toBe(restored);
+    expect(viewReducer(queued, { type: 'resetConversation' }).pendingSteering).toEqual([]);
+  });
+
+  it('keeps pending text across retention and clear without resurrecting accepted entries', () => {
+    let state = viewReducer(initialViewState(), {
+      type: 'steerQueued', queueId: 'retained', text: 'full\nmessage',
+    });
+    for (let i = 0; i < entryRetain(); i += 1) {
+      state = viewReducer(state, { type: 'notice', level: 'info', text: `history ${i}` });
+    }
+    expect(state.entries.some((entry) => entry.kind === 'queued')).toBe(false);
+    expect(state.pendingSteering).toEqual([{ queueId: 'retained', text: 'full\nmessage' }]);
+    const afterReceipt = viewReducer(state, { type: 'steeringAccepted', ids: ['retained'] });
+    expect(afterReceipt.pendingSteering).toEqual([]);
+    expect(afterReceipt.entries.at(-1)).toMatchObject({ kind: 'user', text: 'full\nmessage' });
+    expect(afterReceipt.entries).toHaveLength(state.entries.length);
+    expect(afterReceipt.droppedEntries).toBe(state.droppedEntries + 1);
+    state = viewReducer(state, { type: 'clearTranscript' });
+    expect(state.entries).toEqual([]);
+    expect(state.todos).toBeNull();
+    expect(state.pendingSteering).toHaveLength(1);
+    const cleared = viewReducer(state, { type: 'steeringAccepted', ids: ['retained'] });
+    expect(cleared.entries).toEqual([{ id: 'pending:retained', kind: 'user', text: 'full\nmessage' }]);
+    expect(cleared.pendingSteering).toEqual([]);
+    expect(cleared.status).toBe('idle');
+  });
+
+  it('steerQueued appends a queued entry and changes nothing else', () => {
+    const base = fold(initialViewState(), [
+      { type: 'submit', text: 'first' },
+      { type: 'runStart' },
+    ]);
+    const next = viewReducer(base, { type: 'steerQueued', queueId: 'q1', text: 'while running' });
+    expect(next.entries.at(-1)).toMatchObject({ kind: 'queued', text: 'while running' });
+    // Not a new turn: the flags describe the run that is still in flight.
+    expect(next.status).toBe('running');
+    expect(next.turnProduced).toBe(base.turnProduced);
+  });
+
+  it('turnStart leaves queued entries pending until their exact receipt arrives', () => {
+    let state = fold(initialViewState(), [
+      { type: 'submit', text: 'first' },
+      { type: 'runStart' },
+      { type: 'steerQueued', queueId: 'q1', text: 'one' },
+      { type: 'steerQueued', queueId: 'q2', text: 'two' },
+    ]);
+    const queuedIds = state.entries.filter((e) => e.kind === 'queued').map((e) => e.id);
+    expect(queuedIds).toHaveLength(2);
+
+    state = viewReducer(state, { type: 'turnStart' });
+    const kinds = state.entries.map((e) => e.kind);
+    expect(kinds).toEqual(['user', 'queued', 'queued', 'assistant']);
+    const queued = state.entries[1];
+    state = viewReducer(state, { type: 'steeringAccepted', ids: ['q1'] });
+    expect(state.entries[1]).toMatchObject({ id: queuedIds[0], kind: 'user', text: 'one' });
+    expect(state.entries[1]).not.toBe(queued);
+    expect(state.entries[2]).toMatchObject({ id: queuedIds[1], kind: 'queued', text: 'two' });
+    expect(state.pendingSteering).toEqual([{ queueId: 'q2', text: 'two' }]);
+    expect(viewReducer(state, { type: 'steeringAccepted', ids: ['q1', 'unknown'] })).toBe(state);
+    // ...and the streaming assistant entry for the accepted turn follows.
+    expect(state.streamingId).toBe(state.entries.at(-1)?.id);
+  });
+
+  it('runEnd leaves queued entries queued -- the Core queue survives the run', () => {
+    let state = fold(initialViewState(), [
+      { type: 'submit', text: 'first' },
+      { type: 'runStart' },
+      { type: 'steerQueued', queueId: 'q1', text: 'still waiting' },
+    ]);
+    state = viewReducer(state, { type: 'runEnd' });
+    // `runEnd` appends its own failure-guard notice for the aborted turn;
+    // the QUEUED entry itself must still be there, still queued.
+    const queued = state.entries.filter((e) => e.kind === 'queued');
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject({ text: 'still waiting' });
+  });
+
+  it('turnStart with nothing queued is the identity on entries', () => {
+    const base = fold(initialViewState(), [
+      { type: 'submit', text: 'first' },
+      { type: 'runStart' },
+    ]);
+    const next = viewReducer(base, { type: 'turnStart' });
+    // The two surviving entries keep their object identity: the map entry
+    // conversion bails out when there is nothing to convert, so the memo
+    // boundaries of every settled entry stay intact.
+    expect(next.entries[0]).toBe(base.entries[0]);
+  });
+
+  it('normalizeLoadedEntries downgrades a saved queued entry to a warn notice', () => {
+    // Core's steering queue is memory-only: a queued entry on disk is a
+    // promise the resumed process cannot keep, and pretending it was sent
+    // would lose the user's words with a straight face.
+    const downgraded = normalizeLoadedEntries([
+      { id: 'e1', kind: 'queued', text: 'first line\nsecond line' },
+    ] as Entry[]);
+    expect(downgraded).toHaveLength(1);
+    expect(downgraded[0]).toMatchObject({
+      id: 'e1',
+      kind: 'notice',
+      level: 'warn',
+      text: 'Queued but never sent: first line\nsecond line',
     });
   });
 });

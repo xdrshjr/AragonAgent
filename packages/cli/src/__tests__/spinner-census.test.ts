@@ -86,52 +86,30 @@ describe('AC-9: every animated site takes the suppression signal', () => {
   });
 });
 
-describe('AC-11: App wires one raw flag and three widened ones', () => {
+describe('AC-11: the global status owns activity through overlays', () => {
   const app = readFileSync(join(UI, 'App.tsx'), 'utf8');
+  const status = readFileSync(join(UI, 'StatusBar.tsx'), 'utf8');
+  const bottom = readFileSync(join(UI, 'BottomStatusRow.tsx'), 'utf8');
   const count = (needle: string): number => app.split(needle).length - 1;
 
-  it('gives the raw config flag to the activity row and to nothing else', () => {
-    // D-5: the activity label reads the flag TWICE - once for its spinner and once
-    // for `pickActivityPhrase`'s rotation - so the widened value would freeze the
-    // phrase at the first word of every run. That is why the asymmetry exists, and
-    // why "exactly one" is the number rather than "zero".
-    //
-    // The ONE place is now the `runActivity` object, built once and handed to
-    // BOTH mount points (the run status row above the input and the fixed bottom
-    // row): neither mount point may spell its own copy.
-    const literal = app.match(/const runActivity: RunActivity = \{([\s\S]*?)\n {2}\};/);
-    expect(literal).not.toBeNull();
-    expect(literal![1]!.match(/\breducedMotion\b/g)).toHaveLength(1);
-    expect(literal![1]).toMatch(/\n\s+reducedMotion,/);
-    expect(count('reducedMotion={reducedMotion}')).toBe(0);
-    expect(count('{...runActivity}')).toBe(1);
-    expect(count('activity: runActivity')).toBe(1);
+  it('passes the raw motion flag to the global status spinner', () => {
+    expect(app).toMatch(/<StatusBar[\s\S]*?reducedMotion=\{reducedMotion\}/);
+    expect(count('reducedMotion={reducedMotion}')).toBe(1);
+    expect(status).toContain('liveSpinner(props.reducedMotion');
+    expect(bottom).not.toMatch(/<ActivityLine|liveSpinner\(/);
   });
 
-  it('gives the widened value to all three view consumers', () => {
-    // The transcript and both panels. If a
-    // fourth animated consumer is added, this number moves WITH it — deliberately
-    // brittle, because the failure it guards is silent in every other test.
+  it('passes the widened signal to all three view consumers', () => {
     expect(count('reducedMotion={viewReducedMotion}')).toBe(3);
   });
 
-  it('derives the suppression signal from the activity row mount condition, once', () => {
-    // D-4. The invariant is "suppressed everywhere else IFF the line is up", so
-    // the mount condition is a NAMED const used at both sites. Two copies of the
-    // same boolean expression is how that becomes false in six months, silently
-    // and in only one of the two branches — so the raw expression must not
-    // reappear at the mount site.
-    expect(count('const activityVisible = running && !overlayNode;')).toBe(1);
-    expect(count('const viewReducedMotion = reducedMotion || activityVisible;')).toBe(1);
-    // Matched as a pattern rather than as a literal slice: the line break and
-    // its indentation are the formatter's business, and a scan that a reflow
-    // can turn red teaches the next reader to delete it.
-    //
-    // The fixed bottom row is the SECOND mount point: it takes the life signal
-    // only while the run status row is not on screen, and that single boolean is
-    // `runRowShown`, derived once from `runRowEnabled`.
-    expect(app).toMatch(/activity=\{\s*activityVisible && !runRowShown \? \(/);
-    expect(count('const runRowShown = runRowEnabled && activityRowVisible;')).toBe(1);
-    expect(app).not.toMatch(/activity=\{\s*running && !overlayNode \? \(/);
+  it('suppresses other sites during starting, running and idle compaction regardless of overlay', () => {
+    const expression = app.match(/const viewReducedMotion = ([^;]+);/)?.[1] ?? '';
+    expect(expression).toContain('reducedMotion');
+    expect(expression).toContain('running');
+    expect(expression).toContain("state.runPhase === 'starting'");
+    expect(expression).toContain('compactionLive');
+    expect(expression).not.toMatch(/overlay/i);
+    expect(app).not.toContain('const runRowShown');
   });
 });

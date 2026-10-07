@@ -4,6 +4,7 @@
  */
 
 import type { SubmitMessageOptions } from '../agent/prompt-options.js';
+import type { CopyRequest, CopyRequestResult } from '../ui/clipboard-task.js';
 
 import type { AgentController } from '../agent/controller.js';
 import type { AgentMode } from '../agent/agent-mode.js';
@@ -17,6 +18,8 @@ import type { FollowThroughBudget } from '../todo/follow-through.js';
 import type { UpdateCommandPort } from '../update/types.js';
 
 export interface CommandContext {
+  /** App-owned shared lock and single feedback path for command and selection copies. */
+  requestCopy?: (request: CopyRequest) => Promise<CopyRequestResult>;
   /** Raw argument string after the command word (may be empty). */
   args: string;
   controller: AgentController;

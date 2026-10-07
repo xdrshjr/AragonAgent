@@ -336,7 +336,8 @@ is that it does not depend on the host being correct.
 | `ToolRegistryListener` | `.` | Listener signature for `ToolRegistry` events. |
 | `ValidationError` | `.` | `{ path, message }` validation failure detail. |
 | `ToolExecutorOptions` | `.` | Options for `ToolExecutor`. |
-| `AgentEvent` + members (`AgentStartEvent`, `AgentEndEvent`, `TurnStartEvent`, `TurnEndEvent`, `MessageUpdateEvent`, `ToolExecutionStartEvent`, `ToolExecutionEndEvent`, `CodeExecutionStartEvent`, `CodeExecutionEndEvent`, `CompactionStartEvent`, `CompactionEndEvent`), `AgentEventListener` | `.` | Engine lifecycle events emitted via `Agent.subscribe`. The two `compaction_*` members are emitted only when a `contextManager` is injected; a consumer with a `default` branch is unaffected. |
+| `AgentEvent` + members (`AgentStartEvent`, `AgentEndEvent`, `TurnStartEvent`, `TurnEndEvent`, `SteeringAcceptedEvent`, `MessageUpdateEvent`, `ToolExecutionStartEvent`, `ToolExecutionEndEvent`, `CodeExecutionStartEvent`, `CodeExecutionEndEvent`, `CompactionStartEvent`, `CompactionEndEvent`), `AgentEventListener` | `.` | 引擎通过 `Agent.subscribe` 发出生命周期事件。`steering_accepted` 表示带 ID 的 steering 已写入历史；详见下方源兼容说明。两个 `compaction_*` 成员仅在注入 `contextManager` 时发出。 |
+| `SteeringMessage` | `.` | 只读 `text: string` 与可选只读 `id?: string`，由 `drainSteeringItems()` 返回；仅类型导出。 |
 | `ContextManager`, `CompactionProbe`, `CompactionContext`, `CompactionOutcome`, `CompactionTrigger` | `.` | The injected compaction port. See *Context compaction* below. |
 | `CompactionPlan`, `HistoryCheck`, `PlanCompactionOptions`, `ValidateHistoryOptions` | `.` | Results and options of the three pure mechanics functions. |
 | `AgentConfig`, `AgentState` | `.` | Agent constructor config + readonly state view. `AgentConfig.timeouts.toolTimeoutOverrides?: Record<string, number>` — see *Blocking on a human* below. |
@@ -351,3 +352,22 @@ is that it does not depend on the host being correct.
 | `SkillCatalogOptions`, `SkillBodyOptions`, `SkillFindOptions` | `.`, `./skills` | Render options for Level 1 / Level 2 / `skill_find`. |
 | `SkillIntegrity` | `.`, `./skills` | `unverified \| ok \| modified` — how `SKILL.md` compares to the copy recorded at install. |
 | `SkillUsageStat`, `SkillUsageMap` | `.`, `./skills` | `{ useCount, lastUsedAt }` per skill name, used to rank the catalog. Local only. |
+
+## Steering 接收与源兼容性
+
+`Agent.steer(text, id?)` 仍支持原单参数调用；传入的可选 ID 是宿主生成的不透明关联值，
+不会写入模型正文。相同正文可以携带不同 ID，Core 不按文本合并。
+`MessageQueueManager.drainSteering(): string[]` 保留原行为；新增的
+`drainSteeringItems(): SteeringMessage[]` 与它排空同一 FIFO，不能分别消费两份消息。
+
+引擎将当前批次全部同步写入历史后，发出一次
+`{ type: 'steering_accepted', ids: readonly string[] }`，仅包含该批次有 ID 的条目。
+回执代表历史已接收，**不代表模型请求成功或回答完成**。无 ID 的消息照常接收，
+不会产生空回执。新增事件成员及 `SteeringMessage` 均只扩展类型表面，没有新增运行时导出；
+穷尽处理 `AgentEvent` 的 TypeScript 调用方需增加对应分支。
+
+接收发生于回合顶部、工具批次开始前及工具之间。回合顶部接收早于异步上下文压缩，
+因此压缩期间新入队的消息不属于此前回执；无工具响应结束前仍会检查新消息。
+工具中途转向会先补齐尚未执行工具的 skipped 结果，保证下一次请求中的工具配对完整。
+接收前已中断时消息保留在队列；回执监听者同步中断时，该批次已在历史中，不会重复入队。
+`turn_start`、`turn_end`、`agent_end`、重试及定时器均不能替代精确 ID 回执。

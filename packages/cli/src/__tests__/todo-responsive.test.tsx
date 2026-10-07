@@ -88,10 +88,10 @@ describe('真实组件响应式布局', () => {
       t.stdin.write('\r'); await delay();
       expect(prompt).toHaveBeenCalledExactlyOnceWith('a new simple task');
       expect(controller.getTodoSnapshot()).toBeNull();
-      expect(t.frames.at(-1)).not.toContain(visibleCount);
+      expect(t.frames.at(-1)!.split('\n').at(-1)).not.toContain(visibleCount);
       t.stdout.columns = cols + 1;
       t.stdout.emit('resize'); await delay();
-      expect(t.frames.at(-1)).not.toContain(visibleCount);
+      expect(t.frames.at(-1)!.split('\n').at(-1)).not.toContain(visibleCount);
       const tool = controller.listTools().find((item) => item.name === 'todo_write')!;
       await tool.execute('bad', { todos: [] }, {} as never);
       await tool.execute('short', { todos: [{ content: 'one', status: 'pending' }] }, {} as never);
@@ -102,7 +102,7 @@ describe('真实组件响应式布局', () => {
       await delay();
       expect(controller.getTodoSnapshot()?.total).toBe(3);
       expect(t.frames.at(-1)).toContain('0/3');
-      expect(t.frames.at(-1)).not.toContain('9/20');
+      expect(t.frames.at(-1)!.split('\n').at(-1)).not.toContain('9/20');
     } finally {
       view.unmount(); view.cleanup(); prompt.mockRestore(); controller.dispose();
     }
@@ -110,7 +110,7 @@ describe('真实组件响应式布局', () => {
 
   it('文件候选隐藏时保留原始输入，可见时接受原始文件名', async () => {
     const t = terminal(76);
-    const submit = vi.fn();
+    const submit = vi.fn((_text: string) => ({ accepted: true }));
     const report = vi.fn();
     const node = (height: number) => <PromptInput isActive running={false} history={[]}
       commands={[]} cwd={process.cwd()} theme={theme} caps={caps} onSubmit={submit}
@@ -160,7 +160,7 @@ describe('真实组件响应式布局', () => {
           cols={layout.contentCols} reducedMotion theme={theme} caps={caps} now={1} />}
         <Composer isActive cols={layout.contentCols} running={false} history={[]}
           commands={commands} cwd={process.cwd()} showHint={rows >= 20} submitCount={0}
-          hintsEnabled agentMode="build" theme={theme} caps={caps} onSubmit={() => {}}
+          hintsEnabled agentMode="build" theme={theme} caps={caps} onSubmit={() => ({ accepted: true })}
           onDraftRows={setDraftRows} popupMaxHeight={layout.popupMaxHeight}
           onPopupRowsChange={setPopupRows} />
       </>;
@@ -207,7 +207,7 @@ describe('真实组件响应式布局', () => {
 
   it('隐藏候选不拦截提交，inactive 与卸载报告零，重挂无残留', async () => {
     const t = terminal();
-    const submit = vi.fn();
+    const submit = vi.fn((_text: string) => ({ accepted: true }));
     const reports = vi.fn();
     const node = (height: number, active = true) => <React.StrictMode>
       <PromptInput isActive={active} running={false} history={[]} commands={commands}

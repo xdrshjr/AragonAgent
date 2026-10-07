@@ -12,6 +12,8 @@
  */
 
 import process from 'node:process';
+import type { PendingSteering } from './queued-messages.js';
+import { reconcileSteeringReceipt } from './queued-messages.js';
 import type {
   AgentEvent,
   ModelCost,
@@ -52,6 +54,7 @@ export type Overlay =
   | 'settings'
   | 'model'
   | 'help'
+  | 'queue'
   | 'confirm'
   | 'question'
   | 'plan';
@@ -70,6 +73,17 @@ export const DEFAULT_TOAST_TTL_MS = 2500;
 
 export type Entry =
   | { id: string; kind: 'user'; text: string }
+  /**
+   * A message submitted while a run was in flight (tui-shift-enter-copy-queue
+   * 5.2). It renders as `Queue: <first line>` and is rewritten IN PLACE, same
+   * id, into the `user` entry above by the matching receipt that proves Core
+   * accepted it -- so the id-based height cache re-measures rather than
+   * freezes, and the settled boundary (positional, monotonic) never moves.
+   *
+   * NOT A LIVE TARGET: no id pointer in `ViewState` names it, so the trim
+   * ring and the `appendEntry` assertions need no new member.
+   */
+  | { id: string; kind: 'queued'; text: string; queueId?: string }
   | {
       id: string;
       kind: 'assistant';
@@ -303,6 +317,11 @@ export interface RetrySnapshot {
 
 export interface ViewState {
   entries: Entry[];
+  pendingSteering: PendingSteering[];
+  seenSteeringIds: ReadonlySet<string>;
+  runPhase: 'idle' | 'starting' | 'waiting' | 'thinking' | 'generating' | 'preparing-tool' | 'tool';
+  activeTool?: { toolCallId: string; name: string };
+  runOutcome: 'none' | 'ended' | 'interrupted' | 'failed';
   status: 'idle' | 'running';
   usageTotal: UsageTotal;
   /**
@@ -446,6 +465,10 @@ export interface ViewStateSeed {
 export function initialViewState(seed: ViewStateSeed = {}): ViewState {
   return {
     entries: [],
+    pendingSteering: [],
+    seenSteeringIds: new Set(),
+    runPhase: 'idle',
+    runOutcome: 'none',
     status: 'idle',
     usageTotal: EMPTY_USAGE_TOTAL,
     context: emptyContextUsage(),
@@ -482,7 +505,16 @@ export function initialViewState(seed: ViewStateSeed = {}): ViewState {
 
 export type ViewAction =
   | { type: 'submit'; text: string }
+  /**
+   * `controller.steer` was accepted; append the persistent queue marker
+   * (5.2.2). Dispatched from exactly one place -- `App.submitMessage`'s
+   * running branch -- beside the `controller.steer` call it mirrors.
+   */
+  | { type: 'steerQueued'; queueId: string; text: string }
+  | { type: 'steeringAccepted'; ids: readonly string[] }
   | { type: 'runStart' }
+  | { type: 'runStarting' }
+  | { type: 'runError' }
   | { type: 'turnStart' }
   | { type: 'thinkingStart' }
   | { type: 'thinkingDelta'; delta: string }
@@ -490,7 +522,7 @@ export type ViewAction =
   | { type: 'toolCallStart'; toolCallId: string; toolName: string; label?: string }
   | { type: 'toolCallDelta'; toolCallId: string; argsDelta: string }
   | { type: 'toolCallEnd'; toolCallId: string; args: Record<string, unknown> }
-  | { type: 'toolExecStart'; toolCallId: string }
+  | { type: 'toolExecStart'; toolCallId: string; toolName?: string }
   | {
       type: 'toolExecEnd';
       toolCallId: string;
@@ -673,6 +705,8 @@ export function reduceEvent(
   patches?: PatchSource,
 ): ViewAction[] {
   switch (event.type) {
+    case 'steering_accepted':
+      return [{ type: 'steeringAccepted', ids: event.ids }];
     case 'agent_start':
       return [{ type: 'runStart' }];
     case 'turn_start':
@@ -688,7 +722,7 @@ export function reduceEvent(
     case 'agent_end':
       return [{ type: 'runEnd' }];
     case 'tool_execution_start':
-      return [{ type: 'toolExecStart', toolCallId: event.toolCallId }];
+      return [{ type: 'toolExecStart', toolCallId: event.toolCallId, toolName: event.toolName }];
     case 'tool_execution_end': {
       const patch = patches?.take(event.toolCallId);
       const preview = buildToolPreview(event.result);
@@ -745,7 +779,6 @@ function reduceStreamEvent(se: StreamEvent): ViewAction[] {
     case 'text_delta':
       return [{ type: 'textDelta', delta: se.delta }];
     case 'tool_call_start':
-      if (SELF_RENDERING_TOOLS.has(se.toolName)) return [];
       return [
         { type: 'toolCallStart', toolCallId: se.toolCallId, toolName: se.toolName },
       ];
@@ -757,6 +790,7 @@ function reduceStreamEvent(se: StreamEvent): ViewAction[] {
       return [{ type: 'toolCallEnd', toolCallId: se.toolCallId, args: se.args }];
     case 'error':
       return [
+        { type: 'runError' },
         {
           type: 'notice',
           level: 'error',
@@ -969,7 +1003,42 @@ function findToolEntryId(state: ViewState, toolCallId: string): string | undefin
   return undefined;
 }
 
+/** Runtime facts outlive transcript cards and are independent of command/clipboard notices. */
+function reduceRunFacts(state: ViewState, action: ViewAction): ViewState {
+  switch (action.type) {
+    case 'runStarting': return { ...state, runPhase: 'starting', runOutcome: 'none' };
+    case 'runStart': return { ...state, runPhase: 'waiting', runOutcome: 'none', activeTool: undefined };
+    case 'turnStart': return { ...state, runPhase: 'waiting' };
+    case 'thinkingStart':
+    case 'thinkingDelta': return { ...state, runPhase: 'thinking' };
+    case 'textDelta': return { ...state, runPhase: 'generating' };
+    case 'toolCallStart':
+    case 'toolCallDelta':
+    case 'toolCallEnd': return { ...state, runPhase: 'preparing-tool' };
+    case 'toolExecStart': {
+      const card = state.entries.find((entry) =>
+        entry.kind === 'tool' && entry.toolCallId === action.toolCallId);
+      return { ...state, runPhase: 'tool', activeTool: {
+        toolCallId: action.toolCallId,
+        name: action.toolName ?? (card?.kind === 'tool' ? card.name : 'tool'),
+      } };
+    }
+    case 'toolExecEnd': return state.activeTool?.toolCallId === action.toolCallId
+      ? { ...state, runPhase: 'waiting', activeTool: undefined } : state;
+    case 'runError': return { ...state, runOutcome: 'failed' };
+    case 'abortMark': return { ...state, runOutcome: 'interrupted' };
+    case 'runEnd': return { ...state, runPhase: 'idle', activeTool: undefined,
+      runOutcome: state.runOutcome !== 'none' ? state.runOutcome
+        : !state.turnProduced && !state.errorNoticed && !state.aborted ? 'failed' : 'ended' };
+    case 'resetConversation':
+    case 'restoreEntries': return { ...state, runPhase: 'idle', activeTool: undefined,
+      runOutcome: 'none', seenSteeringIds: new Set() };
+    default: return state;
+  }
+}
+
 export function viewReducer(state: ViewState, action: ViewAction): ViewState {
+  state = reduceRunFacts(state, action);
   switch (action.type) {
     case 'submit': {
       const { id, seq } = nextId(state);
@@ -991,6 +1060,31 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
         errorNoticed: false,
         aborted: false,
       };
+    }
+
+    case 'steerQueued': {
+      if (state.seenSteeringIds.has(action.queueId)) return state;
+      const { id, seq } = nextId(state);
+      const entry: Entry = { id, kind: 'queued', queueId: action.queueId, text: action.text };
+      // NOTHING ELSE RESETS. This is not a new turn -- `turnProduced`,
+      // `errorNoticed` and `aborted` describe the run that is still in
+      // flight, and clearing them here would let the next `runEnd` failure
+      // guard misfire on a turn that produced plenty.
+      return {
+        ...state, seq, ...appendEntry(state, state.entries, entry),
+        seenSteeringIds: new Set([...state.seenSteeringIds, action.queueId]),
+        pendingSteering: [...state.pendingSteering, { queueId: action.queueId, text: action.text }],
+      };
+    }
+
+    case 'steeringAccepted': {
+      const receipt = reconcileSteeringReceipt({
+        entries: state.entries, pending: state.pendingSteering, ids: action.ids,
+      });
+      if (!receipt.changed) return state;
+      const trimmed = trimEntries(receipt.entries, entryRetain());
+      return { ...state, pendingSteering: receipt.pending, entries: trimmed.entries,
+        droppedEntries: state.droppedEntries + trimmed.dropped };
     }
 
     case 'runStart':
@@ -1066,6 +1160,7 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
     }
 
     case 'toolCallStart': {
+      if (SELF_RENDERING_TOOLS.has(action.toolName)) return state;
       const { id, seq } = nextId(state);
       const entry: Entry = {
         id,
@@ -1341,6 +1436,7 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
     case 'resetConversation':
       return {
         ...state,
+        pendingSteering: [],
         entries: [],
         droppedEntries: 0,
         streamingId: undefined,
@@ -1919,6 +2015,7 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
       return {
         ...state,
         entries: restored.entries,
+        pendingSteering: [],
         droppedEntries: restored.dropped,
         seq: maxSeq,
         teamEntryId: undefined,

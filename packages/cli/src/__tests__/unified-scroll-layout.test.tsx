@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, expect, it } from 'vitest';
-import { Box, Text, useInput, type DOMElement } from 'ink';
+import { Box, Text, useInput } from 'ink';
 import stringWidth from 'string-width';
 import { ScrollViewport } from '../ui/layout/ScrollViewport.js';
 import { AppShell } from '../ui/layout/AppShell.js';
@@ -16,7 +16,10 @@ import { TranscriptList } from '../ui/Transcript.js';
 import { useHeightStore } from '../ui/use-height-store.js';
 import { ViewportGeometryContext } from '../ui/layout/viewport-geometry.js';
 import { Composer } from '../ui/Composer.js';
-import { ActivityLine } from '../ui/ActivityLine.js';
+import { StatusBar } from '../ui/StatusBar.js';
+import { BottomStatusRow } from '../ui/BottomStatusRow.js';
+import { initialViewState } from '../agent/reducer.js';
+import { interactionCopy } from '../ui/interaction-copy.js';
 
 const caps = { unicode: false, colorLevel: 0 } as const;
 const theme = getTheme('cool', caps);
@@ -104,7 +107,7 @@ describe('unified document in real Ink layout', () => {
           footer={<PromptInput isActive={active} cols={79} history={[]} commands={[]}
             running={false} cwd={process.cwd()} theme={theme} caps={caps}
             onInteraction={() => { interactions++; setPin((n) => n + 1); }}
-            onSubmit={(text) => submissions.push(text)} />}>
+            onSubmit={(text) => { submissions.push(text); return { accepted: true }; }} />}>
           <Text>{'history\n'.repeat(100)}</Text>
         </ScrollViewport>
       </Box>;
@@ -228,92 +231,71 @@ describe('unified document in real Ink layout', () => {
   });
 });
 
-describe('run status row in the scrolling footer (real Ink)', () => {
+describe('fixed run status while the editor scrolls (real Ink)', () => {
   const rich = { unicode: true, colorLevel: 0 } as const;
   const richTheme = getTheme('cool', rich);
+  const state = initialViewState();
   const braille = (frame: string): number => (frame.match(/[\u2800-\u28ff]/g) ?? []).length;
-  const interrupt = 'esc\u00d72 interrupt';
 
-  /**
-   * The wiring `App` performs, in miniature: a Composer carrying the run row in
-   * the scroll footer, a fixed bottom row that shows the activity line ONLY while
-   * the run row is out of the viewport, one shared visibility boolean.
-   */
   function Frame({ nonce, kind = 'lineUp', repeat = 0 }: {
     nonce: number; kind?: 'lineUp' | 'toBottom'; repeat?: number;
   }) {
-    const activityRef = React.useRef<DOMElement>(null);
-    const [rowVisible, setRowVisible] = React.useState(true);
     useInput(() => {});
-    const activity = { startedAt: 1_700_000_000_000, elapsedMs: 1_000, reducedMotion: false };
-    return <Box height={22} width={80} flexDirection="column">
-      <ScrollViewport theme={richTheme} caps={rich} cols={79}
-        activityRef={activityRef} onActivityVisibilityChange={setRowVisible}
+    return <AppShell rows={24} cols={80} header={<Text>Header</Text>}
+      viewport={<ScrollViewport theme={richTheme} caps={rich} cols={79}
         intent={nonce === 0 ? undefined : { kind, nonce, repeat }}
-        footer={<Composer cols={79} isActive running history={[]} commands={[]}
+        footer={<Composer cols={79} cursorVisible={false} isActive running history={[]} commands={[]}
           cwd={process.cwd()} showHint submitCount={0} hintsEnabled agentMode="build"
-          theme={richTheme} caps={rich} onSubmit={() => {}}
-          runRow={{ activity, live: rowVisible, rowRef: activityRef }} />}>
+          theme={richTheme} caps={rich} onSubmit={() => ({ accepted: true })} />}>
         <Text>{Array.from({ length: 100 }, (_, i) => `message ${i}`).join('\n')}</Text>
-      </ScrollViewport>
-      <Box height={1} flexShrink={0}>
-        {rowVisible ? null : <ActivityLine {...activity} theme={richTheme} caps={rich} />}
-      </Box>
-    </Box>;
+      </ScrollViewport>}
+      toast={<BottomStatusRow theme={richTheme} toasts={[]}
+        hints={{ cols: 80, interactionPhase: 'running' }} />}
+      status={<StatusBar status="running" runPhase="generating" model="test" provider="test"
+        usageTotal={state.usageTotal} context={state.context} elapsedMs={1000}
+        thinkingLevel="xhigh" tokPerSec={10} theme={richTheme} caps={rich} />} />;
   }
 
-  const rowsOf = (frame: string): string[] => frame.split('\n');
-
-  it('T10: sits directly above the input box with exactly one animation', async () => {
+  it('keeps actions and the sole activity animation on the final two rows', async () => {
     const terminal = createTerminalHarness(80, 24);
     try {
       terminal.mount(<Frame nonce={0} />);
       await settleTerminal();
-      const rows = rowsOf(terminal.lastFrame());
-      const top = rows.findIndex((row) => row.includes('\u256d'));
-      expect(top).toBeGreaterThan(0);
-      expect(rows[top - 1]).toContain(interrupt);
+      const rows = terminal.lastFrame().trimEnd().split('\n');
+      expect(rows).toHaveLength(23);
+      expect(rows.at(-2)).toContain(interactionCopy.interrupt);
+      expect(rows.at(-1)).toContain(interactionCopy.generating[0]);
+      expect(rows.slice(0, -2).join('\n')).not.toContain('Esc');
       expect(braille(terminal.lastFrame())).toBe(1);
-      expect(rows[top - 1]).toMatch(/[\u2800-\u28ff]/);
+      expect(braille(rows.at(-1)!)).toBe(1);
     } finally { terminal.dispose(); }
   });
 
-  it('T11/T12: scrolls out with the input, hands the animation to the bottom row, and back', async () => {
+  it('keeps the spinner fixed when the editor scrolls away and returns', async () => {
     const terminal = createTerminalHarness(80, 24);
     try {
       terminal.mount(<Frame nonce={0} />);
       await settleTerminal();
-      let sawOut = false;
-      let sawBoth = false;
+      expect(terminal.lastFrame()).toContain(interactionCopy.runningPlaceholder);
+      let sawEditorOut = false;
       for (let step = 1; step <= 8; step += 1) {
         terminal.rerender(<Frame nonce={step} repeat={1} />);
         await settleTerminal();
         const frame = terminal.lastFrame();
-        // Steady-state frames hold exactly one animation, whichever row owns it.
+        const rows = frame.trimEnd().split('\n');
+        expect(rows).toHaveLength(23);
         expect(braille(frame), `step ${step}`).toBe(1);
-        const inView = frame.includes(interrupt);
-        const rows = rowsOf(frame);
-        if (inView) {
-          // A one-row element is never cut in half: whenever any of it shows,
-          // every clause shows (the input box below it may already be clipped).
-          expect(frame).toContain('\u23ce steer');
-          expect(frame).toContain('ctrl+c\u00d72 exit');
-          sawBoth = true;
-        } else {
-          sawOut = true;
-          expect(rows.filter((row) => row.trim() !== '').at(-1)).toMatch(/[\u2800-\u28ff]/);
-        }
+        expect(braille(rows.at(-1)!)).toBe(1);
+        expect(rows.at(-2)).toContain(interactionCopy.interrupt);
+        if (!frame.includes(interactionCopy.runningPlaceholder)) sawEditorOut = true;
       }
-      expect(sawBoth).toBe(true);
-      expect(sawOut).toBe(true);
-
+      expect(sawEditorOut).toBe(true);
       terminal.rerender(<Frame nonce={20} kind="toBottom" />);
       await settleTerminal();
       const back = terminal.lastFrame();
-      expect(back).toContain(interrupt);
+      expect(back).toContain(interactionCopy.runningPlaceholder);
       expect(braille(back)).toBe(1);
-      const rows = rowsOf(back);
-      expect(rows.at(-1)!.trim()).not.toMatch(/[\u2800-\u28ff]/);
+      expect(braille(back.trimEnd().split('\n').at(-1)!)).toBe(1);
     } finally { terminal.dispose(); }
   });
 });

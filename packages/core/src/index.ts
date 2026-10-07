@@ -305,6 +305,7 @@ export type {
   AgentStartEvent,
   AgentEndEvent,
   TurnStartEvent,
+  SteeringAcceptedEvent,
   TurnEndEvent,
   MessageUpdateEvent,
   ToolExecutionStartEvent,
@@ -327,6 +328,7 @@ export type { ModelRef } from './engine/agent-loop.js';
 export type { CodeActSandbox, CodeActResult } from './engine/agent-loop.js';
 export { MessageManager } from './engine/message-manager.js';
 export { MessageQueueManager } from './engine/steering.js';
+export type { SteeringMessage } from './engine/steering.js';
 export { IdleWatchdog } from './engine/watchdog.js';
 
 // ---------------------------------------------------------------------------

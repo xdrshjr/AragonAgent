@@ -22,6 +22,7 @@ import {
 } from './app-paths.js';
 import { getHomeMigrationBreadcrumbPath } from './migrate-home.js';
 import { loadPersistedConfig, updatePersistedConfig } from './store.js';
+import { normalizeModelProfiles, validateModelProfiles } from './model-profiles.js';
 import {
   clampFastConfig,
   clampRetryConfig,
@@ -450,12 +451,22 @@ export function warnIfRedactionDisabled(key: string, value: string): void {
 // ---------------------------------------------------------------------------
 
 /** Every secret is masked wherever it is printed, `--json` included (R-12). */
-function maskConfig(config: PersistedConfig): Record<string, unknown> {
+export function maskConfig(config: PersistedConfig): Record<string, unknown> {
   const apiKeys: Record<string, string> = {};
   for (const [provider, key] of Object.entries(config.apiKeys)) {
     apiKeys[provider] = maskSecret(key);
   }
-  return { ...config, apiKeys };
+  const masked: Record<string, unknown> = { ...config, apiKeys };
+  if (config.modelProfiles !== undefined) {
+    if (validateModelProfiles(config.modelProfiles).length) masked.modelProfiles = { invalid: true };
+    else {
+      const profiles = normalizeModelProfiles(config.modelProfiles);
+      masked.modelProfiles = { ...profiles, entries: profiles.entries.map((entry) => ({
+        ...entry, apiKey: entry.apiKey ? 'Configured' : 'Missing',
+      })) };
+    }
+  }
+  return masked;
 }
 
 /**
@@ -570,9 +581,9 @@ export async function runConfigEdit(): Promise<void> {
   try {
     JSON.parse(readFileSync(file, 'utf-8'));
     process.stdout.write(`${file} saved.\n`);
-  } catch (err) {
+  } catch {
     process.stderr.write(
-      `${file} is not valid JSON (${err instanceof Error ? err.message : String(err)}).\n` +
+      `${file} is not valid JSON.\n` +
         `The previous version is still at ${backup}.\n`,
     );
     process.exitCode = 1;

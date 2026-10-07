@@ -31,6 +31,12 @@ export interface TurnStartEvent {
   type: 'turn_start';
 }
 
+/** Text for these opaque IDs has entered history, not necessarily reached the model. */
+export interface SteeringAcceptedEvent {
+  type: 'steering_accepted';
+  ids: readonly string[];
+}
+
 export interface TurnEndEvent {
   type: 'turn_end';
   message: AssistantMessage;
@@ -130,6 +136,7 @@ export type AgentEvent =
   | AgentStartEvent
   | AgentEndEvent
   | TurnStartEvent
+  | SteeringAcceptedEvent
   | TurnEndEvent
   | MessageUpdateEvent
   | ToolExecutionStartEvent

@@ -463,14 +463,16 @@ describe('StatusBar team cluster (§6.2 / D-20 / P2-1)', () => {
     expect(bar(120, { running: 3, total: 5 })).toContain('agents 3/5');
   });
 
-  it('degrades to `[3]` under 100 columns, so the context gauge keeps its columns', () => {
+  it('shows a complete team field when it fits and preserves context when it does not', () => {
     // The left cluster is `flexShrink={0}`, so every column it takes comes out
     // of the gauge and the cost readout opposite it — and the gauge is how a
     // user notices they are about to run out of context. The team counter has
     // two other homes; it is the one readout here that can afford to degrade.
     const narrow = bar(80, { running: 3, total: 5 });
-    expect(narrow).toContain('[3]');
-    expect(narrow).not.toContain('agents 3/5');
+    expect(narrow).toMatch(/1(?:\.0)?k\/200(?:\.0)?k tok/);
+    expect(narrow).not.toContain('[3]');
+    expect(narrow).toContain('agents 3/5');
+    expect(bar(40, { running: 3, total: 5 })).not.toContain('agents');
   });
 
   it('renders nothing at all when no dispatch is running', () => {

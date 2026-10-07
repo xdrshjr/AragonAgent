@@ -1,4 +1,5 @@
 import type { PromptOptions, PromptOutcome } from '../agent/prompt-options.js';
+import type { ClipboardOptions, ClipboardTask, CopyResult } from '../ui/clipboard.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
 import { render } from 'ink-testing-library';
@@ -24,6 +25,41 @@ vi.mock('../config/store.js', () => ({
  * `history` is a `let` inside the factory rather than an outer variable because
  * `vi.mock` factories are hoisted above every module-level statement.
  */
+/**
+ * The Ctrl+C copy path (tui-shift-enter-copy-queue 4.3) goes through
+ * `startClipboardTask`, which spawns a real platform helper -- mocked here so the
+ * assertion is on WHAT was copied, never on the machine's clipboard state.
+ */
+const clipboardMock = vi.hoisted(() => ({
+  calls: [] as { text: string; hasDoor: boolean }[],
+  via: 'osc52' as 'osc52' | 'none',
+  deferred: false,
+  tasks: [] as {
+    finish: (result: CopyResult) => void;
+    release: () => void;
+    signal: AbortSignal | undefined;
+  }[],
+}));
+vi.mock('../ui/clipboard.js', () => ({
+  startClipboardTask: (text: string, options: ClipboardOptions = {}): ClipboardTask => {
+    clipboardMock.calls.push({ text, hasDoor: options.write !== undefined });
+    const value: CopyResult = clipboardMock.via === 'none'
+      ? { status: 'failed', reason: 'unavailable' } : { status: 'sent', via: 'osc52' };
+    if (!clipboardMock.deferred) {
+      return { result: Promise.resolve(value), released: Promise.resolve() };
+    }
+    let finish!: (result: CopyResult) => void;
+    let release!: () => void;
+    const result = new Promise<CopyResult>((resolve) => { finish = resolve; });
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    options.signal?.addEventListener('abort', () => {
+      finish({ status: 'failed', reason: 'cancelled' });
+    }, { once: true });
+    clipboardMock.tasks.push({ finish, release, signal: options.signal });
+    return { result, released };
+  },
+}));
+
 const promptHistoryMock = vi.hoisted(() => ({ entries: [] as string[] }));
 vi.mock('../config/prompt-history.js', () => ({
   loadPromptHistory: () => promptHistoryMock.entries,
@@ -45,6 +81,10 @@ vi.mock('../config/ui-state.js', () => ({
 // in one must not become a recall in the next.
 beforeEach(() => {
   promptHistoryMock.entries = [];
+  clipboardMock.via = 'osc52';
+  clipboardMock.deferred = false;
+  clipboardMock.calls.length = 0;
+  clipboardMock.tasks.length = 0;
 });
 
 const { App } = await import('../ui/App.js');
@@ -88,7 +128,7 @@ import type {
   ToolOutputListener,
 } from '../tools/tool-output-store.js';
 import type { ProcEvent, ProcEventListener } from '../proc/types.js';
-import { ACTIVITY_PHRASES, pickActivityPhrase } from '../ui/activity-phrases.js';
+import { ACTIVITY_PHRASES } from '../ui/activity-phrases.js';
 import { DEFAULT_FAST_CONFIG, DEFAULT_UPDATE_CONFIG } from '../config/schema.js';
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -295,7 +335,11 @@ class FakeController {
   abort(): void {
     this.aborted = true;
   }
-  steer(): void {}
+  steer(_text: string): void {}
+  queueUserMessage(text: string): string {
+    this.steer(text);
+    return 'queued-test-id';
+  }
   promptOptions: PromptOptions[] = [];
   async prompt(text: string, options: PromptOptions = {}): Promise<PromptOutcome> {
     this.promptOptions.push(options);
@@ -585,6 +629,9 @@ describe('App (interactive)', () => {
     stdin.write(command); await delay(40);
     stdin.write('\r'); await delay(40);
     expect(lastFrame()).toContain('Interrupt the current run before switching conversations.');
+    expect(lastFrame()).toContain(command);
+    // Rejection keeps the bare slash draft and its palette. Dismiss it first.
+    if (command === '/reset') { stdin.write(ESC); await delay(20); }
     stdin.write(ESC); await delay(20);
     stdin.write(ESC); await delay(40);
     expect(fc.aborted).toBe(true);
@@ -790,7 +837,8 @@ describe('App (fullscreen frame)', () => {
     expect(stripAnsi(lines[0] ?? '')).toContain('◇');
     expect(stripAnsi(lines[0] ?? '')).toContain('AragonAgent');
     // The status bar is literally the last row of the frame.
-    expect(stripAnsi(lines[lines.length - 1] ?? '')).toMatch(/idle/);
+    expect(stripAnsi(lines[lines.length - 1] ?? '')).toContain('\u7a7a\u95f2');
+    expect(stripAnsi(lines[lines.length - 2] ?? '')).toContain('Enter');
     // The composer sits directly above it, inside the last 5 rows.
     expect(stripAnsi(lines.slice(-5, -2).join('\n'))).toContain('❯');
     unmount();
@@ -920,12 +968,15 @@ describe('App (fullscreen frame)', () => {
       fc.emit({ type: 'agent_end', messages: [] });
     };
 
-    const { lastFrame, stdin, unmount } = mount(fc, {  initialPrompt: 'go' });
+    const { lastFrame, stdin, stdout, unmount } = mount(fc, { initialPrompt: 'go' });
+    // Distance is a secondary field: give it room beside the core status fields.
+    Object.defineProperty(stdout, 'columns', { value: 160, configurable: true });
+    stdout.emit('resize');
     await delay(120);
 
     const pinned = stripAnsi(lastFrame() ?? '');
     expect(pinned).toContain('LINE60'); // pinned to the newest output
-    expect(pinned).not.toMatch(/↑\d/); // …so no off-bottom indicator yet
+    expect(pinned).not.toMatch(/\^\d/); // No off-bottom indicator yet.
 
     stdin.write('[5~'); // PgUp
     await delay(120);
@@ -933,14 +984,14 @@ describe('App (fullscreen frame)', () => {
     const scrolled = stripAnsi(lastFrame() ?? '');
     expect(scrolled).not.toBe(pinned);
     expect(scrolled).not.toContain('LINE60'); // the tail scrolled away
-    expect(scrolled).toMatch(/↑\d/); // status bar reports the distance
+    expect(scrolled).toMatch(/\^\d/); // Status bar reports the distance when it fits.
 
     stdin.write('[6~'); // PgDn back to the bottom
     await delay(120);
 
     const repinned = stripAnsi(lastFrame() ?? '');
     expect(repinned).toContain('LINE60');
-    expect(repinned).not.toMatch(/↑\d/);
+    expect(repinned).not.toMatch(/\^\d/);
     unmount();
   });
 
@@ -1059,7 +1110,7 @@ describe('reduced motion (A-10)', () => {
     unmount();
   });
 
-  it('does animate when reducedMotion is off, and it is the ACTIVITY ROW that does', async () => {
+  it('animates only the fixed status bar while the assistant marker remains static', async () => {
     // REWRITTEN FOR single-spinner-while-running §7.3, and the rewrite is the
     // point. This case was written to protect the animated assistant marker and
     // asserted only `toMatch(/[⠀-⣿]/)` on the WHOLE FRAME. That marker is now
@@ -1098,9 +1149,11 @@ describe('reduced motion (A-10)', () => {
     expect(frame).toMatch(/[⠀-⣿]/); // the screen is alive...
     expect((frame.match(/[⠀-⣿]/g) ?? []).length).toBe(1); // ...exactly once (AC-1)
 
-    // The one braille glyph is on the row that carries the working phrase.
+    // The one braille glyph stays in the last row, next to the actual run phase.
     const spinnerLine = frame.split('\n').find((l) => /[⠀-⣿]/.test(l)) ?? '';
-    expect(ACTIVITY_PHRASES.some((p) => spinnerLine.includes(p))).toBe(true);
+    expect(spinnerLine).toBe(frame.split('\n').at(-1));
+    expect(spinnerLine).toContain('\u751f\u6210');
+    expect(ACTIVITY_PHRASES.some((p) => spinnerLine.includes(p))).toBe(false);
 
     // And the streamed answer still renders, with a STATIC role marker.
     expect(frame).toContain('partial');
@@ -1124,18 +1177,22 @@ describe('composer hints (A-14)', () => {
       });
     const { lastFrame, unmount } = mount(fc, {  initialPrompt: 'go' });
     await delay(100);
-    expect(stripAnsi(lastFrame() ?? '')).toMatch(/esc.*2 interrupt/);
+    const rows = stripAnsi(lastFrame() ?? '').split('\n');
+    expect(rows.at(-2)).toContain('Esc\u00d72 \u4e2d\u65ad');
+    expect(rows.at(-1)).not.toContain('Esc');
     unmount();
   });
 
-  it('collapses the idle hint once the user has submitted enough times', async () => {
+  it('keeps essential idle actions visible for experienced users', async () => {
     const fc = new FakeController();
     fc.config = { ...CONFIG, submitCount: 999 };
     const { lastFrame, unmount } = mount(fc);
     await delay(80);
     const frame = stripAnsi(lastFrame() ?? '');
-    expect(frame).toContain('? help');
-    expect(frame).not.toContain('newline');
+    const hint = frame.split('\n').at(-2) ?? '';
+    expect(hint).toContain('Enter');
+    expect(hint).toContain('\u53d1\u9001');
+    expect(hint).toContain('\u6362\u884c');
     unmount();
   });
 
@@ -1143,17 +1200,25 @@ describe('composer hints (A-14)', () => {
     const fc = new FakeController();
     const { lastFrame, unmount } = mount(fc);
     await delay(80);
-    expect(stripAnsi(lastFrame() ?? '')).toContain('newline');
+    const hint = stripAnsi(lastFrame() ?? '').split('\n').at(-2) ?? '';
+    expect(hint).toContain('Enter');
+    expect(hint).toContain('Ctrl+J');
+    expect(hint).toContain('\u6362\u884c');
     unmount();
   });
 
-  it('hides the hint row entirely when hints are disabled', async () => {
+  it('hides teaching hints but preserves send and newline when hints are disabled', async () => {
     const fc = new FakeController();
     fc.config = { ...CONFIG, hints: false };
     const { lastFrame, unmount } = mount(fc);
     await delay(80);
     const frame = stripAnsi(lastFrame() ?? '');
     expect(frame).not.toContain('? help');
+    const hint = frame.split('\n').at(-2) ?? '';
+    expect(hint).toContain('Enter');
+    expect(hint).toContain('\u6362\u884c');
+    expect(hint).not.toContain('/ commands');
+    expect(hint).not.toContain('@ files');
     expect(frame).not.toContain('newline');
     unmount();
   });
@@ -1509,51 +1574,26 @@ describe('AC-41: the stall row`s seconds advance THROUGH EntryView`s comparator'
   });
 });
 
-/**
- * AC-37 / L5 — round 1's one recorded but unbought pin.
- *
- * `runStartedAt` SEEDS THE PHRASE SEQUENCE, and it is assigned in RENDER SCOPE
- * (`App.tsx`: `if (running && runStartedAt.current === 0) runStartedAt.current =
- * Date.now()`) rather than in an effect. Written in an effect it would hold `0`
- * on the first frame of the first run and the PREVIOUS run's start on every run
- * after — so every run would open on the wrong word for one frame and then jump.
- * A flicker at the start of every single turn, in the one moment this feature
- * exists to make feel calm.
- *
- * The clock is faked so the expected word is computable; `t0` is chosen so that
- * the seeded phrase and the `startedAt === 0` phrase are DIFFERENT WORDS, which
- * is what lets this case fail.
- */
-describe('AC-37: the activity row opens on the phrase its own run seeds (L5)', () => {
-  it('the first frame with the row already shows `pickActivityPhrase(seed, seed)`', async () => {
-    // 45 phrases; `seed = floor(t0 / 1000)`, so a `t0` whose second is not a
-    // multiple of 45 gives a word the unseeded `startedAt = 0` cannot produce.
-    const t0 = 1_700_000_007_000;
-    const seeded = pickActivityPhrase(t0, t0, true);
-    const unseeded = pickActivityPhrase(0, 0, true);
-    expect(seeded, 'the fixture must be able to fail').not.toBe(unseeded);
-
-    vi.useFakeTimers({ toFake: ['Date'] });
-    vi.setSystemTime(t0);
+/** A new run must show its own event-derived phase, never a stale working phrase. */
+describe('AC-37: the fixed status opens with the current run phase', () => {
+  it('shows waiting before content arrives, then changes to generating with the first delta', async () => {
+    const fc = new FakeController();
+    fc.onPrompt = () => new Promise<void>(() => {
+      fc.emit({ type: 'agent_start' });
+      fc.emit({ type: 'turn_start' });
+    });
+    const { frames, lastFrame, unmount } = mount(fc, { initialPrompt: 'go' });
     try {
-      const fc = new FakeController();
-      fc.onPrompt = () =>
-        new Promise<void>(() => {
-          fc.emit({ type: 'agent_start' });
-          fc.emit({ type: 'turn_start' });
-        });
-      const { frames, unmount } = mount(fc, { initialPrompt: 'go' });
-      await delay(60);
-
-      const first = frames.map(stripAnsi).find((f) => ACTIVITY_PHRASES.some((p) => f.includes(p)));
-      unmount();
-
-      expect(first, 'no frame carried an activity phrase').toBeDefined();
-      expect(first).toContain(seeded);
-      expect(first).not.toContain(unseeded);
-    } finally {
-      vi.useRealTimers();
-    }
+      await vi.waitFor(() => expect(lastFrame()).toContain('\u7b49\u5f85'));
+      const firstWaiting = frames.map(stripAnsi).find((frame) =>
+        frame.split('\n').at(-1)?.includes('\u7b49\u5f85'))!;
+      expect(firstWaiting).toBeDefined();
+      expect(firstWaiting.split('\n').at(-1)).toMatch(/[\u2800-\u28ff]/);
+      expect(ACTIVITY_PHRASES.some((phrase) => firstWaiting.includes(phrase))).toBe(false);
+      fc.emit({ type: 'message_update', streamEvent: { type: 'text_delta', delta: 'first content' } });
+      await vi.waitFor(() => expect(lastFrame()).toContain('first content'));
+      expect(stripAnsi(lastFrame() ?? '').split('\n').at(-1)).toContain('\u751f\u6210');
+    } finally { unmount(); }
   });
 });
 
@@ -1646,9 +1686,9 @@ describe('the auto-update bridge (cli-auto-update §6.3)', () => {
  * over without ever doubling it, and the update notice stays silent for a whole
  * run. None of that is visible from a component test.
  */
-describe('the run status row in <App>', () => {
+describe('the fixed action and status rows in <App>', () => {
   const braille = (frame: string): number => (frame.match(/[\u2800-\u28ff]/g) ?? []).length;
-  const INTERRUPT = 'esc\u00d72 interrupt';
+  const INTERRUPT = 'Esc\u00d72 \u4e2d\u65ad';
 
   /** A run that streams `lines` lines of text and then waits for `finish()`. */
   function longRun(config: CliConfig = CONFIG, lines = 60) {
@@ -1683,26 +1723,27 @@ describe('the run status row in <App>', () => {
   const rowOf = (frame: string, needle: string): number =>
     frame.split('\n').findIndex((row) => row.includes(needle));
 
-  it('T9a: enabled -> the row sits above the input, replaces the hint row, and footer height is constant', async () => {
+  it('T9a: action and status stay below the input without moving it between run phases', async () => {
     const { terminal, finish } = await runAt(80, 24);
     try {
       const during = terminal.lastFrame();
       const top = during.split('\n').findIndex((row) => row.includes('\u256d'));
       expect(top).toBeGreaterThan(0);
-      expect(during.split('\n')[top - 1]).toContain(INTERRUPT);
+      expect(during.split('\n').at(-2)).toContain(INTERRUPT);
+      expect(during.split('\n').at(-1)).toMatch(/[\u2800-\u28ff]/);
       expect(braille(during)).toBe(1);
-      // The idle-style hint row is gone from below the input.
-      expect(during.split('\n').slice(top).join('\n')).not.toContain('23ce steer');
+      // Commands belong only to the fixed action row, never to the composer border.
+      expect(during.split('\n').slice(0, -2).join('\n')).not.toContain(INTERRUPT);
+      expect(during.split('\n').at(-2)).toContain('\u52a0\u5165\u961f\u5217');
       finish();
       await settleTerminal();
       await settleTerminal();
       const after = terminal.lastFrame();
       expect(after).not.toContain(INTERRUPT);
-      expect(after).toContain('send'); // the idle hint row is back below the input
-      // Footer height is constant: the run row occupies exactly the row the input
-      // box's top border had while idle, and the box moved down by that one row.
+      expect(after.split('\n').at(-2)).toContain('\u53d1\u9001');
+      // The fixed rows change their content without moving the composer.
       const idleTop = after.split('\n').findIndex((row) => row.includes('╭'));
-      expect(top - 1).toBe(idleTop);
+      expect(top).toBe(idleTop);
       expect(after.split('\n').length).toBe(during.split('\n').length);
     } finally { terminal.dispose(); }
   });
@@ -1711,14 +1752,15 @@ describe('the run status row in <App>', () => {
     ['a short terminal (16 rows)', 80, 16, CONFIG],
     ['--no-hints', 80, 24, { ...CONFIG, hints: false }],
   ] as [string, number, number, CliConfig][])(
-    'T9b: %s -> the run row is not enabled and the fixed bottom row keeps the life signal',
+    'T9b: %s keeps essential actions and the fixed status spinner',
     async (_label, cols, rows, config) => {
       const { terminal, finish } = await runAt(cols, rows, config);
       try {
         const during = terminal.lastFrame();
-        expect(during).not.toContain('\u23ce steer');
         expect(braille(during)).toBe(1);
-        // Not enabled: the box top-border row is identical while running and idle.
+        expect(during.split('\n').at(-2)).toContain(INTERRUPT);
+        expect(during.split('\n').at(-1)).toMatch(/[\u2800-\u28ff]/);
+        // Short windows and disabled teaching hints keep the same fixed rows.
         const runningTop = rowOf(during, '╭');
         finish();
         await settleTerminal();
@@ -1748,12 +1790,12 @@ describe('the run status row in <App>', () => {
         initialPrompt="go" updateBridge={{ service, onAttach: null }} />);
       await settleTerminal();
       await settleTerminal();
-      expect(terminal.lastFrame()).toContain('esc\u00d72 interrupt');
-      expect(terminal.lastFrame()).not.toContain('0.6.0');
+      expect(terminal.lastFrame()).toContain(INTERRUPT);
+      expect(terminal.lastFrame().split('\n').at(-2)).not.toContain('/update');
       finish();
       await settleTerminal();
       await settleTerminal();
-      expect(terminal.lastFrame()).toContain('0.6.0');
+      expect(terminal.lastFrame().split('\n').at(-2)).toContain('/update');
     } finally { terminal.dispose(); }
   });
 
@@ -1767,5 +1809,390 @@ describe('the run status row in <App>', () => {
       expect(braille(frame)).toBe(1);
       expect(frame).not.toMatch(/[\u2800-\u28ff]\s+Thinking (shown|hidden)/);
     } finally { terminal.dispose(); }
+  });
+});
+
+describe('App (tui-shift-enter-copy-queue)', () => {
+  it('pages the complete queue through real keys and restores the following draft on close', async () => {
+    const fc = new FakeController();
+    const queued: string[] = [];
+    fc.queueUserMessage = (text) => {
+      queued.push(text);
+      return `queue-${queued.length}`;
+    };
+    fc.onPrompt = () => new Promise<void>(() => {
+      fc.emit({ type: 'agent_start' });
+      fc.emit({ type: 'turn_start' });
+    });
+    const terminal = createTerminalHarness(80, 24);
+    terminal.mount(<App controller={fc as unknown as AgentController} version="test"
+      initialPrompt="go" />);
+    try {
+      await settleTerminal();
+      for (let i = 1; i <= 8; i++) {
+        terminal.input(`message-${i}\u0000nfull-detail-${i}\r`);
+        await settleTerminal();
+      }
+      expect(queued).toHaveLength(8);
+      expect(terminal.lastFrame()).toContain('Queue: \u5f85\u5904\u7406 8');
+      expect(terminal.lastFrame()).not.toContain('full-detail-8');
+
+      // A single input event may include typeahead after the command's Enter.
+      // Opening the overlay must not remount the editor or discard that draft.
+      terminal.input('/queue\rretained draft');
+      await settleTerminal();
+      expect(terminal.lastFrame()).toContain('Queue 1');
+      expect(terminal.lastFrame()).toContain('full-detail-1');
+      expect(terminal.lastFrame()).not.toContain('full-detail-8');
+      expect(terminal.lastFrame().split('\n').at(-2)).not.toContain('\u5165\u961f');
+      expect(terminal.lastFrame().split('\n').at(-1)).toMatch(/[\u2800-\u28ff]/);
+      const firstPage = terminal.lastFrame();
+      terminal.input('\u001b[6~');
+      await settleTerminal();
+      const secondPage = terminal.lastFrame();
+      expect(secondPage).not.toBe(firstPage);
+      terminal.input('\u001b[5~');
+      await settleTerminal();
+      expect(terminal.lastFrame()).toContain('full-detail-1');
+      terminal.input('\u001b[B');
+      await settleTerminal();
+      expect(terminal.lastFrame()).not.toBe(firstPage);
+      for (let i = 0; i < 5 && !terminal.lastFrame().includes('full-detail-8'); i++) {
+        terminal.input('\u001b[6~');
+        await settleTerminal();
+      }
+      expect(terminal.lastFrame()).toContain('full-detail-8');
+      expect(queued).toHaveLength(8);
+      terminal.resize(60, 20);
+      await settleTerminal();
+      await settleTerminal();
+      terminal.input(ESC);
+      await settleTerminal();
+      expect(terminal.lastFrame()).toContain('retained draft');
+      expect(fc.aborted).toBe(false);
+      terminal.input('\r');
+      await settleTerminal();
+      expect(queued.at(-1)).toBe('retained draft');
+      expect(queued).toHaveLength(9);
+    } finally { terminal.dispose(); }
+  });
+
+  it.each(['command', 'selection'])(
+    'shares busy state from %s and preserves new selections through failed cleanup',
+    async (source) => {
+      clipboardMock.deferred = true;
+      const fc = new FakeController();
+      let pending = false;
+      let live = 0;
+      fc.liveServiceCount = () => live;
+      fc.onPrompt = async () => {
+        fc.emit({ type: 'agent_start' });
+        fc.emit({ type: 'turn_start' });
+        fc.emit({ type: 'message_update', streamEvent: { type: 'text_delta', delta: 'answer' } });
+        fc.emit({ type: 'agent_end', messages: [] });
+      };
+      const takeSelection = vi.fn(() => {
+        pending = false;
+        return { text: 'selected', lines: 1 };
+      });
+      const onCopied = vi.fn();
+      const selection = {
+        controller: {
+          decorate: (lines: string[]) => lines, onHoldChange: () => () => {},
+          hasPendingSelection: () => pending, takeSelection,
+          clear: () => {}, setEnabled: () => {}, dispose: () => {},
+        }, onCopied, requestRedraw: null,
+      };
+      const view = render(<App controller={fc as unknown as AgentController} version="test"
+        initialPrompt="go" terminal={{ mouseSelect: true, selection }} />);
+      const copyCommand = async () => {
+        view.stdin.write('/copy'); await delay(25);
+        view.stdin.write('\r'); await delay(35);
+      };
+      try {
+        await delay(60);
+        if (source === 'command') await copyCommand();
+        else { pending = true; view.stdin.write('\x03'); await delay(35); }
+        expect(clipboardMock.calls).toHaveLength(1);
+        const taken = takeSelection.mock.calls.length;
+        live = 1;
+        pending = true;
+        view.stdin.write('\x03');
+        view.stdin.write('\x03');
+        await delay(35);
+        expect(pending).toBe(true);
+        expect(takeSelection).toHaveBeenCalledTimes(taken);
+        expect(fc.stopAllServicesCalls).toHaveLength(0);
+        expect(view.lastFrame()).not.toContain('Press Ctrl+C again to exit.');
+        await copyCommand();
+        expect(clipboardMock.calls).toHaveLength(1);
+        expect(onCopied).not.toHaveBeenCalled();
+
+        clipboardMock.tasks[0]!.finish({ status: 'failed', reason: 'timeout' });
+        await delay(35);
+        expect(view.lastFrame()).toContain('\u590d\u5236\u5931\u8d25');
+        pending = true;
+        view.stdin.write('\x03'); await delay(35);
+        expect(view.lastFrame()).toContain('\u590d\u5236\u5931\u8d25\uff0c\u6b63\u5728\u6e05\u7406');
+        expect(clipboardMock.calls).toHaveLength(1);
+        expect(pending).toBe(true);
+        expect(fc.stopAllServicesCalls).toHaveLength(0);
+        expect(onCopied).toHaveBeenCalledOnce();
+
+        clipboardMock.tasks[0]!.release();
+        await delay(25);
+        view.stdin.write('\x03'); await delay(35);
+        expect(clipboardMock.calls).toHaveLength(2);
+        expect(pending).toBe(false);
+        clipboardMock.tasks[1]!.finish({ status: 'confirmed', via: 'native' });
+        clipboardMock.tasks[1]!.release();
+        await delay(35);
+        expect(view.lastFrame()).toContain('\u5df2\u590d\u5236 1 \u884c');
+        expect(onCopied).toHaveBeenCalledTimes(2);
+        expect(fc.stopAllServicesCalls).toHaveLength(0);
+      } finally { view.unmount(); }
+    },
+  );
+
+  it('cancels a pending copy on unmount and does not deliver late bridge feedback', async () => {
+    clipboardMock.deferred = true;
+    const fc = new FakeController();
+    const onCopied = vi.fn();
+    const selection = {
+      controller: {
+        decorate: (lines: string[]) => lines, onHoldChange: () => () => {},
+        hasPendingSelection: () => true,
+        takeSelection: () => ({ text: 'selected', lines: 1 }),
+        clear: () => {}, setEnabled: () => {}, dispose: () => {},
+      }, onCopied, requestRedraw: null,
+    };
+    const view = render(<App controller={fc as unknown as AgentController} version="test"
+      terminal={{ mouseSelect: true, selection }} />);
+    await delay(40);
+    view.stdin.write('\x03'); await delay(25);
+    expect(clipboardMock.tasks).toHaveLength(1);
+    view.unmount();
+    await delay(25);
+    const task = clipboardMock.tasks[0]!;
+    expect(task.signal?.aborted).toBe(true);
+    task.finish({ status: 'confirmed', via: 'native' });
+    task.release();
+    await delay(25);
+    expect(onCopied).not.toHaveBeenCalled();
+  });
+
+  it.each(['empty', 'unavailable'])('consumes %s copy intent and disarms exit before service stop', async (kind) => {
+    const fc = new FakeController();
+    let pending = false;
+    let live = 0;
+    fc.liveServiceCount = () => live;
+    clipboardMock.calls.length = 0;
+    clipboardMock.via = 'none';
+    const selectionController = {
+      decorate: (lines: string[]) => lines, onHoldChange: () => () => {},
+      hasPendingSelection: () => pending,
+      takeSelection: () => {
+        pending = false;
+        return kind === 'empty' ? null : { text: 'selected', lines: 1 };
+      },
+      clear: () => {}, setEnabled: () => {}, dispose: () => {},
+    };
+    const view = render(<App controller={fc as unknown as AgentController} version="test"
+      terminal={{ mouseSelect: true,
+        selection: { controller: selectionController, onCopied: null, requestRedraw: null } }} />);
+    try {
+      await delay(40);
+      view.stdin.write('\x03'); await delay(30); // Arm exit first.
+      expect(view.lastFrame()).toContain('Press Ctrl+C again to exit.');
+      live = 1;
+      pending = true;
+      view.stdin.write('\x03'); await delay(30);
+      expect(fc.stopAllServicesCalls).toHaveLength(0);
+      expect(pending).toBe(false);
+      expect(clipboardMock.calls).toHaveLength(kind === 'empty' ? 0 : 1);
+      live = 0;
+      view.stdin.write('\x03'); await delay(30);
+      expect(view.lastFrame()).toContain('Press Ctrl+C again to exit.');
+    } finally { view.unmount(); }
+  });
+
+  it('synchronously takes mixed submission once and keeps the following draft', async () => {
+    const fc = new FakeController();
+    const prompts: string[] = [];
+    fc.onPrompt = async (text) => {
+      prompts.push(text);
+      fc.emit({ type: 'agent_start' });
+    };
+    const view = mount(fc);
+    try {
+      await delay(40);
+      view.stdin.write('hello\u0000nworld\rtail');
+      await delay(50);
+      expect(prompts).toEqual(['hello\nworld']);
+      expect(view.lastFrame()).toContain('tail');
+    } finally { view.unmount(); }
+  });
+
+  it('retains a failed slash command in recoverable prompt history', async () => {
+    const fc = new FakeController();
+    const view = mount(fc);
+    try {
+      await delay(40);
+      view.stdin.write('/resume ./missing-hardening-session.json');
+      await delay(30);
+      view.stdin.write('\r');
+      await delay(50);
+      expect(promptHistoryMock.entries).toContain('/resume ./missing-hardening-session.json');
+    } finally { view.unmount(); }
+  });
+
+  it('keeps failed slash input in the transcript even when prompt history is disabled', async () => {
+    const fc = new FakeController();
+    fc.config = { ...CONFIG, historyEnabled: false };
+    const view = mount(fc);
+    try {
+      await delay(40);
+      view.stdin.write('/resume ./recover-this-session.json');
+      await delay(30);
+      view.stdin.write('\r');
+      await delay(50);
+      expect(view.lastFrame()).toContain('Command: /resume ./recover-this-session.json');
+    } finally { view.unmount(); }
+  });
+
+  it('reports a dynamic skill rejected while starting and preserves its command without a second run',
+    async () => {
+      const fc = new FakeController();
+      fc.config = { ...CONFIG, historyEnabled: false,
+        skills: { ...CONFIG.skills, enabled: true } };
+      const record = {
+        name: 'review-code', description: 'Review code', scope: 'user', dir: '/skills/review-code',
+        entryPath: '/skills/review-code/SKILL.md', body: null, files: null, bytes: 40,
+        disabled: false, invalid: false, issues: [], shadowed: [], manifest: null,
+        writable: true, integrity: 'unverified',
+        frontmatter: { name: 'review-code', description: 'Review code', version: '1',
+          keywords: [], allowedTools: [], activation: 'auto', raw: {} },
+      };
+      const loadBody = vi.fn(() => ({ body: 'Review $ARGUMENTS', files: [] }));
+      const skills = {
+        list: () => [record], untrustedDirs: () => [], loadBody,
+        getRegistry: () => ({ activeNames: [], activate: vi.fn() }),
+        queueFrame: vi.fn(), pendingToolPolicyView: () => null, bodyMaxBytes: () => 4096,
+      } as unknown as SkillService;
+      const service = vi.spyOn(fc, 'getSkillService').mockReturnValue(skills);
+      const prompt = vi.spyOn(fc, 'prompt');
+      const steer = vi.spyOn(fc, 'queueUserMessage');
+      let release!: () => void;
+      fc.onPrompt = () => new Promise<void>((resolve) => { release = resolve; });
+      const view = mount(fc, { initialPrompt: 'initial task' });
+      try {
+        await delay(60);
+        expect(prompt).toHaveBeenCalledTimes(1);
+        view.stdin.write('/review-code important.ts');
+        await delay(30);
+        view.stdin.write('\r');
+        await delay(60);
+        expect(loadBody).toHaveBeenCalledExactlyOnceWith('review-code');
+        expect(view.lastFrame()).toContain('Command: /review-code important.ts');
+        expect(view.lastFrame()).toContain('Command failed: A run is still starting.');
+        expect(prompt).toHaveBeenCalledTimes(1);
+        expect(steer).not.toHaveBeenCalled();
+      } finally {
+        view.unmount(); release?.();
+        service.mockRestore(); prompt.mockRestore(); steer.mockRestore();
+      }
+    });
+
+  it('running Enter remains queued across turn_start until its exact receipt', async () => {
+    const fc = new FakeController();
+    const steered: string[] = [];
+    Object.assign(fc, { steer: (text: string) => steered.push(text) });
+    let release!: () => void;
+    fc.onPrompt = () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+        fc.emit({ type: 'agent_start' });
+        fc.emit({ type: 'turn_start' });
+        fc.emit({ type: 'message_update', streamEvent: { type: 'text_delta', delta: 'working' } });
+      });
+    const { stdin, lastFrame, unmount } = mount(fc, { initialPrompt: 'go' });
+    await delay(60);
+
+    stdin.write('a note');
+    await delay(30);
+    stdin.write('\r');
+    await delay(30);
+
+    expect(steered).toEqual(['a note']);
+    expect(lastFrame()).toContain('Queue: \u5f85\u5904\u7406 1');
+    expect(lastFrame()).toContain('1. a note');
+    // The entry IS the feedback; the old toast is gone (5.3).
+    expect(lastFrame()).not.toContain('Steering queued.');
+
+    // Starting a turn does not prove which steering batch entered history.
+    fc.emit({ type: 'turn_end', message: { role: 'assistant', content: [] }, usage: { inputTokens: 1, outputTokens: 1 } });
+    fc.emit({ type: 'turn_start' });
+    fc.emit({ type: 'message_update', streamEvent: { type: 'text_delta', delta: 'picked up' } });
+    await delay(60);
+    expect(lastFrame()).toContain('Queue: \u5f85\u5904\u7406 1');
+    expect(lastFrame()).toContain('1. a note');
+    fc.emit({ type: 'steering_accepted', ids: ['queued-test-id'] });
+    await delay(30);
+    expect(lastFrame()).not.toContain('Queue: \u5f85\u5904\u7406');
+    expect(lastFrame()).not.toContain('1. a note');
+    expect(lastFrame()).toContain('a note');
+    expect(lastFrame()).toContain('picked up');
+    release();
+    fc.emit({ type: 'agent_end', messages: [] });
+    await delay(30);
+    unmount();
+  });
+
+  it('Ctrl+C over a pending selection COPIES and does not arm the ladder', async () => {
+    clipboardMock.calls.length = 0;
+    const fc = new FakeController();
+    let pending = true;
+    const selectionController = {
+      decorate: (lines: string[]) => lines,
+      onHoldChange: () => () => {},
+      hasPendingSelection: () => pending,
+      takeSelection: () => {
+        pending = false;
+        return { text: 'selected text', lines: 1 };
+      },
+      // `clear` records but does not consume: the App clears on mount and
+      // on every key, and the real controller's pending state is older than
+      // whichever of those clears follows it.
+      clear: () => {},
+      setEnabled: () => {},
+      dispose: () => {},
+    };
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        controller={fc as unknown as AgentController}
+        version="test"
+        terminal={{
+          mouseSelect: true,
+          selection: { controller: selectionController, onCopied: null, requestRedraw: null },
+        }}
+      />,
+    );
+    await delay(40);
+
+    stdin.write('\x03'); // Ctrl+C with a pending selection: COPY.
+    await delay(40);
+    expect(clipboardMock.calls).toEqual([{ text: 'selected text', hasDoor: false }]);
+    // The shared toast funnel named the copy...
+    expect(lastFrame()).toContain('\u5df2\u8bf7\u6c42\u7ec8\u7aef\u590d\u5236');
+    // ...and neither ladder rung fired: no service stop, no arm.
+    expect(fc.stopAllServicesCalls).toHaveLength(0);
+    expect(lastFrame()).not.toContain('Press Ctrl+C again to exit.');
+
+    // The SECOND Ctrl+C (selection already consumed) walks the original
+    // ladder: it arms exit and says so.
+    stdin.write('\x03');
+    await delay(40);
+    expect(lastFrame()).toContain('Press Ctrl+C again to exit.');
+    unmount();
   });
 });

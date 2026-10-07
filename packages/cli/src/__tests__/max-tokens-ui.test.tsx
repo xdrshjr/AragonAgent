@@ -18,7 +18,8 @@ import {
   isAutoToken,
   parseMaxTokensInput,
 } from '../config/schema.js';
-import { SettingsScreen, effectiveCapLine } from '../ui/overlays/SettingsScreen.js';
+import { SettingsScreen, effectiveCapLine, readDirtySettings,
+  type SettingsValues } from '../ui/overlays/SettingsScreen.js';
 import { resolveSettingsMaxTokens } from '../ui/App.js';
 import { registerBuiltinCommands } from '../commands/builtins.js';
 import { CommandRegistry, runSlashInput, type CommandContext } from '../commands/registry.js';
@@ -33,6 +34,16 @@ const THEME = getTheme('warm', RICH);
 // ---------------------------------------------------------------------------
 
 describe('parseMaxTokensInput', () => {
+  it('profile transactions persist only a dirty cap and reject invalid edited values', () => {
+    const baseline = { maxTokens: '64000', provider: 'openai', model: 'session-override',
+      apiKey: '', fastModel: '', fastProvider: '', fastReview: '5', fastReviewBudget: '40', compactionThreshold: '90',
+      compactionKeepTurns: '3' } as SettingsValues;
+    expect(readDirtySettings(baseline, { ...baseline })).toEqual({});
+    expect(readDirtySettings(baseline, { ...baseline, maxTokens: 'auto' })).toEqual({ maxTokens: null });
+    expect(() => readDirtySettings(baseline, { ...baseline, maxTokens: 'invalid' }))
+      .toThrow('Max tokens');
+  });
+
   it('case 31: maps auto / empty / 0 to AUTO, a number to a value, junk to invalid', () => {
     for (const raw of ['auto', 'AUTO', ' Auto ', '', '   ', '0']) {
       expect(parseMaxTokensInput(raw), raw).toEqual({ kind: 'auto' });

@@ -28,8 +28,9 @@ describe('统一滚动的固定状态栏', () => {
       const after = terminal.lastFrame();
       expect(after).not.toBe(before);
       expect(after.startsWith(String.fromCharCode(0x00a0))).toBe(true);
-      expect(after).toContain('Esc x2 interrupt');
-      expect(after).toContain('Ctrl+C stop 2');
+      expect(after).not.toContain('Esc');
+      expect(after).toContain('上下文');
+      expect(after).toContain('服务 2');
       const lines = after.trimEnd().split('\n');
       expect(lines).toHaveLength(1);
       expect(stringWidth(lines[0]!)).toBeLessThanOrEqual(cols);

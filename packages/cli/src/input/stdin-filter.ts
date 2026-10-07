@@ -40,6 +40,7 @@ import {
   type MouseEvent,
 } from './mouse-events.js';
 import {
+  ENTER_NEWLINE_FRAME,
   PASTE_ASSEMBLY_MAX_MS,
   PASTE_BURST_MS,
   PASTE_CLOSE,
@@ -55,6 +56,7 @@ import {
   sanitisePaste,
   trailingPastePrefixLength,
 } from './paste-parse.js';
+import { splitEnterSequences, trailingEnterPrefixLength } from './enter-sequences.js';
 
 export interface MouseSource {
   /**
@@ -165,7 +167,16 @@ export function createStdinFilter(
   let burstTimer: NodeJS.Timeout | null = null;
   let assemblyTimer: NodeJS.Timeout | null = null;
   let disposed = false;
+  let finished = false;
   let paste: PasteState = { kind: 'idle' };
+  let discardBracketed = false;
+  let outputBatch: { chunks: string[]; refused: boolean } | null = null;
+
+  const writeInput = (text: string): void => {
+    if (disposed || outputBatch?.refused) return;
+    if (outputBatch) outputBatch.chunks.push(text);
+    else wrapper.write(text);
+  };
 
   // --- The surface Ink reads off the stream it is handed. ------------------
   // `isRawModeSupported()` reads `props.stdin.isTTY` (App.js:34), so this has
@@ -199,7 +210,8 @@ export function createStdinFilter(
   };
 
   /** `.unref()` so a held tail can never keep the process alive on its own. */
-  const arm = (fn: () => void, ms: number): NodeJS.Timeout => {
+  const arm = (fn: () => void, ms: number): NodeJS.Timeout | null => {
+    if (finished || disposed) return null;
     const t = setTimeout(fn, ms);
     t.unref?.();
     return t;
@@ -222,6 +234,8 @@ export function createStdinFilter(
   const emitPaste = (body: string, bytes: number, overflow: boolean): void => {
     if (disposed) return;
     if (overflow || bytes > PASTE_MAX_BYTES) {
+      if (outputBatch?.refused) return;
+      if (outputBatch) outputBatch.refused = true;
       const text =
         `Paste too large (${formatPasteSize(bytes)}); limit is ` +
         `${formatPasteSize(PASTE_MAX_BYTES)}. Nothing was inserted.`;
@@ -232,7 +246,7 @@ export function createStdinFilter(
     const payload = sanitisePaste(body);
     if (payload.length === 0) return;
     // ONE `write()` call, at the position the paste occupied in the stream.
-    wrapper.write(PASTE_OPEN + payload + PASTE_CLOSE);
+    writeInput(PASTE_OPEN + payload + PASTE_CLOSE);
   };
 
   const flushBurst = (): void => {
@@ -248,6 +262,11 @@ export function createStdinFilter(
     if (paste.kind !== 'bracketed') return;
     const { body, bytes, overflow } = paste;
     paste = { kind: 'idle' };
+    if (discardBracketed) {
+      discardBracketed = false;
+      if (outputBatch) outputBatch.refused = true;
+      return;
+    }
     if (reason === 'timeout') {
       // I-4: an unterminated marker must never wedge input. Emitting what
       // arrived is strictly better than holding the keyboard hostage.
@@ -271,7 +290,7 @@ export function createStdinFilter(
    * those would corrupt their data silently. v1 covered only Tier 1, which left
    * the loss in place for exactly the terminals Tier 2 exists to serve (P1-7).
    */
-  const handleOutsidePaste = (text: string, holdTail: boolean): void => {
+  const handleText = (text: string, holdTail: boolean): void => {
     if (text.length === 0) return;
 
     if (paste.kind === 'burst') {
@@ -288,14 +307,15 @@ export function createStdinFilter(
       return;
     }
 
-    // Step 0: with `mouse` false this degenerates to "pass the text on", which
-    // is byte-identical to the unwrapped stream.
+    // Ink conflates DEL Backspace with CSI Delete. Normalize only keyboard
+    // text, after burst classification, preserving ESC for Alt+Backspace.
+    text = text.replace(/\x7f/g, '\x08');
     if (!features.mouse) {
-      wrapper.write(text);
+      writeInput(text);
       return;
     }
     const split = splitMouseEvents(text);
-    if (split.text.length > 0) wrapper.write(split.text);
+    if (split.text.length > 0) writeInput(split.text);
     for (const event of split.events) emit(event);
     if (split.pending.length === 0) return;
     // `holdTail` is false when a paste marker follows this run in the SAME
@@ -303,11 +323,25 @@ export function createStdinFilter(
     // reorder it behind the paste. Appending (never prepending) is what keeps
     // `pending` in stream order when both prefix families fire at once.
     if (holdTail) pending += split.pending;
-    else wrapper.write(split.pending);
+    else writeInput(split.pending);
+  };
+
+  const handleOutsidePaste = (text: string, holdTail: boolean): void => {
+    const segments = splitEnterSequences(text);
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index]!;
+      if (segment.kind === 'text') {
+        handleText(segment.text, holdTail && index === segments.length - 1);
+        continue;
+      }
+      // A key terminates the heuristic paste before its internal frame is written.
+      flushBurst();
+      writeInput(segment.kind === 'submit' ? '\r' : ENTER_NEWLINE_FRAME);
+    }
   };
 
   const appendBracketed = (text: string): void => {
-    if (paste.kind !== 'bracketed' || text.length === 0) return;
+    if (paste.kind !== 'bracketed' || text.length === 0 || discardBracketed) return;
     const bytes = paste.bytes + byteLength(text);
     const overflow = paste.overflow || bytes > PASTE_MAX_BYTES;
     paste = {
@@ -349,9 +383,16 @@ export function createStdinFilter(
         begin === -1 ? strayEnd : strayEnd === -1 ? begin : Math.min(begin, strayEnd);
 
       if (first === -1) {
+        // THIRD PREFIX FAMILY: a torn CSI-u Enter sequence
+        // (tui-shift-enter-copy-queue 3.4). `keep = max(...)` holds the longest
+        // tail any family might still complete; the three families share only
+        // the ESC / ESC-[ head bytes, which the max keeps for whoever needs
+        // them. The existing 12 ms flush and the 32-char ceiling bound the
+        // hold, so no new timer is needed.
         const keep = Math.max(
           trailingPastePrefixLength(rest),
           features.mouse ? trailingMousePrefixLength(rest) : 0,
+          trailingEnterPrefixLength(rest),
         );
         const tail = rest.slice(rest.length - keep);
         handleOutsidePaste(rest.slice(0, rest.length - keep), true);
@@ -385,12 +426,34 @@ export function createStdinFilter(
   };
 
   const onData = (chunk: string | Buffer): void => {
-    if (disposed) return;
+    if (disposed || finished) return;
     flushTimer = clearTimer(flushTimer);
     const decoded = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
     const carried = pending;
     pending = '';
-    feed(carried + decoded);
+    // A rejected paste must not leave earlier text or a later Enter executable.
+    const batch = { chunks: [] as string[], refused: false };
+    outputBatch = batch;
+    try {
+      feed(carried + decoded.replace(/\u0000/g, ''));
+    } finally {
+      outputBatch = null;
+    }
+    if (batch.refused) {
+      burstTimer = clearTimer(burstTimer);
+      if (paste.kind === 'bracketed') {
+        // Keep consuming an unfinished body so its next chunk cannot become keys.
+        discardBracketed = true;
+        paste = { kind: 'bracketed', body: '', bytes: 0, overflow: false };
+      } else {
+        pending = '';
+        paste = { kind: 'idle' };
+        assemblyTimer = clearTimer(assemblyTimer);
+      }
+      return;
+    }
+    if (disposed || finished) return;
+    for (const text of batch.chunks) wrapper.write(text);
     if (paste.kind === 'bracketed' || pending.length === 0) return;
     if (pending.length > MAX_PENDING_CHARS) {
       // A malformed sequence that looks like a prefix forever must never wedge
@@ -406,10 +469,22 @@ export function createStdinFilter(
   // P2-7: a closed stdin must still terminate Ink's reader, or it waits forever
   // on a stream that will never produce another byte.
   const onEnd = (): void => {
-    flushBracketed('timeout');
-    flushBurst();
-    flushPending();
-    if (!wrapper.writableEnded) wrapper.end();
+    if (finished || disposed) return;
+    finished = true;
+    flushTimer = clearTimer(flushTimer);
+    burstTimer = clearTimer(burstTimer);
+    assemblyTimer = clearTimer(assemblyTimer);
+    const tail = pending;
+    pending = '';
+    if (paste.kind === 'bracketed') {
+      appendBracketed(tail);
+      flushBracketed('timeout');
+    } else {
+      // The pending prefix belongs to the currently open burst, if any.
+      handleOutsidePaste(tail, false);
+      flushBurst();
+    }
+    wrapper.end();
   };
 
   // `setEncoding('utf8')` on the REAL stream so Node's StringDecoder handles

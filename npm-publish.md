@@ -40,7 +40,8 @@ breaking CLI 变更，因此发布包含该变更的首个版本时应运行：
 1. 要求 `aragon-agent-core/` 中没有未提交的源码修改，并检查 npm 官方 registry 登录。
 2. 自动递增两个 workspace 版本，把 CLI 的 Core 依赖更新为新版本的 caret 范围，并同步
    `package-lock.json`。
-3. 运行全部测试、构建、Core consumer smoke、两个包的 pack dry-run 和 CLI 版本检查。
+3. 先构建，再依次运行 CLI、Core 全部测试；任一组失败立即停止并标明 workspace。通过后运行
+   Core consumer smoke、两个包的 pack dry-run 和 CLI 版本检查。
 4. 确认待发布的精确版本不存在，然后先发布 Core；只有 Core 可查询后才发布 CLI。
 5. 验证 npm 上的 CLI 版本只暴露 `aragon` 可执行入口。
 
@@ -50,6 +51,11 @@ breaking CLI 变更，因此发布包含该变更的首个版本时应运行：
 .\publish-latest.ps1 -DryRun
 .\publish-latest.ps1 -DryRun -Bump minor
 ```
+
+如果报错为 `npm command failed (1): npm test -w packages/cli`（或 `packages/core`），
+请查看该组测试上方的 `FAIL` / `Error`。根目录 `npm test` 会继续运行其他 workspace，
+因此最后一组显示全部通过并不代表整体通过。若提示版本文件已恢复，修复后重新运行普通发布命令，
+无需使用 `-Resume`。
 
 如果任何检查在首次 publish 前失败，脚本会自动恢复版本文件。如果 Core 可能已经发布、
 但 CLI 发布失败，脚本会保留版本现场；先核对 npm，再运行：

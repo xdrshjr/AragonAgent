@@ -107,6 +107,8 @@ function serviceTextGlyph(
 
 function renderEntry(entry: Entry, glyphs: Glyphs): string[] {
   switch (entry.kind) {
+    case 'queued':
+      return block('Queued but never sent:', entry.text);
     case 'user':
       return block(glyphs.user, entry.text);
     case 'assistant': {
@@ -257,17 +259,26 @@ export function renderTranscriptText(entries: Entry[], opts: TranscriptTextOptio
     );
   }
 
-  if (entries.length > max && max > 1) {
-    const head = Math.ceil(max / 2);
-    const tail = max - head;
-    const omitted = entries.length - max;
-    for (const entry of entries.slice(0, head)) lines.push(...renderEntry(entry, g));
-    lines.push(`${g.ellipsis} ${omitted} entries omitted ${g.midDot} use /save before exiting`);
-    for (const entry of entries.slice(entries.length - tail)) {
+  const historyCount = entries.filter((entry) => entry.kind !== 'queued').length;
+  const omitted = max > 1 ? Math.max(0, historyCount - max) : 0;
+  const head = Math.ceil(max / 2);
+  const tailStart = historyCount - (max - head);
+  let historyIndex = 0;
+  let reported = false;
+  for (const entry of entries) {
+    if (entry.kind === 'queued') {
       lines.push(...renderEntry(entry, g));
+      continue;
     }
-  } else {
-    for (const entry of entries) lines.push(...renderEntry(entry, g));
+    const index = historyIndex++;
+    if (omitted > 0 && index >= head && index < tailStart) {
+      if (!reported) {
+        lines.push(`${g.ellipsis} ${omitted} entries omitted ${g.midDot} use /save before exiting`);
+        reported = true;
+      }
+      continue;
+    }
+    lines.push(...renderEntry(entry, g));
   }
 
   return `${lines.join('\n')}\n`;

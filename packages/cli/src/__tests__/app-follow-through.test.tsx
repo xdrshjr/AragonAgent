@@ -538,7 +538,7 @@ describe('the decision reaches the transcript', () => {
     fc.emit({ type: 'agent_end', messages: [] } as AgentEvent);
     await delay(150);
     const frame = stripAnsi(lastFrame() ?? '');
-    expect(frame).toContain('Interrupt requested.');
+    expect(frame).toContain('\u6b63\u5728\u505c\u6b62');
     expect(frame).not.toContain('unfinished');
     expect(frame).not.toContain('Continuing with');
     unmount();

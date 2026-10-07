@@ -12,7 +12,7 @@ import {
   type RunRowPlanInput,
 } from '../ui/run-status-row.js';
 
-// "Percolating..." -> spinner(2) + 12 = 14; clauses: steer 7, interrupt 15, exit 13.
+// "Percolating..." -> spinner(2) + 12 = 14; clauses: queue 6, interrupt 15, exit 13.
 const BASE: RunRowPlanInput = {
   cols: 120,
   labelCols: 14,
@@ -42,7 +42,7 @@ describe('planRunRow - the §3.3.3 table', () => {
     expect(plan({ cols: 53 })).toEqual({ labelCols: 14, hintClauses: 2, chip: false });
   });
 
-  it('39 columns: label squeezed to 10, steer and interrupt stay whole', () => {
+  it('39 columns: label squeezed to 10, queue and interrupt stay whole', () => {
     expect(plan({ cols: 39 })).toEqual({ labelCols: 10, hintClauses: 2, chip: false });
   });
 
@@ -52,7 +52,7 @@ describe('planRunRow - the §3.3.3 table', () => {
   });
 
   it('four clauses (background services) at 80 columns', () => {
-    // steer 7, interrupt 15, stop N 13, exit 13 -> 48 + 9 = 57; 14 + 3 + 57 = 74 <= 78
+    // queue 6, interrupt 15, stop N 13, exit 13 -> 47 + 9 = 56; 14 + 3 + 56 = 73 <= 78
     const out = plan({ cols: 79, hintClauseCols: [7, 15, 13, 13] });
     expect(out).toEqual({ labelCols: 14, hintClauses: 4, chip: false });
   });
@@ -87,7 +87,7 @@ describe('planRunRow - boundaries and robustness', () => {
     expect(plan({ hintClauseCols: [7] })).toEqual({ labelCols: 14, hintClauses: 0, chip: false });
   });
 
-  it('keeps steer and interrupt whole at every width where any clause is shown', () => {
+  it('keeps queue and interrupt whole at every width where any clause is shown', () => {
     const clauses = [7, 15, 13, 13];
     for (let cols = 1; cols <= 200; cols += 1) {
       for (const labelCols of [3, 14, 43, 80]) {

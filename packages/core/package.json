@@ -1,6 +1,6 @@
 {
   "name": "@aragon-agent/core",
-  "version": "0.2.21",
+  "version": "0.2.25",
   "description": "AragonAgent core engine — LLM provider adapters, streaming, tool registry/execution, steering, idle watchdog, and an optional isolated-vm sandbox.",
   "license": "MIT",
   "author": "AragonAgent contributors",

@@ -343,9 +343,10 @@ describe('StatusBar todo cluster (§6.3)', () => {
     return out;
   }
 
-  it('degrades from `todo 2/7` to `[2/7]` below the compact threshold', () => {
+  it('preserves complete context and never truncates the optional todo field', () => {
     expect(bar(120, { done: 2, total: 7 })).toContain('todo 2/7');
-    expect(bar(80, { done: 2, total: 7 })).toContain('[2/7]');
+    expect(bar(80, { done: 2, total: 7 })).toMatch(/1(?:\.0)?k\/200(?:\.0)?k tok/);
+    expect(bar(80, { done: 2, total: 7 })).not.toContain('[2/7]');
   });
 
   it('adds nothing at all when there is no list', () => {

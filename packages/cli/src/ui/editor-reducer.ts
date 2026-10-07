@@ -32,10 +32,12 @@ import {
   snapOutOfToken,
   type PasteRecord,
 } from './paste-tokens.js';
+import { snapGrapheme, stepGrapheme } from './editor-navigation.js';
 
 export interface EditorState {
   buffer: string;
   cursor: number;
+  preferredVisualColumn?: number;
   historyIndex: number | null;
   dismissed: boolean;
   sel: number;
@@ -72,11 +74,14 @@ export type EditorAction =
   | { type: 'insert'; text: string }
   | { type: 'replace'; buffer: string; cursor: number }
   | { type: 'backspace' }
-  | { type: 'moveCursor'; cursor: number }
+  | { type: 'delete' }
+  | { type: 'moveCursor'; cursor: number; preferredVisualColumn?: number }
   | { type: 'recall'; buffer: string; cursor: number; historyIndex: number | null }
   | { type: 'select'; sel: number }
   | { type: 'dismiss' }
   | { type: 'clear' }
+  /** Only local reducer-planned states may be adopted; prune token payloads again. */
+  | { type: 'adopt'; state: EditorState }
   /**
    * ONE chunk of stdin, already split into ordered runs. The only new action,
    * and it is what keeps the one-dispatch-per-key rule true for a chunk that
@@ -105,7 +110,9 @@ export const INITIAL_EDITOR_STATE: EditorState = {
  * typing again, so suggestions should come back), and re-homes the selection
  * (the candidate list is about to be recomputed).
  */
-const DRAFT_FLAGS = { historyIndex: null, dismissed: false, sel: 0 } as const;
+const DRAFT_FLAGS = {
+  historyIndex: null, dismissed: false, sel: 0, preferredVisualColumn: undefined,
+} as const;
 
 /**
  * Drop payloads the buffer no longer references (I-7).
@@ -143,15 +150,18 @@ function withPrune(next: EditorState): EditorState {
 
 export function editorReducer(state: EditorState, action: EditorAction): EditorState {
   switch (action.type) {
+    case 'adopt':
+      return withPrune(action.state);
     case 'insert': {
       // D-8: typing can never land INSIDE a token. A no-op on a buffer with no
       // tokens, which is every buffer until the first collapse.
-      const cursor = snapOutOfToken(state.buffer, state.cursor);
+      const cursor = snapOutOfToken(state.buffer, snapGrapheme(state.buffer, state.cursor));
+      const buffer = state.buffer.slice(0, cursor) + action.text + state.buffer.slice(cursor);
       return withPrune({
         ...state,
         ...DRAFT_FLAGS,
-        buffer: state.buffer.slice(0, cursor) + action.text + state.buffer.slice(cursor),
-        cursor: cursor + action.text.length,
+        buffer,
+        cursor: snapGrapheme(buffer, cursor + action.text.length, true),
       });
     }
     case 'replace':
@@ -159,23 +169,29 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         ...state,
         ...DRAFT_FLAGS,
         buffer: action.buffer,
-        cursor: action.cursor,
+        cursor: snapGrapheme(action.buffer, action.cursor),
       });
-    case 'backspace': {
-      if (state.cursor <= 0) return state;
+    case 'backspace':
+    case 'delete': {
+      const cursor = snapGrapheme(state.buffer, state.cursor);
+      const backwards = action.type === 'backspace';
+      if (backwards ? cursor <= 0 : cursor >= state.buffer.length) return state;
       // G5: one `Backspace` immediately after `...lines]` removes the whole
       // token and releases its payload, in ONE dispatch.
-      const range = expandRangeOverTokens(state.buffer, state.cursor - 1, state.cursor);
+      const other = stepGrapheme(state.buffer, cursor, backwards ? 'left' : 'right');
+      const range = expandRangeOverTokens(state.buffer,
+        backwards ? other : cursor, backwards ? cursor : other);
+      const buffer = state.buffer.slice(0, range.from) + state.buffer.slice(range.to);
       return withPrune({
         ...state,
         ...DRAFT_FLAGS,
-        buffer: state.buffer.slice(0, range.from) + state.buffer.slice(range.to),
-        cursor: range.from,
+        buffer,
+        cursor: snapGrapheme(buffer, range.from),
       });
     }
     case 'input': {
       let buffer = state.buffer;
-      let cursor = snapOutOfToken(buffer, state.cursor);
+      let cursor = snapOutOfToken(buffer, snapGrapheme(buffer, state.cursor));
       let pastes: Map<number, PasteRecord> | null = null;
       for (const segment of action.segments) {
         const collapse = segment.kind === 'paste' && shouldCollapse(segment.text);
@@ -187,7 +203,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
           pastes.set(record.id, record);
         }
         buffer = buffer.slice(0, cursor) + text + buffer.slice(cursor);
-        cursor += text.length;
+        cursor = snapGrapheme(buffer, cursor + text.length, true);
       }
       return withPrune({
         ...state,
@@ -197,11 +213,15 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         ...(pastes ? { pastes } : {}),
       });
     }
-    case 'moveCursor':
+    case 'moveCursor': {
       // NO DRAFT-FLAG RESET. Moving the caret is not an edit: clearing
       // `historyIndex` here would end a history walk the moment the user pressed
       // ← to look at what they recalled.
-      return state.cursor === action.cursor ? state : { ...state, cursor: action.cursor };
+      const cursor = snapGrapheme(state.buffer, action.cursor);
+      const preferredVisualColumn = action.preferredVisualColumn;
+      return state.cursor === cursor && state.preferredVisualColumn === preferredVisualColumn
+        ? state : { ...state, cursor, preferredVisualColumn };
+    }
     case 'recall':
       // `historyIndex` is SET, not reset, which is why recall cannot reuse
       // `replace` — the two differ in exactly the field that keeps the walk
@@ -213,7 +233,8 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       return withPrune({
         ...state,
         buffer: action.buffer,
-        cursor: action.cursor,
+        cursor: snapGrapheme(action.buffer, action.cursor),
+        preferredVisualColumn: undefined,
         historyIndex: action.historyIndex,
       });
     case 'select':

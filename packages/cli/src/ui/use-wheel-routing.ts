@@ -143,7 +143,8 @@ export function useWheelRouting(options: WheelRoutingOptions): WheelRouting {
       if (overlay) {
         // Modes A only. `model` / `confirm` / `question` own their own keys and
         // scrolling them would leave an inconsistent cursor (R-11).
-        const controlled = overlay === 'help' || overlay === 'settings' || overlay === 'plan';
+        const controlled = overlay === 'help' || overlay === 'settings'
+          || overlay === 'plan' || overlay === 'queue';
         if (!controlled) return;
         // D-3: the row is not consulted here either. Behind an overlay the
         // composer is inactive and the overlay is the only scrollable thing on

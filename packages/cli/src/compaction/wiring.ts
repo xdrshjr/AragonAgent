@@ -36,6 +36,7 @@
  * written for.
  */
 
+import type { ModelRole } from '../config/model-profiles.js';
 import {
   DEFAULT_RETRY_POLICY,
   estimatePromptTokens,
@@ -80,8 +81,8 @@ const COMPACTION_RETRY_POLICY: RetryPolicy = { ...DEFAULT_RETRY_POLICY, maxRetri
 export interface CompactionWiringDeps {
   /** Read LIVE on every call - the controller replaces the object on mutation. */
   getConfig: () => CliConfig;
-  hasKey: (providerId: string) => boolean;
-  getApiKey: (providerId: string) => string | undefined;
+  hasKey: (providerId: string, role?: ModelRole) => boolean;
+  getApiKey: (providerId: string, role?: ModelRole) => string | undefined;
   getModelInfoFor: (ref: Pick<ModelRef, 'providerId' | 'modelId'>) => ModelInfo;
   isPricedModel: (ref: Pick<ModelRef, 'providerId' | 'modelId'>) => boolean;
   /**
@@ -291,7 +292,11 @@ export class CompactionWiring {
   }
 
   /** Re-emit the snapshot after any config mutation, so the chip and the gauge move. */
-  onConfigChanged(): void {
+  onConfigChanged(enabled?: boolean): void {
+    if (enabled !== undefined && enabled !== this.enabled) {
+      this.enabled = enabled;
+      if (enabled) this.compactor.clearSelfDisable();
+    }
     this.emit({ type: 'snapshot', snapshot: this.snapshot() });
   }
 

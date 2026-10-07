@@ -408,7 +408,7 @@ describe.each([true, false])('the interrupt ladder (bash.background: %s)', (back
     await delay(40);
     expect(controller.abortCalls).toBe(0);
     expect(controller.forceStopCalls).toBe(0);
-    expect(lastFrame() ?? '').toContain('Press Esc again within 1.5s to interrupt');
+    expect(lastFrame() ?? '').toContain('\u518d\u6309 Esc \u4e2d\u65ad');
     unmount();
   });
 
@@ -430,7 +430,7 @@ describe.each([true, false])('the interrupt ladder (bash.background: %s)', (back
     await delay(60);
 
     expect(controller.forceStopCalls).toBe(1);
-    expect(lastFrame() ?? '').toContain('idle');
+    expect(lastFrame() ?? '').toContain('中断');
     unmount();
   });
 
@@ -511,7 +511,7 @@ describe.each([true, false])('the interrupt ladder (bash.background: %s)', (back
     controller.emit({ type: 'agent_end', messages: [] } as unknown as AgentEvent);
     await delay(60);
 
-    expect(lastFrame() ?? '').toContain('idle');
+    expect(lastFrame() ?? '').toContain('中断');
     unmount();
   });
 
@@ -557,8 +557,11 @@ describe('AC-43 (P1-4): the hint row never loses its exit affordance', () => {
       toggleKey: 'shift+tab',
       services: 0,
     });
+    // `queue`, not `steer`: the transcript entry the gesture produces is
+    // named `Queue: ...`, and one behaviour with two names is undiscoverable
+    // (tui-shift-enter-copy-queue 5.5).
     expect(row).toBe(
-      [`${glyphs.enterKey} steer`, `esc${glyphs.times}2 interrupt`, `ctrl+c${glyphs.times}2 exit`].join(
+      [`${glyphs.enterKey} queue`, `esc${glyphs.times}2 interrupt`, `ctrl+c${glyphs.times}2 exit`].join(
         ` ${glyphs.midDot} `,
       ),
     );

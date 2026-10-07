@@ -56,7 +56,7 @@ function gate(opts: { wantMouse: boolean; configPaste: boolean; }) {
   const real = fakeStdin();
   const wantPaste = opts.configPaste && !!real.isTTY;
   const filter =
-    opts.wantMouse || wantPaste
+    real.isTTY
       ? tryCreateStdinFilter(real, { mouse: opts.wantMouse, paste: wantPaste })
       : null;
 
@@ -75,6 +75,7 @@ function gate(opts: { wantMouse: boolean; configPaste: boolean; }) {
 
   const result = {
     filterBuilt: filter !== null,
+    deleteDisambiguated: filter !== null,
     wantSelect,
     mouseCaptured: mouseOn,
     mouseSource: mouseOn && filter ? filter.source : undefined,
@@ -130,14 +131,12 @@ describe('T-29: the (mouse, paste) gate matrix', () => {
     expect(g.mouseSource).toBeDefined();
   });
 
-  it('T-28: (mouse: false, paste: false) hands Ink the REAL stdin, unwrapped', () => {
-    // AC-6 / I-10: with every stream feature off, nothing is wrapped — and that
-    // stays a statement about the code rather than about behaviour only while
-    // this identity holds.
+  it('wraps TTY input for Delete disambiguation even with mouse and paste off', () => {
     const g = gate({ wantMouse: false, configPaste: false });
 
-    expect(g.filterBuilt).toBe(false);
-    expect(g.inkStdin).toBe(g.realStdin);
+    expect(g.filterBuilt).toBe(true);
+    expect(g.deleteDisambiguated).toBe(true);
+    expect(g.inkStdin).not.toBe(g.realStdin);
     expect(g.mouseSource).toBeUndefined();
     for (const byte of [...MOUSE_ON_BYTES, MOTION_BYTE, PASTE_ON_BYTE]) {
       expect(g.bytes).not.toContain(byte);
@@ -163,13 +162,12 @@ describe('I-11: `filter !== null` answers exactly one question in cli.tsx', () =
     expect(CLI_SOURCE).toMatch(/mouseSource=\{mouseOn && filter \? filter\.source : undefined\}/);
   });
 
-  it('leaves `filter !== null` nowhere else — the handle is not a mouse signal', () => {
-    // Exactly two occurrences IN CODE, and they are the two derivations above.
-    // A third is how the five-sites problem comes back. Comments are blanked
-    // first because this invariant is explained at length in several of them,
-    // and a scanner that counted prose would fail on its own documentation.
+  it('adds only the explicit Delete capability alongside feature gates — the handle is not a mouse signal', () => {
+    // The additional occurrence is the actual keyboard-normalization capability,
+    // not an implicit mouse or paste feature switch.
+    expect(CLI_SOURCE).toMatch(/deleteDisambiguated: filter !== null,/);
     const code = stripComments(CLI_SOURCE);
-    expect(code.split('filter !== null').length - 1).toBe(2);
+    expect(code.split('filter !== null').length - 1).toBe(3);
   });
 
   it('gates `?2004h` on `pasteOn`, never on the handle', () => {

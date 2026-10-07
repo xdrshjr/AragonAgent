@@ -10,6 +10,7 @@
  * call fails, and when to stop spending.
  */
 
+import type { ModelRole } from '../config/model-profiles.js';
 import {
   planCompaction,
   type Message,
@@ -50,10 +51,12 @@ import type {
 } from './types.js';
 
 export interface CompactorDeps {
+  mainRole?: ModelRole;
+  resolveFastCandidate?: () => ReturnType<typeof resolveFastTier>;
   /** Read LIVE on every call — the controller replaces the object on mutation. */
   getConfig: () => CliConfig;
-  hasKey: (providerId: string) => boolean;
-  getApiKey: (providerId: string) => string | undefined;
+  hasKey: (providerId: string, role?: ModelRole) => boolean;
+  getApiKey: (providerId: string, role?: ModelRole) => string | undefined;
   /**
    * The engine's live history and system prompt.
    *
@@ -124,6 +127,7 @@ export interface CompactorOptions {
 
 /** The summarizer the next compaction would use. */
 export interface SummarizerChoice {
+  role: ModelRole;
   ref: ModelRef;
   /** Whether the fast tier supplied it, for `/compact status` and the card. */
   fromFastTier: boolean;
@@ -724,21 +728,21 @@ export class Compactor implements ContextManager {
     const { summarizer } = args;
     if (!summarizer) return { kind: 'failed', reason: 'no_summarizer_model' };
 
-    const first = await this.callOnce(summarizer.ref, args);
+    const first = await this.callOnce(summarizer, args);
     if (first.kind === 'ok' || first.kind === 'aborted') return first;
 
     // Rung 2 — retry, on the MAIN model when rung 1 was the fast tier.
-    const mainRef = this.mainRef();
-    const retryRef =
-      summarizer.fromFastTier && mainRef.modelId !== summarizer.ref.modelId ? mainRef : summarizer.ref;
-    this.log.warn('summarize_retry', { reason: first.reason, model: retryRef.modelId });
-    const second = await this.callOnce(retryRef, args);
+    const retryChoice: SummarizerChoice = summarizer.fromFastTier
+      ? { ref: this.mainRef(), role: this.deps.mainRole ?? 'main', fromFastTier: false }
+      : summarizer;
+    this.log.warn('summarize_retry', { reason: first.reason, model: retryChoice.ref.modelId });
+    const second = await this.callOnce(retryChoice, args);
     if (second.kind === 'ok' || second.kind === 'aborted') return second;
     return { kind: 'failed', reason: second.reason };
   }
 
   private async callOnce(
-    ref: ModelRef,
+    choice: SummarizerChoice,
     args: {
       ctx: CompactionContext;
       digest: string;
@@ -746,7 +750,8 @@ export class Compactor implements ContextManager {
       instructions?: string;
     },
   ): Promise<{ kind: 'ok'; text: string } | { kind: 'failed'; reason: string } | { kind: 'aborted' }> {
-    const apiKey = this.deps.getApiKey(ref.providerId);
+    const { ref, role } = choice;
+    const apiKey = this.deps.getApiKey(ref.providerId, role);
     if (!apiKey) return { kind: 'failed', reason: 'no_api_key' };
     if (args.ctx.signal.aborted) return { kind: 'aborted' };
 
@@ -1061,12 +1066,12 @@ export class Compactor implements ContextManager {
   resolveSummarizer(): SummarizerChoice | null {
     const config = this.deps.getConfig();
     if (config.compaction.useFastTier) {
-      const tier = resolveFastTier(config, this.deps.hasKey);
-      if (tier.ok) return { ref: tier.ref, fromFastTier: true };
+      const tier = this.deps.resolveFastCandidate?.() ?? resolveFastTier(config, this.deps.hasKey);
+      if (tier.ok) return { ref: tier.ref, role: 'fast', fromFastTier: true };
     }
     const ref = this.mainRef();
-    if (!this.deps.hasKey(ref.providerId)) return null;
-    return { ref, fromFastTier: false };
+    if (!this.deps.hasKey(ref.providerId, this.deps.mainRole ?? 'main')) return null;
+    return { ref, role: this.deps.mainRole ?? 'main', fromFastTier: false };
   }
 
   /**

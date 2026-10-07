@@ -88,7 +88,7 @@ import type {
 import type { FastEvent } from '../fast/types.js';
 import type { ToolOutputEvent, ToolOutputListener } from '../tools/tool-output-store.js';
 import type { ProcEvent, ProcEventListener } from '../proc/types.js';
-import { ACTIVITY_PHRASES } from '../ui/activity-phrases.js';
+import { interactionCopy as copy } from '../ui/interaction-copy.js';
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -517,7 +517,7 @@ async function settledFrame(
 
 /** The activity row is up when the frame carries its vocabulary. */
 const hasActivityRow = (frame: string): boolean =>
-  ACTIVITY_PHRASES.some((p) => frame.includes(p));
+  [...copy.generating, ...copy.confirming].some((p) => frame.includes(p));
 
 describe('single spinner while running', () => {
   it('AC-1/AC-2/AC-3: exactly one spinner, on the activity row, marker static', async () => {
@@ -533,7 +533,7 @@ describe('single spinner while running', () => {
     // AC-2 — and it is the row above the composer, identified by its own
     // vocabulary rather than by position, because position is what a layout
     // change moves and the phrase is what the row IS.
-    expect(ACTIVITY_PHRASES.some((p) => spinnerLine(frame).includes(p))).toBe(true);
+    expect(copy.generating.some((p) => spinnerLine(frame).includes(p))).toBe(true);
 
     // AC-3 — the answer keeps its text and gets the STATIC role marker. Both
     // halves matter: a suppression that also dropped the marker would trade a
@@ -546,15 +546,15 @@ describe('single spinner while running', () => {
   it('AC-4: a tool in flight says `running` without animating it', async () => {
     const fc = toolRunningController();
     const { lastFrame, unmount } = mount(fc, { initialPrompt: 'ls' });
-    const frame = await settledFrame(lastFrame, (f) => f.includes('Running bash'));
+    const frame = await settledFrame(lastFrame, (f) => f.includes('正在执行命令'));
 
     // The card still SAYS it is running — no information left the screen, only
     // motion did. This is the pair the bug was most visible on: two braille
     // animations one row apart, both meaning "bash is running".
     expect(frame).toContain('· running');
-    expect(frame).toContain('Running bash');
+    expect(frame).toContain('正在执行命令');
     expect(brailleCount(frame)).toBe(1);
-    expect(spinnerLine(frame)).toContain('Running bash');
+    expect(spinnerLine(frame)).toContain('正在执行命令');
     unmount();
   });
 
@@ -581,8 +581,8 @@ describe('single spinner while running', () => {
     const frame = await settledFrame(lastFrame, (f) => f.includes('Review plan'));
 
     expect(frame).toContain('Review plan'); // the overlay really is up...
-    expect(hasActivityRow(frame)).toBe(false); // ...the row is gone...
-    expect(brailleCount(frame)).toBe(0); // the modal owns the viewport
+    expect(hasActivityRow(frame)).toBe(true); // status survives the overlay
+    expect(brailleCount(frame)).toBe(1); // the global status owns activity
     stdin.write('\x1b');
     const restored = await settledFrame(lastFrame, (f) => hasActivityRow(f));
     expect(brailleCount(restored)).toBe(1);
@@ -628,7 +628,7 @@ describe('single spinner while running', () => {
     // `idle` in the status bar is the run being over, which is the state this
     // case is about — and it is a different fact from "nothing animates", so
     // waiting on it does not assert the thing under test.
-    const frame = await settledFrame(lastFrame, (f) => /idle/.test(f));
+    const frame = await settledFrame(lastFrame, (f) => /空闲|结束/.test(f));
 
     expect(brailleCount(frame)).toBe(0);
     // The suppressed form must not OUTLIVE the run: a settled card saying
@@ -729,7 +729,7 @@ describe('a mid-run toast keeps the one animation', () => {
   it('AC-12: braille count is 1 before, during and after the ack', async () => {
     const { lastFrame, stdin, unmount } = mountThickRun({ ...CONFIG, hints: false });
 
-    const before = await settledFrame(lastFrame, (f) => f.includes('Running bash'));
+    const before = await settledFrame(lastFrame, (f) => f.includes('正在执行命令'));
     // The fixture really is thick: two sites that WOULD animate if the
     // suppression signal were dropped for the toast window.
     expect(before).toContain('· running'); // the tool card
@@ -741,10 +741,10 @@ describe('a mid-run toast keeps the one animation', () => {
 
     // The toast really did take the row — otherwise this case measures nothing.
     // NOT `hasActivityRow`: this fixture has a tool in flight, so the row reads
-    // `Running bash` and carries no phrase at all (`ActivityLine`'s L4 branch).
+    // `正在执行命令` and carries no phrase at all (`ActivityLine`'s L4 branch).
     // A phrase-based predicate would be false in EVERY frame here and the case
     // would pass without ever driving the state it is named for.
-    expect(during).not.toContain('Running bash');
+    expect(during).toContain('正在执行命令');
     // ...and the frame is still alive. Never zero (the bug), never two (round 1).
     expect(brailleCount(during)).toBe(1);
     // The ack keeps its words: the spinner joins the row as a bare glyph.
@@ -757,7 +757,7 @@ describe('a mid-run toast keeps the one animation', () => {
       after = stripAnsi(lastFrame() ?? '');
       if (!/Thinking (shown|hidden)/.test(after)) break;
     }
-    expect(after).toContain('Running bash'); // the row is handed back...
+    expect(after).toContain('正在执行命令'); // the row is handed back...
     expect(brailleCount(after)).toBe(1); // ...and still owns the only animation
     unmount();
   });
@@ -767,12 +767,12 @@ describe('a mid-run toast keeps the one animation', () => {
     // on the fixed bottom row can no longer displace the life signal and needs no
     // glyph of its own. Still exactly one animation, never zero, never two.
     const { lastFrame, stdin, unmount } = mountThickRun();
-    const before = await settledFrame(lastFrame, (f) => f.includes('Running bash'));
+    const before = await settledFrame(lastFrame, (f) => f.includes('正在执行命令'));
     expect(brailleCount(before)).toBe(1);
 
     stdin.write('\x14');
     const during = await settledFrame(lastFrame, (f) => /Thinking (shown|hidden)/.test(f));
-    expect(during).toContain('Running bash'); // the run row is NOT displaced
+    expect(during).toContain('正在执行命令'); // the run row is NOT displaced
     expect(brailleCount(during)).toBe(1);
     expect(during).toContain('Thinking shown.');
     // The toast carries no animation of its own while the run row is visible.
@@ -786,7 +786,7 @@ describe('a mid-run toast keeps the one animation', () => {
     // ten frames on an 80 ms timer, so a sample inside the 2.5 s TTL must see
     // more than one of them.
     const { lastFrame, stdin, unmount } = mountThickRun();
-    await settledFrame(lastFrame, (f) => f.includes('Running bash'));
+    await settledFrame(lastFrame, (f) => f.includes('正在执行命令'));
     stdin.write('\x14');
     await settledFrame(lastFrame, (f) => /Thinking (shown|hidden)/.test(f));
 
@@ -819,14 +819,14 @@ describe('a mid-run toast keeps the one animation', () => {
 
       });
       // eslint-disable-next-line no-await-in-loop
-      await settledFrame(lastFrame, (f) => f.includes('Running bash'));
+      await settledFrame(lastFrame, (f) => f.includes('正在执行命令'));
       stdin.write('\x14');
       // eslint-disable-next-line no-await-in-loop
       const during = await settledFrame(lastFrame, (f) => /Thinking (shown|hidden)/.test(f));
 
       expect(brailleCount(during), label).toBe(0);
       // The toast keeps the whole row it had before: same glyph, same left edge.
-      expect(during, label).toMatch(/^\s*[^\s]\s+Thinking shown\./m);
+      expect(during, label).toMatch(/^\s*Thinking shown\./m);
       unmount();
     }
   });

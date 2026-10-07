@@ -88,7 +88,7 @@ describe('PromptInput — the chip on the input row', () => {
     cwd: process.cwd(),
     theme: getTheme('cool', RICH),
     caps: RICH,
-    onSubmit: () => {},
+    onSubmit: () => ({ accepted: true }),
   };
 
   it('T-22: renders inside the border at 12, and nothing at 0', () => {
@@ -112,7 +112,7 @@ describe('PromptInput — the chip on the input row', () => {
     const chipRow = rows.findIndex((r) => r.includes('lines below'));
     expect(chipRow).toBeGreaterThan(-1);
     // Inside the border means there is a frame row above it and below it.
-    expect(rows[chipRow]).toContain('Send a message');
+    expect(rows[chipRow]).toContain('\u8f93\u5165\u4efb\u52a1\u6216\u95ee\u9898');
     expect(chipRow).toBeGreaterThan(0);
     expect(chipRow).toBeLessThan(rows.length - 1);
   });
@@ -142,7 +142,7 @@ describe('PromptInput — the chip on the input row', () => {
           scrolledLines={12}
           theme={getTheme('cool', RICH)}
           caps={RICH}
-          onSubmit={() => {}}
+          onSubmit={() => ({ accepted: true })}
         />,
         120,
       ).join('\n');
@@ -159,7 +159,7 @@ describe('PromptInput — the chip on the input row', () => {
       120,
     );
     const chipRow = rows.findIndex((r) => r.includes('lines below'));
-    const markerRow = rows.findIndex((r) => r.includes('Send a message'));
+    const markerRow = rows.findIndex((r) => r.includes('\u8f93\u5165\u4efb\u52a1\u6216\u95ee\u9898'));
     expect(chipRow).toBe(markerRow);
   });
 });

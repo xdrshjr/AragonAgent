@@ -83,6 +83,43 @@ function overflowError(): Error {
   return err;
 }
 
+describe('steering receipts across suspended compaction', () => {
+  it('accepts A before compaction while B remains pending at the first turn_start', async () => {
+    let release!: (outcome: CompactionOutcome) => void;
+    let started!: () => void;
+    const suspended = new Promise<CompactionOutcome>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { started = resolve; });
+    const manager: ContextManager = {
+      shouldCompact: (probe) => probe.turnIndex === 1,
+      compact: () => { started(); return suspended; },
+    };
+    const agent = agentWith(registryOf(() => (async function* () {
+      yield doneEvent();
+    })()), { contextManager: manager });
+    const events = collect(agent);
+    const turnReceipts: string[][] = [];
+    agent.subscribe((event) => {
+      if (event.type === 'turn_start') {
+        turnReceipts.push(events.flatMap((e) => e.type === 'steering_accepted' ? e.ids : []));
+      }
+    });
+    agent.steer('A', 'id-a');
+    const running = agent.prompt('initial');
+    await entered;
+    agent.steer('B', 'id-b');
+    expect(events.filter((e) => e.type === 'steering_accepted'))
+      .toEqual([{ type: 'steering_accepted', ids: ['id-a'] }]);
+    expect(agent.state.messages.some((m) => m.role === 'user' && m.content === 'B')).toBe(false);
+    release({ action: 'keep', reason: 'test' });
+    await running;
+    expect(turnReceipts).toEqual([['id-a'], ['id-a', 'id-b']]);
+    expect(events.filter((e) => e.type === 'steering_accepted')).toEqual([
+      { type: 'steering_accepted', ids: ['id-a'] },
+      { type: 'steering_accepted', ids: ['id-b'] },
+    ]);
+  });
+});
+
 describe('the checkpoint is free when there is no manager (AC-1)', () => {
   it('emits no compaction events at all', async () => {
     const registry = registryOf(() =>

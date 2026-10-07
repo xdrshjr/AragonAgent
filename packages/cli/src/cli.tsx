@@ -20,6 +20,7 @@ import '../runtime/insecure-tls-warning.cjs';
 import { render } from './ui/ink-runtime.js';
 import React from 'react';
 import { Command } from 'commander';
+import { ModelProfileConfigError } from './config/model-profile-store.js';
 import { loadConfig, type CliFlags } from './config/load.js';
 import { getConfigPath, readConfigFile, updatePersistedConfig } from './config/store.js';
 import { formatMigrationNotice, migrateLegacyState } from './config/migrate-legacy-state.js';
@@ -112,7 +113,6 @@ import { renderTranscriptText } from './ui/transcript-text.js';
 import { detectCapabilities } from './ui/capabilities.js';
 import { pickGlyphs } from './ui/glyphs.js';
 import { getTheme } from './ui/theme.js';
-import { copyText } from './ui/clipboard.js';
 import {
   createSelectionController,
   type SelectionBridge,
@@ -626,7 +626,7 @@ function runInteractive(
   const wantPaste = config.paste && !!process.stdin.isTTY;
   const pasteBridge: PasteBridge = { notify: null };
   const filter =
-    wantMouse || wantPaste
+    process.stdin.isTTY
       ? tryCreateStdinFilter(
           process.stdin,
           { mouse: wantMouse, paste: wantPaste },
@@ -813,10 +813,10 @@ function runInteractive(
       // correct. That is rung 2 of the fail-safe ladder doing its job.
       repaint: () => frameWriter?.repaint() ?? false,
       requestRedraw: () => selectionBridge.requestRedraw?.(),
-      // `?? undefined` and not a wrapper: `copyText` skips OSC 52 entirely when
-      // it has no door, and reports `'native'`/`'none'` accordingly.
-      copy: (text) => copyText(text, writeForeign ?? undefined),
-      onCopied: (via, lines, chars) => selectionBridge.onCopied?.(via, lines, chars),
+      // The copy decision moved UP to `App` (tui-shift-enter-copy-queue
+      // 4.2.4): Ctrl+C with a settled selection is routed there, through
+      // the SAME `copyText` door and the SAME bridge `onCopied` toast
+      // funnel -- the controller keeps only the selection state machine.
       // Read at PAINT time, not captured: `/theme` rebuilds the theme mid-session.
       theme: () => getTheme(config.theme, detectCapabilities(process.env, process.stdout)),
       caps: detectCapabilities(process.env, process.stdout),
@@ -834,6 +834,7 @@ function runInteractive(
   const terminalBridge: AppProps['terminal'] =
     {
           mouseSelect: wantSelect,
+          deleteDisambiguated: filter !== null,
           scrollbar,
           ...(mouseOn
             ? {
@@ -1229,6 +1230,17 @@ function runConfigSetContextWindow(value: string): void {
 }
 
 function runConfigSet(key: string, value: string): void {
+  try { runConfigSetValue(key, value); }
+  catch (error) {
+    const invalid = error instanceof ModelProfileConfigError
+      && !['read_failed', 'write_failed'].includes(error.code);
+    process.stderr.write(error instanceof ModelProfileConfigError
+      ? `${error.message}\n` : 'Could not write config. Check file permissions.\n');
+    process.exitCode = invalid ? 2 : 1;
+  }
+}
+
+function runConfigSetValue(key: string, value: string): void {
   if (!CONFIG_SET_KEYS.has(key)) {
     process.stderr.write(
       `Unknown config key "${key}". Known keys: ${[...CONFIG_SET_KEYS].join(', ')}.\n`,
@@ -1659,7 +1671,7 @@ function buildProgram(): Command {
     .option('--no-live-tool-output', 'Keep a running tool card to one line')
     .option('--mouse', 'Wheel scrolls the transcript (full-screen mode)')
     .option('--no-mouse', 'Leave the mouse to the terminal (the wheel does nothing)')
-    .option('--mouse-select', 'Drag with the mouse to select text; releasing copies it')
+    .option('--mouse-select', 'Drag with the mouse to select text; Ctrl+C copies it')
     .option('--no-mouse-select', 'Keep wheel scrolling, but leave drag-select off')
     // Positive form FIRST, same tri-state reason as `--mouse-select` above:
     // `paste` is persisted and defaults to `true`, so a lone `--no-paste` would

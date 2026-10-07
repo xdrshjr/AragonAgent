@@ -31,6 +31,7 @@ import { OverlayFrame } from '../layout/OverlayFrame.js';
 import { wrapToRows } from '../layout/wrap-rows.js';
 import type { NormalizedPlan } from '../../tools/human-input.js';
 import { stripPasteFrames } from '../paste-frames.js';
+import { stripEnterFrames } from '../enter-frames.js';
 
 export type PlanVerdict = { decision: 'approved' | 'revise'; feedback: string };
 
@@ -91,7 +92,10 @@ export function PlanReviewOverlay({
       // pastes — a failing test, a stack trace — and a framed paste appended
       // verbatim would put NULs into text the model then reads.
       if (input && !key.ctrl && !key.meta && !key.tab) {
-        setFeedback(feedback + stripPasteFrames(input));
+        // `stripEnterFrames` rides inside it for the newline frame a
+        // Shift+Enter broadcasts (tui-shift-enter-copy-queue 3.5): same hazard,
+        // same fix, and this order is the one that leaves no NUL in the draft.
+        setFeedback(feedback + stripPasteFrames(stripEnterFrames(input)));
       }
       return;
     }

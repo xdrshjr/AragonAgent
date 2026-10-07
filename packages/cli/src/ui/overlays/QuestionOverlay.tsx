@@ -23,6 +23,7 @@ import { pickGlyphs } from '../glyphs.js';
 import { OverlayFrame } from '../layout/OverlayFrame.js';
 import type { Answer, NormalizedQuestion } from '../../tools/human-input.js';
 import { stripPasteFrames } from '../paste-frames.js';
+import { stripEnterFrames } from '../enter-frames.js';
 
 interface QuestionOverlayProps {
   questions: NormalizedQuestion[];
@@ -159,7 +160,12 @@ export function QuestionOverlay({
       // `stripPasteFrames`, NOT `input` (I-12 / P0-2) -- the same broadcast
       // hazard `SettingsScreen` documents at length: a framed paste appended
       // verbatim stores NULs that render as nothing.
-      if (input && !key.ctrl && !key.meta && !key.tab) setDraft(draft + stripPasteFrames(input));
+      // `stripEnterFrames` rides inside it for the newline frame a
+      // Shift+Enter broadcasts (tui-shift-enter-copy-queue 3.5): same hazard,
+      // same fix, and this order is the one that leaves no NUL in the draft.
+      if (input && !key.ctrl && !key.meta && !key.tab) {
+        setDraft(draft + stripPasteFrames(stripEnterFrames(input)));
+      }
       return;
     }
 

@@ -497,7 +497,10 @@ function Invoke-ReleaseChecks($PackageState) {
   # Tests inspect dist entry points (including post-build shebangs), so rebuild
   # before testing rather than validating stale or partially compiled output.
   Invoke-NpmCommand @('run', 'build')
-  Invoke-NpmCommand @('test')
+  # npm's --workspaces runner continues after failures, so a passing Core summary
+  # can hide an earlier CLI failure. Stop at the failing workspace and name it.
+  Invoke-NpmCommand @('test', '-w', 'packages/cli')
+  Invoke-NpmCommand @('test', '-w', 'packages/core')
   Invoke-NpmCommand @('run', 'verify:dist', '-w', 'packages/core')
   # Brand gate. Must run AFTER `npm run build` (or it scans a stale/absent dist)
   # and BEFORE `npm publish` (or it is decorative). Invoked as an npm script, not

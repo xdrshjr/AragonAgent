@@ -281,9 +281,9 @@ export class Agent {
   // Message queues
   // =========================================================================
 
-  /** Inject a high-priority steering message (interrupts tool execution). */
-  steer(message: string): void {
-    this.messageQueueManager.pushSteering(message);
+  /** Queue high-priority text; an optional ID is echoed only after history acceptance. */
+  steer(message: string, id?: string): void {
+    this.messageQueueManager.pushSteering(message, id);
   }
 
   /** Queue a low-priority follow-up message (consumed after end_turn). */

@@ -87,7 +87,7 @@ function frameOf(
   return frame;
 }
 
-describe('AC-17: precedence is toast > activity > update > blank', () => {
+describe('AC-17: feedback and update share permanent action row', () => {
   it('a toast wins the row even when both others want it', () => {
     // A transient ack is a RESPONSE TO THE USER, and the row nearest the input
     // belongs to it.
@@ -97,26 +97,30 @@ describe('AC-17: precedence is toast > activity > update > blank', () => {
     expect(frame).not.toContain('0.6.0');
   });
 
-  it('the activity line beats the update line', () => {
+  it('running actions take precedence over update advice', () => {
     // The update line is the only PERSISTENT one of the three, so deferring it
     // costs nothing — whereas an activity line deferred never renders at all
     // (D-2). It also means a user who is actively working never sees the
     // updater until they stop, which is the whole of the silence requirement.
     const frame = frameOf([], true, snap());
-    expect(hasPhrase(frame)).toBe(true);
+    expect(hasPhrase(frame)).toBe(false);
+    expect(frame).toContain('Esc×2 中断');
+    expect(frame).not.toContain('/update');
     expect(frame).not.toContain('0.6.0');
   });
 
-  it('the update line takes the row when nothing else wants it', () => {
+  it('the update entry shares the idle action row', () => {
     const frame = frameOf([], false, snap());
-    expect(frame).toContain('0.6.0 installed');
+    expect(frame).toContain('/update');
+    expect(frame).toContain('Enter');
   });
 
-  it('the blank budgeted row survives when nobody wants it', () => {
-    expect(frameOf([], false, null).trim()).toBe('');
+  it('the permanent action row survives when there is no feedback or update', () => {
+    expect(frameOf([], false, null)).toContain('Enter');
     // ... including when the updater exists but has nothing to say, which is
     // the common case and the one P0-1 would have broken.
-    expect(frameOf([], false, snap({ phase: 'idle' })).trim()).toBe('');
+    expect(frameOf([], false, snap({ phase: 'idle' }))).toContain('Enter');
+    expect(frameOf([], false, snap({ phase: 'idle' }))).not.toContain('/update');
   });
 });
 

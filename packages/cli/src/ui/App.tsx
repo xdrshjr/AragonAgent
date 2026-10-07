@@ -1,3 +1,6 @@
+import { modelSettingsResultMessage } from '../agent/model-profile-settings.js';
+import type { ModelSettingsDraft } from '../config/model-profile-store.js';
+import { selectTranscriptEntries, mergePendingEntries } from '../agent/queued-messages.js';
 /**
  * App — the root Ink component. Owns the view reducer, subscribes to the
  * controller's event stream (with a streaming coalescer), wires global
@@ -44,7 +47,9 @@ import {
 } from '../config/ui-state.js';
 import { getLogger } from '../logging/logger.js';
 import { isTerminalStatus, type ServiceSnapshot } from '../proc/types.js';
-import { registerSecret } from '../logging/secret-registry.js';
+import { getSecrets } from '../logging/secret-registry.js';
+import { redactText } from '../logging/redact.js';
+import type { ComposerSubmitResult } from './composer-input.js';
 import { detectCapabilities, type TermCapabilities } from './capabilities.js';
 import {
   useStartupNotices,
@@ -106,9 +111,6 @@ import {
   SettingsScreen,
   compactionSettingsFrom,
   fastSettingsFrom,
-  readCompactionSettings,
-  readFastSettings,
-  type SettingsValues,
 } from './overlays/SettingsScreen.js';
 import { ConfirmDialog, type ConfirmState } from './overlays/ConfirmDialog.js';
 import { QuestionOverlay } from './overlays/QuestionOverlay.js';
@@ -118,6 +120,11 @@ import { registerBuiltinCommands } from '../commands/builtins.js';
 import { makeSkillsCommand, registerSkillCommands } from '../commands/skills.js';
 import { MODE_LABEL, MODE_TOGGLE_KEYS, nextMode, type AgentMode } from '../agent/agent-mode.js';
 import type { SelectionBridge } from './selection/selection-controller.js';
+import { createClipboardCoordinator } from './clipboard-task.js';
+import { QueuePanel } from './QueuePanel.js';
+import { QueueOverlay } from './overlays/QueueOverlay.js';
+import { buildQueueLayout } from './layout/queue-layout.js';
+import { interactionCopy } from './interaction-copy.js';
 import { emptyTailState, type TailSink } from './layout/follow-state.js';
 import type {
   HumanInputBridge,
@@ -239,6 +246,7 @@ export interface TerminalBridge {
   scrollbar?: ScrollbarBridge;
   /** Whether drag-select is on for this session (`mouseSelect` + a filter). */
   mouseSelect: boolean;
+  deleteDisambiguated?: boolean;
   /** Release the mouse to the terminal, or take it back (`/mouse`, G3). */
   setMouseCapture?: (on: boolean) => void;
   /** Whether the mouse is captured right now — read at command time. */
@@ -353,6 +361,8 @@ export function App({
   // closing an overlay cannot leave a stale offset behind, and reset whenever
   // the active overlay changes.
   const [overlayScroll, setOverlayScroll] = useState(0);
+  const [completion, setCompletion] = useState<'none' | 'slash' | 'file'>('none');
+  const [copyState, setCopyState] = useState({ busy: false, cleanupPending: false });
   // Bumped whenever the installed skill set changes. The command registry and
   // the completion list are memoized against it, so a skill installed mid-session
   // gets its `/<name>` command and its autocomplete entry immediately.
@@ -610,6 +620,11 @@ export function App({
     // makes stale events inert WITHOUT making the next run's events inert too.
     let generation = controller.runGeneration;
     const unsubscribe = controller.subscribe((event) => {
+      // Receipts describe committed history even when force-stop invalidated the run.
+      if (event.type === 'steering_accepted') {
+        dispatch({ type: 'steeringAccepted', ids: event.ids });
+        return;
+      }
       if (controller.runGeneration !== generation) {
         // The engine is unwinding a force-stopped run. Adopt the new generation
         // only once it has finished doing so, so a late `agent_end` cannot be
@@ -1134,7 +1149,7 @@ export function App({
   // --- Exit snapshot: the only way state reaches cli.tsx (§4.4). ----------
   useEffect(() => {
     publishExitSnapshot({
-      entries: state.entries,
+      entries: mergePendingEntries(state.entries, state.pendingSteering),
       usageTotal: state.usageTotal,
       provider: cfg.provider,
       model: cfg.model,
@@ -1144,7 +1159,7 @@ export function App({
       // count (K-6).
       droppedEntries: state.droppedEntries,
     });
-  }, [state.entries, state.usageTotal, state.droppedEntries, cfg.provider, cfg.model]);
+  }, [state.entries, state.pendingSteering, state.usageTotal, state.droppedEntries, cfg.provider, cfg.model]);
 
   // --- `/perf` snapshot channel (tui-render-performance §5.4). ------------
   //
@@ -1372,21 +1387,33 @@ export function App({
   // redraw when the frame differ has no cache to repaint from. Both are assigned
   // here and cleared on unmount, the same shape `updateBridge` uses.
   const selectionBridge = terminal?.selection;
+  const copyCoordinator = useMemo(() => createClipboardCoordinator({
+    clipboard: { write: terminal?.writeForeign },
+    onRequest: () => {
+      ctrlCArmed.current = false;
+      if (ctrlCTimer.current) clearTimeout(ctrlCTimer.current);
+      ctrlCTimer.current = null;
+    },
+    onStateChange: setCopyState,
+    onBusy: ({ cleanupPending }) => toast('info', cleanupPending
+      ? '\u590d\u5236\u5931\u8d25\uff0c\u6b63\u5728\u6e05\u7406' : '\u6b63\u5728\u590d\u5236'),
+    onResult: (result, request) => {
+      selectionBridge?.onCopied?.(result, request.lines, request.text.length);
+      if (result.status === 'confirmed') {
+        toast('success', `\u5df2\u590d\u5236 ${request.lines} \u884c`);
+      } else if (result.status === 'sent') {
+        toast('info', '\u5df2\u8bf7\u6c42\u7ec8\u7aef\u590d\u5236\uff0c\u7ed3\u679c\u672a\u786e\u8ba4');
+      } else {
+        const text = `${interactionCopy.copyFailed}\uff1a${interactionCopy.copyReasons[result.reason]}`;
+        toast('warn', text);
+        notify('error', text);
+      }
+    },
+  }), []);
+  useEffect(() => () => copyCoordinator.dispose(), [copyCoordinator]);
+
   useEffect(() => {
     if (!selectionBridge) return undefined;
-    selectionBridge.onCopied = (via, lines, chars) => {
-      // IT NAMES THE MECHANISM RATHER THAN CLAIMING SUCCESS (R-7). Neither OSC 52
-      // nor a spawned `xclip` is detectable: tmux without `set -g set-clipboard
-      // on` swallows the first silently, and the second is best-effort by
-      // construction. A toast that said "copied successfully" would be guessing.
-      const noun = lines === 1 ? 'line' : 'lines';
-      if (via === 'none') {
-        toast('warn', 'Nothing could be copied - no clipboard mechanism is available.');
-        return;
-      }
-      const how = via === 'osc52' ? 'terminal clipboard' : 'system clipboard';
-      toast('success', `Sent ${lines} ${noun} (${chars} chars) to the ${how}.`);
-    };
     // I-5 of `frame-differ.ts`: writing escapes here would be a foreign write.
     // The nonce is the carrier Ctrl+L already uses (§4.13).
     selectionBridge.requestRedraw = () => setRedrawNonce((n) => n + 1);
@@ -1496,6 +1523,7 @@ export function App({
 
   const makeCtx = (args: string): CommandContext => ({
     args,
+    requestCopy: copyCoordinator.requestCopy,
     controller,
     state: stateRef.current,
     dispatch: (action) => {
@@ -1519,7 +1547,10 @@ export function App({
     toast,
     persistConfig,
     exit: doExit,
-    submit: (text: string, opts?: SubmitMessageOptions) => submitMessage(text, opts),
+    submit: (text: string, opts?: SubmitMessageOptions) => {
+      const result = submitMessage(text, opts);
+      if (!result.accepted) throw new Error(result.reason ?? 'Message was not accepted.');
+    },
     refreshSkills: () => setSkillsNonce((n) => n + 1),
     applyAgentMode: applyMode,
     // Read at command time, so `/todo status` reports the live count rather than
@@ -1576,7 +1607,15 @@ export function App({
    * `handleSubmit` would re-parse it as input and, for a body that happens to
    * start with `/`, recurse into command dispatch.
    */
-  const submitMessage = (message: string, opts: SubmitMessageOptions = {}) => {
+  const submitMessage = (
+    message: string, opts: SubmitMessageOptions = {},
+  ): ComposerSubmitResult => {
+    if (controller.getConfig().modelSettingsRestartRequired) {
+      return { accepted: false, reason: 'Settings require a restart before sending requests.' };
+    }
+    if (interactionPhase.current === 'starting') {
+      return { accepted: false, reason: 'A run is still starting. Press Esc twice to cancel.' };
+    }
     // A USER MESSAGE IS A NEW INTENT AND OUTRANKS A QUEUED ONE (AC-19). First
     // line, before the steering branch: a message typed during the grace window
     // must be the one that runs, whichever branch it takes.
@@ -1584,17 +1623,20 @@ export function App({
 
     cancelConfirmation();
     if (interactionPhase.current === 'running') {
-      controller.steer(message);
-      toast('info', 'Steering queued.');
-      return;
-    }
-    if (interactionPhase.current === 'starting') {
-      toast('info', 'A run is still starting. Press Esc twice to cancel.');
-      return;
+      try {
+        const queueId = controller.queueUserMessage(message);
+        dispatch({ type: 'steerQueued', queueId, text: message });
+        return { accepted: true };
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        notify('error', reason);
+        return { accepted: false, reason };
+      }
     }
     resetInterrupt();
     const sequence = ++submissionSequence.current;
     interactionPhase.current = 'starting';
+    dispatch({ type: 'runStarting' });
 
     // `userInitiated: false` skips TWO things and both are wanted: the
     // prompt-history append, and the `submitCount` bump that drives the
@@ -1609,128 +1651,76 @@ export function App({
 
     const pre = controller.preflight();
     if (!pre.ok) {
+      dispatch({ type: 'runError' });
       notify('error', pre.message ?? 'Configuration error.');
       interactionPhase.current = 'idle';
       resetInterrupt();
       autoContinuationRef.current = false;
       dispatch({ type: 'runEnd' }); // reset status; nothing was started
-      return;
+      return { accepted: true };
     }
     // Fire-and-forget: events drive the UI. prompt() never rejects.
     void controller.prompt(message, { todoPolicy: opts.todoPolicy ?? 'new-task' }).then((outcome) => {
       if (!mounted.current || sequence !== submissionSequence.current) return;
       if (outcome?.status !== 'not-started') return;
+      if (outcome.reason !== 'cancelled') dispatch({ type: 'runError' });
       interactionPhase.current = 'idle';
       resetInterrupt();
       autoContinuationRef.current = false;
       dispatch({ type: 'runEnd' });
     });
+    return { accepted: true };
   };
   submitRef.current = submitMessage;
 
-  const handleSubmit = async (raw: string) => {
-    if (interactionPhase.current === 'running' && /^\s*\/(reset|resume)(?:\s|$)/.test(raw)) {
-      notify('warn', 'Interrupt the current run before switching conversations.');
-      return;
+  const executeSlashInput = async (raw: string): Promise<void> => {
+    // Retain a recoverable command before any asynchronous handler can fail.
+    const safe = redactText(raw, getSecrets());
+    recordPrompt(safe);
+    notify('info', `Command: ${safe}`);
+    try {
+      await runSlashInput(registry, raw, makeCtx);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      notify('error', `Command failed: ${redactText(reason, getSecrets())}\nInput: ${safe}`);
+    }
+  };
+
+  const handleSubmit = (raw: string): ComposerSubmitResult => {
+    const trimmed = raw.trimStart();
+    const slash = trimmed.startsWith('/') && !trimmed.startsWith('//');
+    if (slash && (interactionPhase.current === 'running' || controller.isRunning()) &&
+      /^\/(reset|resume)(?:\s|$)/.test(trimmed)) {
+      return { accepted: false,
+        reason: 'Interrupt the current run before switching conversations.' };
     }
     // Submitting is an unconditional "take me to the newest output" (§4.5).
     setPinToBottomNonce((n) => n + 1);
-    const handled = await runSlashInput(registry, raw, makeCtx);
-    if (handled) return;
-
-    submitMessage(raw.startsWith('//') ? raw.slice(1) : raw);
+    if (slash) {
+      void executeSlashInput(raw);
+      return { accepted: true };
+    }
+    return submitMessage(trimmed.startsWith('//') ? raw.replace('//', '/') : raw);
   };
 
-  const handleSettingsSave = (values: SettingsValues) => {
-    // An unusable cap must NOT discard the rest of the form: the same Enter
-    // press is often carrying a freshly pasted API key, and losing that to a
-    // typo in an unrelated field is the worst outcome available here.
-    const cap = resolveSettingsMaxTokens(values.maxTokens, controller.getConfig().maxTokens);
-    controller.setModel(values.provider, values.model, values.baseUrl || undefined);
-    controller.setThinkingLevel(values.thinkingLevel);
-    controller.setMaxTokens(cap.applied);
-    // THE SETTER AND THE PERSIST ARE BOTH REQUIRED, the pair `/todo panel`
-    // documents: persisting alone reports success and changes nothing until the
-    // next launch. `thinkingVisible` lives in `ViewState`, not in the config the
-    // controller holds, so the live half is a dispatch rather than a setter —
-    // and it is a no-op when the row already agrees with the current state.
-    if ((values.showThinking === 'on') !== stateRef.current.thinkingVisible) {
+  const handleProfileSave = (draft: ModelSettingsDraft) => {
+    const result = controller.saveModelSettings(draft);
+    if (!result.ok) return result;
+    if (draft.patch.showThinking !== undefined
+      && controller.getConfig().showThinking !== stateRef.current.thinkingVisible) {
       dispatch({ type: 'toggleThinking' });
     }
-    const key = values.apiKey.trim();
-    if (key.length > 0) {
-      // Registration site 4 (§4.4.3), and the one that matters most: this is how
-      // a key most often enters the process, and it happens long after
-      // `installLogging()` ran. A startup snapshot would miss it entirely, and
-      // the vendor regexes only cover keys that look like a vendor's.
-      registerSecret(key);
-      controller.setApiKey(values.provider, key);
-    }
-
-    const patch: Partial<PersistedConfig> = {
-      provider: values.provider,
-      model: values.model,
-      baseUrl: values.baseUrl.trim() ? values.baseUrl.trim() : null,
-      thinkingLevel: values.thinkingLevel,
-      showThinking: values.showThinking === 'on',
-      // PERSIST ONLY, with no paired live setter — the store is allocated in
-      // `AgentController`'s constructor, so this row takes effect on the next
-      // launch. That is what manual row 8 asks for, and it is why the seed above
-      // reads `cfg` rather than `ViewState`.
-      liveToolOutput: values.liveToolOutput === 'on',
-      // Omitted entirely when the field was unusable, so the previous value
-      // survives instead of being overwritten with a guess.
-      ...(cap.persist !== 'skip' ? { maxTokens: cap.persist } : {}),
-    };
-    if (key.length > 0) patch.apiKeys = { [values.provider]: key };
-    // A PARTIAL `log` section, safe only because `updatePersistedConfig` deep-
-    // merges it — a shallow merge here would reset `redactSecrets` every time
-    // someone touched the level.
-    patch.log = { level: values.logLevel } as PersistedConfig['log'];
-
-    // --- Fast tier (fast-model-tier §4.5) ---------------------------------
-    //
-    // THE SETTER AND THE PERSIST ARE BOTH REQUIRED, and this is the pair `/todo
-    // panel` documents (P1-2): `App` reads `controller.getConfig()` at render
-    // time, so persisting alone reports success and changes nothing until the
-    // next launch, while the setter alone forgets by morning.
-    //
-    // `setFastConfig` also re-resolves the tier, which matters HERE more than
-    // anywhere: this same Enter press may have changed the main provider, the
-    // main model or the API key, and `fast.provider: ''` inherits from all
-    // three (§3.2 rule 8 / RV-3).
-    const fastPatch = readFastSettings(values);
-    controller.setFastConfig(fastPatch);
-    patch.fast = fastPatch as PersistedConfig['fast'];
-
-    // --- Context compaction (context-auto-compaction §4.5) ------------------
-    //
-    // THE SAME SETTER-AND-PERSIST PAIR, and the same reason. `setCompactionConfig`
-    // additionally re-emits the snapshot, which is what moves the status chip and
-    // the gauge's marks without waiting for the next turn.
-    //
-    // `enabled` here flips the LIVE switch only. Whether the wiring exists at all
-    // was decided at construction and cannot be undone in this session (§3.2), so
-    // a user who turns it ON in a `--no-compaction` session gets the persisted
-    // value for next launch and nothing this session — which is exactly what
-    // `/compact on` reports in words.
-    const compactionPatch = readCompactionSettings(values);
-    controller.setCompactionConfig(compactionPatch);
-    if (compactionPatch.enabled !== undefined) {
-      controller.setCompactionEnabled(compactionPatch.enabled);
-    }
-    patch.compaction = compactionPatch as PersistedConfig['compaction'];
-
-    persistConfig(patch);
-    getLogger().reconfigure({ ...controller.getConfig().log, level: values.logLevel });
-
     dispatch({ type: 'setOverlay', overlay: null });
-    toast(cap.toast?.[0] ?? 'success', cap.toast?.[1] ?? 'Settings saved.');
+    toast(result.restartRequired ? 'warn' : 'success', modelSettingsResultMessage(result));
+    return result;
   };
 
   const handleModelSelect = (provider: string, model: string) => {
-    controller.setModel(provider, model);
-    persistConfig({ provider, model });
+    const result = controller.saveModelSettingsPatch({ provider, model });
+    if (!result.ok) {
+      toast('error', modelSettingsResultMessage(result));
+      return;
+    }
     dispatch({ type: 'setOverlay', overlay: null });
     toast('info', `Model set to ${provider}:${model}.`);
   };
@@ -1828,6 +1818,35 @@ export function App({
     // `Esc` IS DELIBERATELY NOT GIVEN A SECOND MEANING (§4.4.6). It aborts a
     // run, and an emergency exit is the last key that should silently absorb a
     // press; it clears the selection here like every other key and nothing more.
+    //
+    // THE ONE EXCEPTION, AND IT SITS AHEAD OF THE UNCONDITIONAL CLEAR
+    // (tui-shift-enter-copy-queue 4.3): Ctrl+C over a RELEASED, non-empty
+    // selection means COPY. Selecting is browsing; copying is committing,
+    // and the commit key is the one a terminal user already reaches for.
+    // `takeSelection` runs BEFORE `copyText` because the copy writes OSC
+    // 52 through `writeForeign`, which invalidates the differ and would
+    // otherwise re-clear this controller a tick later (R7). A failed copy
+    // (`via === 'none'`) still reports through the shared toast funnel and
+    // returns: the selection is already consumed, and the NEXT Ctrl+C
+    // walks the original ladder.
+    if (key.ctrl && (input === 'c' || input === 'C') && copyCoordinator.isBusy()) {
+      void copyCoordinator.requestCopy({ text: '', lines: 0 });
+      return;
+    }
+    if (
+      key.ctrl &&
+      (input === 'c' || input === 'C') &&
+      (selectionController?.hasPendingSelection() ?? false)
+    ) {
+      const payload = selectionController!.takeSelection();
+      ctrlCArmed.current = false;
+      if (ctrlCTimer.current) clearTimeout(ctrlCTimer.current);
+      ctrlCTimer.current = null;
+      if (payload) {
+        void copyCoordinator.requestCopy({ text: payload.text, lines: payload.lines });
+      }
+      return; // A consumed copy intent never becomes exit or service stop.
+    }
     selectionController?.clear();
 
     if (key.ctrl && (input === 'c' || input === 'C')) {
@@ -1872,7 +1891,7 @@ export function App({
       const overlay = stateRef.current.overlay;
       // Modes A only. `model` / `confirm` manage their own keys; registering an
       // arrow handler for them would double every keypress (R-12).
-      const controlled = overlay === 'help' || overlay === 'settings' || overlay === 'plan';
+      const controlled = overlay === 'help' || overlay === 'settings' || overlay === 'plan' || overlay === 'queue';
       if (key.pageUp) {
         if (controlled) setOverlayScroll((n) => Math.max(0, n - OVERLAY_PAGE));
         return;
@@ -1885,7 +1904,7 @@ export function App({
       // worth more than scrolling six fields (§4.9). `question` keeps them for
       // its option cursor, for the same reason; `plan` has no cursor of its own
       // and scrolls a line at a time.
-      if ((overlay === 'help' || overlay === 'plan') && (key.upArrow || key.downArrow)) {
+      if ((overlay === 'help' || overlay === 'plan' || overlay === 'queue') && (key.upArrow || key.downArrow)) {
         setOverlayScroll((n) => Math.max(0, n + (key.upArrow ? -1 : 1)));
         return;
       }
@@ -1983,6 +2002,7 @@ export function App({
 
     if (key.escape) {
       const overlay = stateRef.current.overlay;
+      if (overlay === 'settings') return;
       if (overlay) {
         cancelConfirmation();
         if (overlay === 'confirm' && confirmRef.current) {
@@ -2016,7 +2036,7 @@ export function App({
     interruptGesture.current = next.state;
     if (next.action === 'hint') {
       dispatch({ type: 'pushToast', level: 'info',
-        text: 'Press Esc again within 1.5s to interrupt.' });
+        text: '\u4e2d\u65ad\u5df2\u51c6\u5907' });
       return;
     }
     endReasonRef.current.aborted = true;
@@ -2036,7 +2056,7 @@ export function App({
     controller.abort();
     if (sequence === submissionSequence.current && interactionPhase.current === 'running') {
       dispatch({ type: 'pushToast', level: 'info',
-        text: 'Interrupt requested. Esc again to force-stop.' });
+        text: '\u6b63\u5728\u505c\u6b62' });
     }
   }, [controller, cancelFollowThrough, resetInterrupt]);
 
@@ -2049,6 +2069,8 @@ export function App({
   // which is what lets the user's `contextWindow` override reach the gauge at
   // all. Nothing else in this render read them.
   const overlay = state.overlay;
+  const settingsDraft = useMemo(() => overlay === 'settings'
+    ? controller.createModelSettingsDraft() : undefined, [controller, overlay]);
   const hasKey = controller.hasApiKey();
   const empty = state.entries.length === 0;
   // RENDER SCOPE, so the chip and the composer hint agree with what the Ctrl+C
@@ -2105,26 +2127,34 @@ export function App({
   const viewportBudget = computeViewportRows(rows, draftRows);
   const overlayMaxRows = viewportBudget;
 
-  // Renderers consume these same projections. Team capacity does not depend on
-  // popup occupancy, so a menu cannot toggle the team's collapsed state.
-  // THE ONE CONDITION for "the hint row exists": it sizes the footer below AND
-  // decides whether the run status row may replace that hint row while running,
-  // so starting a run can never add or remove a footer row.
-  const hintRowEnabled = rows >= HINT_MIN_ROWS && cfg.hints;
-  const composerBaseRows = 2 + clampDraftRows(rows, draftRows) + Number(hintRowEnabled);
+  const composerBaseRows = 2 + clampDraftRows(rows, draftRows);
+  const baseRail = buildTodoRailLayout({
+    cols: cols - 1, panelEnabled: cfg.todo.panel, overlayOpen: false,
+    itemCount: state.todos?.items.length ?? 0, viewportBudget,
+    teamRows: 0, popupRows: 0, composerBaseRows,
+  });
+  const queueLayout = useMemo(() => buildQueueLayout({
+    pending: state.pendingSteering, columns: baseRail.contentCols, terminalRows: rows,
+    availableRows: Math.max(0, viewportBudget - composerBaseRows - 1), paused: !running,
+  }), [state.pendingSteering, baseRail.contentCols, rows, viewportBudget, composerBaseRows, running]);
   const teamLayout = buildTeamPanelLayout({
-    snapshot: state.team, terminalRows: rows, availableRows: Math.max(0, viewportBudget - composerBaseRows),
+    snapshot: state.team, terminalRows: rows,
+    availableRows: Math.max(0, viewportBudget - composerBaseRows - queueLayout.rows - 1),
   });
   const railLayout = buildTodoRailLayout({
     cols: cols - 1, panelEnabled: cfg.todo.panel, overlayOpen: false,
     itemCount: state.todos?.items.length ?? 0, viewportBudget,
-    teamRows: teamLayout.rowCount, popupRows, composerBaseRows,
+    teamRows: teamLayout.rowCount, queueRows: queueLayout.rows, popupRows, composerBaseRows,
   });
-  // Transcript and composer share contentCols; fixed chrome and overlays use terminal width.
   const { visible: showRail, width: railWidth, rows: railRows, contentCols } = railLayout;
+  const transcriptEntries = useMemo(() => selectTranscriptEntries(state.entries,
+    state.pendingSteering), [state.entries, state.pendingSteering]);
 
   const overlayNode =
-    overlay === 'help' ? (
+    overlay === 'queue' ? (
+      <QueueOverlay pending={state.pendingSteering} cols={cols} maxRows={overlayMaxRows}
+        scrollOffset={overlayScroll} onScrollClamp={setOverlayScroll} theme={theme} caps={caps} />
+    ) : overlay === 'help' ? (
       <OverlayFrame
         title="Help"
         hint={`Esc close ${glyphs.midDot} PgUp/PgDn scroll`}
@@ -2186,7 +2216,10 @@ export function App({
         onScrollClamp={setOverlayScroll}
         theme={theme}
         caps={caps}
-        onSave={handleSettingsSave}
+        draft={settingsDraft}
+        onProfileSave={handleProfileSave}
+        onReload={() => controller.createModelSettingsDraft()}
+        onClose={() => dispatch({ type: 'setOverlay', overlay: null })}
         // Read from `cfg` (render scope, re-read every frame), so `/retry off`
         // while the screen is open shows the new value on the next paint.
         retrySummary={
@@ -2254,62 +2287,8 @@ export function App({
   const density = cfg.density;
   const transcriptWindow = cfg.transcriptWindow ?? DEFAULT_TRANSCRIPT_WINDOW;
 
-  // --- One spinner per run (single-spinner-while-running D-1 .. D-5). ------
-  //
-  // THE MOUNT CONDITION, NAMED ONCE AND USED TWICE (D-4). This const both gates
-  // the `<ActivityLine>` element below and feeds the derivation on the next
-  // line, so "the line is up" and "every other site is still" can never
-  // disagree. Two copies of the same boolean expression is exactly how that
-  // invariant becomes false in six months, silently and in only one branch.
-  //
-  // NOT `running` ALONE (D-3). While an overlay owns the screen the activity row
-  // is suppressed, so keying suppression off `running` would leave the frame
-  // with ZERO life signals: the bar shows state, this row shows life. Never
-  // trade one duplicate for one absence.
-  //
-  // THE CLAIM ABOVE WAS ONCE FALSE, AND THAT WAS THE WHOLE OF
-  // `activity-spinner-vanishes-behind-toast`. `BottomStatusRow` — not this const
-  // — decides what the row actually shows, and a toast used to take the row
-  // outright, so for its 2.5 s TTL this said "the line is up" while nothing was
-  // mounted and all seven other sites sat still. The answer was NOT to enumerate
-  // `&& !state.toasts.length` here (the next occupant reopens it, and the seven
-  // sites animating out of phase is the defect this whole feature removed):
-  // `BottomStatusRow` now carries the bare spinner alongside the toast, so the
-  // signal is mounted exactly when this const is true and the claim holds by
-  // construction.
-  const activityVisible = running && !overlayNode;
-  // The FOUR VIEW CONSUMERS (transcript x 2, team panel, todo panel) take this;
-  // the activity line keeps the raw config flag (D-5), because it reads that
-  // flag a second time to gate phrase rotation and the widened value would
-  // freeze the phrase at the first word of every run.
-  //
-  // So below `App` the prop now means "this frame does not animate here" rather
-  // than "the user asked for reduced motion". `cfg.reducedMotion` (`:279`) stays
-  // the sole config source, and `spinner-census.test.ts` pins this wiring —
-  // threading the raw flag into a fifth consumer is the one silent way back to
-  // two spinners (R-2).
-  const viewReducedMotion = reducedMotion || activityVisible;
-
-  // The run status row (spinner + phrase + steer/interrupt hint) replaces the idle
-  // hint row ABOVE the input while running; it exists only when that hint row
-  // would, so the footer height is identical with and without it. `running`, not
-  // `activityVisible`: an overlay must not flip the Composer between two layouts.
-  const runRowEnabled = running && hintRowEnabled;
-  // The raw `reducedMotion` flag lives here and nowhere else (D-5).
-  const runActivity: RunActivity = {
-    startedAt: runStartedAt.current,
-    elapsedMs,
-    reducedMotion,
-    runningTool,
-    // THE ROW MUST NEVER SAY SOMETHING FALSE (§6.1). Compaction runs BEFORE
-    // `turn_start`, so `status` is `'running'` with no tool in flight - precisely
-    // the window in which the rotating phrase would claim the model is thinking
-    // while it is actually waiting on a 30k-token summarization.
-    compacting: state.compaction?.inFlight === true,
-  };
-  // The fixed bottom row takes over the life signal once the run row scrolls out
-  // of the viewport; exactly one of the two ever animates.
-  const runRowShown = runRowEnabled && activityRowVisible;
+  // The fixed status bar remains visible underneath every overlay and toast.
+  const viewReducedMotion = reducedMotion || running || state.runPhase === 'starting' || compactionLive;
 
   // Assigned during render so `/perf` reads the CURRENT frame (see `perfRef`).
   // `mountedEntries` is the same number `render-budget.test.tsx` asserts (AC-9).
@@ -2353,9 +2332,8 @@ export function App({
   const composer = (
     <Composer
       measureRef={composerRef}
-      runRow={runRowEnabled
-        ? { activity: runActivity, live: runRowShown && !overlayNode, rowRef: activityRef }
-        : null}
+      deleteDisambiguated={terminal?.deleteDisambiguated ?? false}
+      onCompletionContextChange={setCompletion}
       cols={contentCols}
       cursorVisible={cursorVisible}
       onInteraction={returnToComposer}
@@ -2381,7 +2359,7 @@ export function App({
       onNotice={notify}
       theme={theme}
       caps={caps}
-      onSubmit={(text) => void handleSubmit(text)}
+      onSubmit={handleSubmit}
       onHelp={() => dispatch({ type: 'setOverlay', overlay: 'help' })}
     />
   );
@@ -2413,7 +2391,7 @@ export function App({
       <ScrollViewport
         active={overlay === null && !tooSmall}
         overlay={tooSmall ? null : overlayNode}
-        footer={<>{team}{composer}</>}
+        footer={<>{team}<QueuePanel layout={queueLayout} theme={theme} />{composer}</>}
         rail={rail}
         scrollbar={terminal?.scrollbar}
         composerRef={composerRef}
@@ -2435,7 +2413,7 @@ export function App({
       >
         {opener}
         <TranscriptList
-          entries={state.entries}
+          entries={transcriptEntries}
           expandedToolIds={state.expandedToolIds}
           thinkingVisible={state.thinkingVisible}
           reducedMotion={viewReducedMotion}
@@ -2465,36 +2443,17 @@ export function App({
       toast={
         <BottomStatusRow
           toasts={state.toasts}
-          activity={
-            activityVisible && !runRowShown ? (
-              <ActivityLine {...runActivity} theme={theme} caps={caps} />
-            ) : null
-          }
-          // THE FORM THE LIFE SIGNAL TAKES WHEN A TOAST HAS THE ROW
-          // (`activity-spinner-vanishes-behind-toast`). Passed UNCONDITIONALLY:
-          // `BottomStatusRow` reads it only when `activity` above is non-null,
-          // so `activityVisible` stays the one mount condition and this cannot
-          // become a second copy of it that drifts. `null` here means the
-          // spinner would be static anyway (ASCII tier, or reduced motion), and
-          // those builds must come out unchanged.
-          activityGlyph={liveSpinner(reducedMotion, caps)}
-          // PRESENCE IS DECIDED HERE, NOT BY `UpdateLine` RETURNING `null`
-          // (C-15 / cli-auto-update P0-1 / D-19). `BottomStatusRow` tests this
-          // prop for truthiness, and a React element is truthy however it
-          // renders - so a component that rendered nothing would give the row
-          // ZERO rows and silently unbalance the frame budget. Same rule the
-          // activity line above follows with `running && !overlayNode`.
-          //
-          // `!overlayNode` for the same reason it appears there: the full-screen
-          // branch replaces the whole viewport with the overlay, and an update
-          // notice under a settings screen is noise attached to a surface it is
-          // not visible on.
-          //
-          // `!running` (cli-auto-update D-2): the update notice stays silent for
-          // the whole run. It used to be guaranteed by the activity line
-          // out-ranking it inside this row; with the activity line moved above
-          // the input, the row can be free during a run, so the silence is stated
-          // here instead of inherited.
+          hints={{ interactionPhase: state.runPhase === 'starting' ? 'starting'
+            : running ? 'running' : 'idle', cols, completion,
+            selectionPending: selectionController?.hasPendingSelection() ?? false,
+            copyInFlight: copyState.busy, copyCleanupPending: copyState.cleanupPending,
+            overlay, services: liveServices, hintsEnabled: cfg.hints, modeToggleKey,
+            interruptHint: interruptGesture.current.phase === 'stopping'
+              ? 'Esc force-stop' : interruptGesture.current.phase === 'armed'
+                ? 'Esc confirm' : 'Esc x2 interrupt',
+            updateAvailable: !!updateSnapshot && !overlayNode && !running
+              && shouldRenderUpdateLine(updateSnapshot),
+          }}
           update={
             updateSnapshot && !overlayNode && !running && shouldRenderUpdateLine(updateSnapshot) ? (
               <UpdateLine
@@ -2510,6 +2469,13 @@ export function App({
       }
       status={
         <StatusBar
+          pendingSteering={state.pendingSteering}
+          runPhase={state.runPhase}
+          activeTool={state.activeTool}
+          runOutcome={state.runOutcome}
+          reducedMotion={reducedMotion}
+          waitingForConfirmation={!!humanRequest || !!confirmState}
+          stopping={interruptGesture.current.phase === 'stopping'}
           interruptHint={interruptGesture.current.phase === 'stopping'
             ? 'Esc force-stop' : 'Esc x2 interrupt'}
           model={cfg.model}

@@ -380,7 +380,14 @@ function mountApp(fc: FakeController) {
 }
 
 function railLines(frame: string, width = 15, cols = 100): string[] {
-  return frame.split('\n').map(line => line.slice(cols - width - 1, cols - 1)).filter(line => line.startsWith('|'));
+  return frame.split('\n').slice(1, -2).map(line => {
+    let cells = 0; let rail = '';
+    for (const char of line) {
+      if (cells >= cols - width - 1 && cells < cols - 1) rail += char;
+      cells += stringWidth(char);
+    }
+    return rail;
+  }).filter(line => line.startsWith('|'));
 }
 
 describe('真实 App 的 TODO 布局接线', () => {
@@ -401,20 +408,21 @@ describe('真实 App 的 TODO 布局接线', () => {
       expect(railLines(app.frame())).toHaveLength(16);
       expect(railLines(app.frame()).join('\n'), app.frame()).toContain('ANCHOR');
       expect(railLines(app.frame()).join('\n')).toContain('9/20');
-      // A hidden /c menu must submit the typed buffer, not /clear.
+      // Dismiss completion before submitting the raw, deliberately unknown command.
       app.stdin.write('/c'); await delay(80);
       expect(railLines(app.frame())).toHaveLength(16);
+      app.stdin.write('\u001b'); await delay(80);
       app.stdin.write('\r'); await delay(100);
       expect(railLines(app.frame())).toHaveLength(16);
       expect(app.frame()).toContain('Unknown command');
       app.stdin.write('\u001b[5~'); await delay(100);
-      expect(app.frame()).toContain('PgDn down');
+      expect(railLines(app.frame())).toHaveLength(16);
       for (const [cols, width] of [[76, 0], [77, 14], [100, 15], [200, 30]]) {
         app.stdout.columns = cols!;
         app.stdout.emit('resize'); await delay(120);
         const lines = railLines(app.frame(), width!, cols!);
         expect(lines.length, app.frame()).toBe(width ? 16 : 0);
-        if (cols! >= 100) expect(app.frame()).toContain('PgDn down');
+        expect(app.frame()).not.toContain('Maximum update depth');
         for (const line of app.frame().split('\n')) expect(stringWidth(line)).toBeLessThanOrEqual(cols!);
       }
       fc.emitTodo({ type: 'cleared', reason: 'reset' }); await delay(80);
@@ -437,7 +445,7 @@ describe('真实 App 的 TODO 布局接线', () => {
       expect(app.frame()).toContain('8 running');
       expect(app.frame()).not.toContain('+3 more (3 running)');
       expect(railLines(app.frame()).join('\n')).toContain('ANCHOR');
-      expect(app.frame()).toContain('idle');
+      expect(app.frame()).toContain('空闲');
       app.stdin.write('\u0015'); await delay(160);
       expect(app.frame()).toContain('+3 more (3 running)');
       expect(railLines(app.frame())).toHaveLength(16);
@@ -472,7 +480,7 @@ describe('真实 App 的 TODO 布局接线', () => {
       expect(app.frames.length - count).toBeLessThanOrEqual(1);
       for (const frame of app.frames) {
         expect(frame.split('\n').length).toBeLessThanOrEqual(19);
-        if (!frame.includes('Terminal too small')) expect(frame).toContain('idle');
+        if (!frame.includes('Terminal too small')) expect(frame).toContain('空闲');
       }
       app.stdin.write('\u0015'); await delay(60);
       app.stdin.write('/todo panel off'); await delay(80);

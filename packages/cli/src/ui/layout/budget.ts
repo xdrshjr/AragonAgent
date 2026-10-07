@@ -38,7 +38,7 @@ export function chromeBudget(rows: number, draftRows = 1): ChromeBudget {
   return {
     header: 1,
     toast: 1,
-    composer: 2 + clampDraftRows(rows, draftRows) + (rows >= HINT_MIN_ROWS ? 1 : 0),
+    composer: 2 + clampDraftRows(rows, draftRows),
     status: 1,
   };
 }

@@ -10,12 +10,37 @@
 import { describe, expect, it } from 'vitest';
 import stringWidth from 'string-width';
 import { displayWidth, layoutComposer, splitRowAtColumn } from '../ui/composer-rows.js';
+import { moveVisualCursor } from '../ui/editor-navigation.js';
 
 const rowText = (row: { segments: { text: string }[] }): string =>
   row.segments.map((s) => s.text).join('');
 
 const layout = (buffer: string, patch: Partial<Parameters<typeof layoutComposer>[0]> = {}) =>
   layoutComposer({ buffer, cursor: buffer.length, cols: 40, maxRows: 6, active: true, ...patch });
+
+describe('shared grapheme rows for paint and navigation', () => {
+  const emoji = '\ud83d\udc69\u200d\ud83d\udcbb';
+  const buffer = `a${emoji}\tb\n12\u4e2d45`;
+
+  it('wraps mixed emoji, tab and CJK without splitting graphemes or changing the buffer', () => {
+    const out = layout(buffer, { cols: 4, cursor: 7 });
+    expect(out.rows.map(rowText)).toEqual([`a${emoji} `, 'b', '12\u4e2d', '45']);
+    expect(out.rows.every((row) => displayWidth(rowText(row)) <= 4)).toBe(true);
+    expect(out.cursorRow).toBe(1);
+    expect(out.cursorCol).toBe(0);
+    expect(splitRowAtColumn(out.rows[0]!, 1).at?.text).toBe(emoji);
+    expect(buffer).toContain('\t');
+  });
+
+  it('paints the same target cell selected by visual navigation across a tab', () => {
+    const moved = moveVisualCursor({ buffer, cursor: 12, cols: 6, direction: 'up' })!;
+    expect(moved).toEqual({ cursor: 7, preferredVisualColumn: 4 });
+    const out = layout(buffer, { cols: 6, cursor: moved.cursor });
+    expect(out.cursorCol).toBe(4);
+    expect(splitRowAtColumn(out.rows[out.cursorRow]!, out.cursorCol).at?.text).toBe('b');
+    expect(moveVisualCursor({ buffer, cols: 6, direction: 'down', ...moved })?.cursor).toBe(12);
+  });
+});
 
 describe('layoutComposer — hard wrap by display column (D-15)', () => {
   it('T-11: wraps 40 CJK characters at cols:40 into 2 rows, not 1', () => {

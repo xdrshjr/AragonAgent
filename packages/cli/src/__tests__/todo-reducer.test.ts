@@ -41,12 +41,13 @@ const todoEntries = (state: ViewState): Entry[] => state.entries.filter((e) => e
 
 describe('SELF_RENDERING_TOOLS suppression (D-10)', () => {
   it('AC-29: a todo_write call produces NO generic tool entry', () => {
-    expect(
-      reduceEvent({
+    const actions = reduceEvent({
         type: 'message_update',
         streamEvent: { type: 'tool_call_start', toolCallId: 't1', toolName: 'todo_write' },
-      } as never),
-    ).toEqual([]);
+      } as never);
+    const state = fold(actions);
+    expect(state.entries).toEqual([]);
+    expect(state.runPhase).toBe('preparing-tool');
   });
 
   it('every OTHER tool is untouched', () => {

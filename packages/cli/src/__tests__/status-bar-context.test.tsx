@@ -91,10 +91,10 @@ function bar(cols: number, over: Partial<ContextUsageSnapshot> = {}): string {
 }
 
 describe('T15 - the width ladder', () => {
-  it('cols 60: percentage and cost only', () => {
+  it('cols 60: complete context pair survives', () => {
     const frame = bar(60);
     expect(frame).toContain('43%');
-    expect(frame).not.toContain('86.0k/200.0k');
+    expect(frame).toContain('86.0k/200.0k');
     expect(frame).not.toContain('total');
   });
 
@@ -113,7 +113,7 @@ describe('T15 - the width ladder', () => {
     expect(frame).toContain('86.0k/200.0k');
     // AN ASCII WORD, NOT A SIGMA: `ui/**` is inside the glyph scanner's scope,
     // so a new symbol would need a `glyphs.ts` entry with an ASCII fallback.
-    expect(frame).toContain('total 1.2M');
+    expect(frame).toContain('会话 输入 1.2M');
   });
 });
 

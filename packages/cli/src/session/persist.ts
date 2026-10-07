@@ -12,6 +12,7 @@ import type { Message, ModelRef } from '@aragon-agent/core';
 import type { Entry } from '../agent/reducer.js';
 import type { TodoItem } from '../todo/types.js';
 import { getSessionsDir } from '../config/store.js';
+import { validateSession } from './validate-session.js';
 
 /**
  * Bookkeeping `aragon exec` attaches to the sessions it owns
@@ -42,14 +43,13 @@ export interface SessionMeta {
 export interface SavedSession {
   version: number;
   savedAt: number;
-  model: ModelRef;
+  model?: ModelRef;
   messages: Message[];
   entries: Entry[];
   /**
    * The live todo list at save time (todo-plan-execution §3.13).
    *
-   * `SESSION_VERSION` STAYS 1: the field is additive and optional, `loadSession`
-   * validates only that `messages` and `entries` are arrays, and an older file
+   * `SESSION_VERSION` STAYS 1: the field is additive and optional, and an older file
    * simply yields `undefined` — which `restoreTodos` treats as "clear", the
    * right answer for a session that predates the feature (D-20 / D-22).
    */
@@ -59,8 +59,8 @@ export interface SavedSession {
    *
    * `SESSION_VERSION` STAYS 1 for the reason `todos?` records above, and this is
    * the precedent that file's own comments already set: the field is additive
-   * and optional, and `loadSession` validates only array-ness of `messages` /
-   * `entries`. A TUI `/save` file simply has no `meta`, which is exactly how
+   * and optional. Boundary validation preserves it without changing its shape.
+   * A TUI `/save` file simply has no `meta`, which is exactly how
    * `sessions list` tells the two apart.
    */
   meta?: SessionMeta;
@@ -182,8 +182,8 @@ export function saveSession(
  * Settle any team entry that was saved mid-dispatch (team-subagents §5.3 / P1-5),
  * and any todo card that was saved mid-run (todo-plan-execution §3.8 / C-5).
  *
- * `saveSession` writes `entries` verbatim and `loadSession` validates only
- * array-ness, so a session saved while a dispatch was in flight resumes with a
+ * Structural validation cannot settle live state: a session saved while a
+ * dispatch was in flight can contain a valid
  * `kind: 'team'` entry claiming `active: true` while nothing is running. TWO
  * things then go wrong at once: the card spins forever, and `Transcript`'s
  * settled boundary is MONOTONIC — an entry that never settles never reaches
@@ -268,15 +268,31 @@ export function normalizeLoadedEntries(entries: Entry[]): Entry[] {
     ) {
       return { ...entry, status: 'stopped', rows: [] };
     }
+    // THE SEVENTH CLAUSE (tui-shift-enter-copy-queue 5.2.5). Core's steering
+    // queue is memory-only, so a `queued` entry on disk is a promise this
+    // process can no longer keep: the message was never accepted into any
+    // conversation. Downgrade to a WARN NOTICE carrying the full text
+    // rather than to a `user` entry -- pretending it was sent is the lie
+    // that loses the user's words with a straight face.
+    //
+    // THE ID IS KEPT: `restoreEntries` splices these positions into the
+    // live transcript, and a fresh id here would collide with the next
+    // `e<n>` the reducer allocates.
+    if (entry.kind === 'queued') {
+      const downgraded: Entry = {
+        id: entry.id,
+        kind: 'notice',
+        level: 'warn',
+        text: `Queued but never sent: ${entry.text}`,
+      };
+      return downgraded;
+    }
     return entry;
   });
 }
 
 export function loadSession(filePath: string): SavedSession {
   const raw = readFileSync(filePath, 'utf-8');
-  const parsed = JSON.parse(raw) as SavedSession;
-  if (!parsed || !Array.isArray(parsed.messages) || !Array.isArray(parsed.entries)) {
-    throw new Error('Invalid session file (missing messages/entries).');
-  }
+  const parsed = validateSession(JSON.parse(raw));
   return { ...parsed, entries: normalizeLoadedEntries(parsed.entries) };
 }

@@ -70,9 +70,9 @@ describe('chromeBudget', () => {
     }
   });
 
-  it('adds the composer hint row only from HINT_MIN_ROWS up', () => {
+  it('keeps operation hints outside the composer at every height', () => {
     expect(chromeBudget(HINT_MIN_ROWS - 1).composer).toBe(3);
-    expect(chromeBudget(HINT_MIN_ROWS).composer).toBe(4);
+    expect(chromeBudget(HINT_MIN_ROWS).composer).toBe(3);
   });
 
   it('spends the extra hint row out of the row the terminal just gained', () => {
@@ -185,8 +185,8 @@ describe('draftMaxRows (section 5.5)', () => {
     // than importing it, because `budget.ts` calls `draftMaxRows` and the import
     // would close an ESM cycle. This assertion is what stops the two drifting.
     expect(DRAFT_MAX_ROWS_HINT_TIER).toBe(HINT_MIN_ROWS);
-    expect(draftMaxRows(HINT_MIN_ROWS - 1)).toBe(3);
-    expect(draftMaxRows(HINT_MIN_ROWS)).toBe(6);
-    expect(draftMaxRows(30)).toBe(10);
+    expect(draftMaxRows(HINT_MIN_ROWS - 1)).toBe(4);
+    expect(draftMaxRows(HINT_MIN_ROWS)).toBe(5);
+    expect(draftMaxRows(30)).toBe(6);
   });
 });

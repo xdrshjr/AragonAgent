@@ -50,6 +50,11 @@ export function formatContextReport(ctx: CommandContext): string {
   // one line and answers the same question.
   lines.push('                 includes subagent, fast-tier and compaction spend,');
   lines.push('                 not just this conversation');
+  lines.push('  Scope          lead occupancy is used / limit in tokens; session input includes caches.');
+  lines.push('  Estimate       USD session cost, including restored usage; missing prices count as 0.');
+  lines.push('                 Zero estimated cost does not guarantee free usage or match the bill.');
+  lines.push('  Run average    booked output-token delta / elapsed time, not instantaneous generation.');
+  lines.push('                 May include team, fast-tier and compaction output booked during this run.');
 
   return lines.join('\n');
 }

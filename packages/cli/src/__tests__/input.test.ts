@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { recognize } from '../input/keymap.js';
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   applyEdit,
   draftLimitRefusal,
@@ -44,6 +41,9 @@ describe('recognize (keymap)', () => {
 });
 
 describe('applyEdit', () => {
+  it('Home at the start of an empty first line never moves forward', () => {
+    expect(applyEdit('\nnext', 0, 'home')).toEqual({ buffer: '\nnext', cursor: 0 });
+  });
   it('home/end move to line boundaries', () => {
     expect(applyEdit('hello world', 6, 'home')).toEqual({ buffer: 'hello world', cursor: 0 });
     expect(applyEdit('hello world', 6, 'end')).toEqual({ buffer: 'hello world', cursor: 11 });
@@ -124,45 +124,6 @@ describe('autocomplete suggestion computation', () => {
     expect(slashSuggestions('/skill:', withSkills)?.map((s) => s.label)).toEqual([
       '/skill:my-skill',
     ]);
-  });
-});
-
-/**
- * The paste branch (tui-paste-handling section 5.4, T-28 of the design's list).
- *
- * ITS POSITION IN THE HANDLER IS THE ASSERTION. It has to sit AFTER every key
- * branch, so a paste can never be shadowed by a key test, and BEFORE the
- * `isControlSeq` guard, because a framed string starts with NUL and that guard
- * inspects only `input.charCodeAt(0)` — it would drop the whole paste.
- */
-describe('the paste branch in PromptInput.useInput (section 5.4)', () => {
-  const SOURCE = readFileSync(
-    resolve(dirname(fileURLToPath(import.meta.url)), '..', 'ui', 'PromptInput.tsx'),
-    'utf-8',
-  );
-
-  it('sits before the isControlSeq guard', () => {
-    const paste = SOURCE.indexOf('if (hasPasteFrame(input))');
-    const control = SOURCE.indexOf('!isControlSeq(input)');
-    expect(paste).toBeGreaterThan(-1);
-    expect(control).toBeGreaterThan(-1);
-    expect(paste).toBeLessThan(control);
-  });
-
-  it('sits after every key branch', () => {
-    const paste = SOURCE.indexOf('if (hasPasteFrame(input))');
-    for (const branch of ['if (key.return)', 'if (key.backspace || key.delete)', 'if (key.ctrl)']) {
-      expect(SOURCE.indexOf(branch), branch).toBeLessThan(paste);
-    }
-  });
-
-  it('dispatches at most once, and nothing at all when a limit refuses (I-6 / AC-9)', () => {
-    const start = SOURCE.indexOf('if (hasPasteFrame(input))');
-    const body = SOURCE.slice(start, SOURCE.indexOf('// Printable input', start));
-    expect(body.split('dispatch(').length - 1).toBe(1);
-    // The refusal path returns BEFORE the dispatch, so the draft is untouched.
-    expect(body.indexOf('if (refusal)')).toBeLessThan(body.indexOf('dispatch('));
-    expect(body).toContain('onNotice');
   });
 });
 

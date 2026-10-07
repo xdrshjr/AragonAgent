@@ -1,9 +1,11 @@
 /**
  * Built-in slash commands (spec §5.2):
  * /help /model /settings /thinking /max-tokens /tools /clear /reset /cwd /save
- * /resume /copy /exit (/quit), plus the /team, /fast and /todo subsystems.
+ * /resume /copy /terminal-setup /exit (/quit), plus the /team, /fast and
+ * /todo subsystems.
  */
 
+import { modelSettingsResultMessage } from '../agent/model-profile-settings.js';
 import { existsSync, statSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import process from 'node:process';
@@ -25,15 +27,14 @@ import {
 } from '../config/schema.js';
 import type { AgentController } from '../agent/controller.js';
 import { computeCost, formatCost, formatDuration, formatTokens } from '../agent/usage.js';
-import type { Entry } from '../agent/reducer.js';
+import { mergePendingEntries } from '../agent/queued-messages.js';
 import { TODO_FOLLOW_LIMITS } from '../todo/limits.js';
 import { buildContinuationMessage } from '../todo/follow-through.js';
 import type { FollowThroughMode } from '../todo/types.js';
 import { MODE_LABEL, nextMode } from '../agent/agent-mode.js';
-import { loadConfig } from '../config/load.js';
 import { loadSession, resolveSessionPath, saveSession } from '../session/persist.js';
 import { getLogger } from '../logging/logger.js';
-import { copyText } from '../ui/clipboard.js';
+import { registerQueueCommand } from './queue-command.js';
 import { perfCommand } from './perf.js';
 import { runCompactCommand } from '../compaction/command.js';
 import { runContextCommand } from '../compaction/context-command.js';
@@ -430,9 +431,16 @@ const COMMANDS: SlashCommand[] = [
         return;
       }
 
-      const persist = (patch: Partial<FastConfig>): void => {
-        controller.setFastConfig(patch);
-        ctx.persistConfig({ fast: patch as PersistedConfig['fast'] });
+      const persist = (patch: Partial<FastConfig>): boolean => {
+        const connection = ['provider', 'model', 'baseUrl'].some((key) => key in patch);
+        if (!connection) {
+          controller.setFastConfig(patch);
+          ctx.persistConfig({ fast: patch as PersistedConfig['fast'] });
+          return true;
+        }
+        const result = controller.saveModelSettingsPatch({ fast: patch });
+        if (!result.ok) ctx.notify('warn', modelSettingsResultMessage(result));
+        return result.ok;
       };
 
       if (!verb || verb === 'status') {
@@ -442,7 +450,7 @@ const COMMANDS: SlashCommand[] = [
 
       if (verb === 'on' || verb === 'off') {
         const enabled = verb === 'on';
-        persist({ enabled });
+        if (!persist({ enabled })) return;
         if (!controller.isFastRegistered()) {
           // The honest branch, and the whole point of splitting by what was
           // decided at construction (§3.3). It is one sentence, and it keeps
@@ -483,11 +491,11 @@ const COMMANDS: SlashCommand[] = [
             );
             return;
           }
-          persist({ provider, model });
+          if (!persist({ provider, model })) return;
           ctx.toast('success', `Fast model set to ${provider}:${model}.`);
           return;
         }
-        persist({ model: raw });
+        if (!persist({ model: raw })) return;
         ctx.toast('success', `Fast model set to ${raw}.`);
         return;
       }
@@ -502,7 +510,7 @@ const COMMANDS: SlashCommand[] = [
           ctx.notify('warn', `Unknown provider "${raw}". Choose: ${ADAPTER_PROVIDERS.join(', ')}.`);
           return;
         }
-        persist({ provider: raw });
+        if (!persist({ provider: raw })) return;
         ctx.toast('success', `Fast provider set to ${raw}.`);
         return;
       }
@@ -512,11 +520,11 @@ const COMMANDS: SlashCommand[] = [
         // (R-13): the user is allowed to run both tiers on one model, and the
         // review still costs what it costs.
         const cfg = controller.getConfig();
-        persist({
+        if (!persist({
           provider: cfg.provider,
           model: cfg.model,
           baseUrl: cfg.baseUrl ?? '',
-        });
+        })) return;
         ctx.toast('success', `Fast tier set to ${cfg.provider}:${cfg.model} (same as main).`);
         return;
       }
@@ -524,7 +532,7 @@ const COMMANDS: SlashCommand[] = [
       if (verb === 'review') {
         const raw = (value ?? '').trim().toLowerCase();
         if (raw === 'off') {
-          persist({ review: false });
+          if (!persist({ review: false })) return;
           ctx.toast('success', 'Fast review off.');
           return;
         }
@@ -588,7 +596,7 @@ const COMMANDS: SlashCommand[] = [
           ctx.notify('warn', 'Usage: /fast delegate <on|off>');
           return;
         }
-        persist({ delegate: raw === 'on' });
+        if (!persist({ delegate: raw === 'on' })) return;
         ctx.toast('success', `Fast delegation ${raw}.`);
         return;
       }
@@ -1014,10 +1022,16 @@ const COMMANDS: SlashCommand[] = [
     name: 'reset',
     description: 'Start a new conversation',
     run: (ctx) => {
+      if (ctx.controller.isRunning()) {
+        ctx.notify('warn', 'Cannot reset while the agent is running. Wait for it to stop.');
+        return;
+      }
       ctx.controller.clearMessages();
       ctx.controller.clearAllQueues();
       ctx.dispatch({ type: 'resetConversation' });
       ctx.toast('info', 'Started a new conversation.');
+      if (ctx.state.pendingSteering.length) ctx.notify('warn',
+        `\u5df2\u53d6\u6d88 ${ctx.state.pendingSteering.length} \u6761\u672a\u63a5\u6536\u6d88\u606f`);
     },
   },
   {
@@ -1052,7 +1066,7 @@ const COMMANDS: SlashCommand[] = [
             ...(cfg.baseUrl ? { baseUrl: cfg.baseUrl } : {}),
           },
           messages: ctx.controller.getMessages(),
-          entries: ctx.state.entries,
+          entries: mergePendingEntries(ctx.state.entries, ctx.state.pendingSteering),
           // `/resume` restores `messages`, so the belief that justifies the
           // panel comes back — and the panel has to come back with it (§3.13).
           todos: ctx.controller.getTodoSnapshot()?.items ?? [],
@@ -1067,22 +1081,30 @@ const COMMANDS: SlashCommand[] = [
     name: 'resume',
     description: 'Load a saved session',
     run: (ctx) => {
+      if (ctx.controller.isRunning() || ctx.controller.isModelSettingsBusy?.()) {
+        ctx.notify('warn', 'Cannot resume while running work, team, review, or compaction is busy.');
+        return;
+      }
       try {
         const path = resolveSessionPath(ctx.args, ctx.controller.getCwd());
         const session = loadSession(path);
+        if (ctx.controller.isRunning() || ctx.controller.isModelSettingsBusy?.()) {
+          ctx.notify('warn', 'Cannot resume while running work, team, review, or compaction is busy.');
+          return;
+        }
+        // Loading has validated and normalized every external value. Commit
+        // synchronously so no new run can start between clearing and restoring.
+        ctx.controller.clearAllQueues();
         ctx.controller.replaceMessages(session.messages);
-        // IN THE SAME `try`, IMMEDIATELY AFTER `replaceMessages`, so a malformed
-        // file fails the whole resume rather than half of it — and AN ABSENT
-        // `todos` CLEARS RATHER THAN SKIPPING (P0-2 / D-22). `replaceMessages`
-        // has just discarded the conversation the current list belonged to, so
-        // leaving the rail up produces a panel that disagrees with the model,
-        // which §1.2 ranks below having no panel at all.
+        // Absence clears the previous conversation's list, including old files.
         ctx.controller.restoreTodos(session.todos ?? []);
-        ctx.dispatch({ type: 'restoreEntries', entries: session.entries as Entry[] });
+        ctx.dispatch({ type: 'restoreEntries', entries: session.entries });
         if (session.model?.providerId && session.model?.modelId) {
           ctx.controller.setModel(session.model.providerId, session.model.modelId, session.model.baseUrl);
         }
         ctx.notify('info', `Resumed session from ${path}`);
+        if (ctx.state.pendingSteering.length) ctx.notify('warn',
+          `\u5df2\u53d6\u6d88 ${ctx.state.pendingSteering.length} \u6761\u672a\u63a5\u6536\u6d88\u606f`);
       } catch (err) {
         ctx.notify('error', `Resume failed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -1091,7 +1113,7 @@ const COMMANDS: SlashCommand[] = [
   {
     name: 'copy',
     description: 'Copy the last answer to the clipboard',
-    run: (ctx) => {
+    run: async (ctx) => {
       const last = [...ctx.state.entries].reverse().find((e) => e.kind === 'assistant');
       if (!last || last.kind !== 'assistant' || last.text.trim().length === 0) {
         ctx.notify('warn', 'No assistant message to copy.');
@@ -1103,18 +1125,8 @@ const COMMANDS: SlashCommand[] = [
       // which the local `pbcopy` never could.
       //
       // `ctx.writeForeign` and not `stdout.write` — see the field's comment.
-      const via = copyText(last.text, ctx.writeForeign);
-      if (via === 'none') {
-        ctx.toast('warn', 'Clipboard not available.');
-        return;
-      }
-      // NAMES THE MECHANISM RATHER THAN CLAIMING SUCCESS: neither path is
-      // detectable, and tmux without `set -g set-clipboard on` swallows OSC 52
-      // silently (R-7).
-      ctx.toast(
-        'success',
-        via === 'osc52' ? 'Sent to the terminal clipboard.' : 'Sent to the system clipboard.',
-      );
+      if (!ctx.requestCopy) { ctx.notify('warn', 'Clipboard coordinator unavailable.'); return; }
+      await ctx.requestCopy({ text: last.text, lines: last.text.split('\n').length });
     },
   },
   {
@@ -1150,11 +1162,71 @@ const COMMANDS: SlashCommand[] = [
       const captured = port.captured();
       const lines = [
         `Mouse capture: ${captured ? 'on' : 'off'}`,
-        `  drag-select  ${port.selectEnabled() ? 'on' : 'off (mouseSelect is false)'}`,
+        // The wording follows tui-shift-enter-copy-queue 4.4: releasing no
+        // longer copies, so this row must name the commit key -- leaving the
+        // bare `on` would keep teaching the gesture that was removed.
+        `  drag-select  ${
+          port.selectEnabled() ? 'on (drag to select, ctrl+c to copy)' : 'off (mouseSelect is false)'
+        }`,
         '  /mouse off   hand the mouse to your terminal for this session',
         '  /mouse on    take it back',
         '  --no-mouse   never capture it (also ARAGON_MOUSE=0)',
         '  aragon config set mouseSelect false   keep the wheel, drop drag-select',
+      ];
+      ctx.notify('info', lines.join('\n'));
+    },
+  },
+  {
+    name: 'terminal-setup',
+    description: 'How to make Shift+Enter send a newline in your terminal',
+    run: (ctx) => {
+      // READ-ONLY BY DESIGN (3.6): pushing kitty keyboard mode or
+      // modifyOtherKeys=2 would re-encode EVERY modified key as CSI-u and
+      // blind Ink's parser for the whole session. One user-side binding
+      // reaches the same result for the one key that needs it.
+      //
+      // Ctrl+J and Alt+Enter work with no setup at all; CSI-u terminals
+      // (kitty / WezTerm / foot with keyboard enhancement on) need none
+      // either. The lines below are for the terminals that send a plain
+      // CR for Shift+Enter and CAN be configured.
+      const lines = [
+        'Shift+Enter newline - terminal setup',
+        '',
+        'Ctrl+J inserts a newline when delivered; Alt+Enter may be intercepted.',
+        'To get a dedicated Shift+Enter key, make the terminal send',
+        'the CSI-u sequence \\u001b[13;2u for it:',
+        '',
+        '  Windows Terminal settings.json, merge root-level arrays:',
+        '    "copyOnSelect": false,',
+        '    "actions": [{ "id": "User.AragonNewline", "command":',
+        '      { "action": "sendInput", "input": "\\u001b[13;2u" } }],',
+        '    "keybindings": [{ "keys": "shift+enter", "id": "User.AragonNewline" }]',
+        '    PowerShell runs inside the terminal; configure this binding in',
+        '    Windows Terminal, not in the PowerShell profile. If both keys',
+        '    send CR, the application cannot distinguish Shift+Enter from Enter.',
+        '  VS Code terminal  keybindings.json:',
+        '    { "key": "shift+enter",',
+        '      "command": "workbench.action.terminal.sendSequence",',
+        '      "when": "terminalFocus",',
+        '      "args": { "text": "\\u001b[13;2u" } }',
+        '    User settings: "terminal.integrated.copyOnSelection": false',
+        '  iTerm2            Settings > Profiles > Keys > Key Mappings:',
+        '    Shift+Enter -> Send Escape Sequence: [13;2u',
+        '  kitty/WezTerm/foot  native once keyboard enhancement is on',
+        '    (kitty: map shift+enter send_text all \\u001b[13;2u)',
+        '  Alacritty         alacritty.toml, [keyboard] bindings:',
+        '    { key = "Enter", mods = "Shift", chars = "\\u001b[13;2u" }',
+        '  macOS Terminal.app / conhost  cannot rebind Enter; use Ctrl+J',
+        '    or Alt+Enter',
+        '',
+        'This command only prints advice; it changes no terminal modes.',
+        'Host selections (Shift+drag or /mouse off) belong to the terminal.',
+        'App selections wait for Ctrl+C; only a native tool exit confirms copying.',
+        'SSH uses OSC 52: the terminal may deny it; sent does not mean confirmed.',
+        'Without the stdin filter, Delete falls back to Backspace.',
+        'Without paste support, multiline paste cannot be guaranteed safe.',
+        'IME confirmation has no composition signal in PTY bytes. If it emits CR,',
+        'edit externally and use bracketed paste; this host combination needs validation.',
       ];
       ctx.notify('info', lines.join('\n'));
     },
@@ -1185,12 +1257,12 @@ const COMMANDS: SlashCommand[] = [
         ctx.notify('warn', 'Cannot reload the config while a run is in progress.');
         return;
       }
-      const config = loadConfig({ cwd: ctx.controller.getCwd() });
-      ctx.controller.setModel(config.provider, config.model, config.baseUrl);
-      ctx.controller.setThinkingLevel(config.thinkingLevel);
-      ctx.controller.setMaxTokens(config.maxTokens);
-      ctx.controller.setTheme(config.theme);
-      getLogger().reconfigure(config.log);
+      const result = ctx.controller.reloadModelSettings();
+      if (!result.ok) {
+        ctx.notify('warn', modelSettingsResultMessage(result));
+        return;
+      }
+      const config = ctx.controller.getConfig();
       getLogger().info('config', 'reload', { provider: config.provider, model: config.model });
       ctx.toast('success', `Reloaded config: ${config.provider}:${config.model}.`);
     },
@@ -1317,6 +1389,7 @@ const DEFAULT_BG_LOG_ROWS = 40;
 
 export function registerBuiltinCommands(registry: CommandRegistry): void {
   for (const command of COMMANDS) registry.register(command);
+  registerQueueCommand(registry);
 }
 
 /**
@@ -1327,10 +1400,10 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
  * `registry.get(name)` instead, because that is the only check that stays
  * correct when commands are registered dynamically (§7.1 / P1-2).
  */
-export const BUILTIN_COMMAND_NAMES: string[] = COMMANDS.flatMap((c) => [
+export const BUILTIN_COMMAND_NAMES: string[] = ['queue', ...COMMANDS.flatMap((c) => [
   c.name,
   ...(c.aliases ?? []),
-]).sort();
+])].sort();
 
 // The `copyToClipboard` helper that used to live here moved into
 // `ui/clipboard.ts` (tui-selection-and-scroll-follow §4.4.5), unchanged, so that

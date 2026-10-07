@@ -19,6 +19,30 @@ function state(patch: Partial<EditorState> = {}): EditorState {
   return { ...INITIAL_EDITOR_STATE, ...patch };
 }
 
+describe('editorReducer 接纳事务状态', () => {
+  it('完整接纳新草稿与光标，释放旧引用且不改变源状态', () => {
+    const oldText = 'old payload '.repeat(50);
+    const newText = 'new payload '.repeat(50);
+    const original = editorReducer(INITIAL_EDITOR_STATE, {
+      type: 'input', segments: [{ kind: 'paste', text: oldText, id: 1 }],
+    });
+    const planned = editorReducer(INITIAL_EDITOR_STATE, {
+      type: 'input', segments: [{ kind: 'paste', text: newText, id: 2 }],
+    });
+    const withCaret = editorReducer(planned, { type: 'moveCursor', cursor: 0 });
+    const adopted = editorReducer(original, { type: 'adopt', state: withCaret });
+    expect(adopted.cursor).toBe(0);
+    expect(adopted.pastes.get(2)?.text).toBe(newText);
+    expect(adopted.pastes.has(1)).toBe(false);
+    expect(original.cursor).toBe(original.buffer.length);
+    expect(original.pastes.get(1)?.text).toBe(oldText);
+    expect(original.pastes.has(2)).toBe(false);
+    const erased = editorReducer(adopted, { type: 'replace', buffer: '', cursor: 0 });
+    expect(erased.pastes.size).toBe(0);
+    expect(withCaret.pastes.get(2)?.text).toBe(newText);
+  });
+});
+
 describe('editorReducer — insert', () => {
   it('inserts at the cursor and advances it by the inserted length', () => {
     const next = editorReducer(state({ buffer: 'ac', cursor: 1 }), { type: 'insert', text: 'b' });
@@ -81,7 +105,7 @@ describe('editorReducer — moveCursor', () => {
   });
 
   it('returns the same object for a no-op move', () => {
-    const before = state({ cursor: 2 });
+    const before = state({ buffer: 'ab', cursor: 2 });
     expect(editorReducer(before, { type: 'moveCursor', cursor: 2 })).toBe(before);
   });
 });

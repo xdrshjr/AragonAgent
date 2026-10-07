@@ -1,97 +1,171 @@
-/**
- * Clipboard (tui-selection-and-scroll-follow §4.4.5) — the SINGLE clipboard path
- * for the package. `/copy` and the selection release both come through here.
- *
- * Two mechanisms, both attempted, and the return value names the better one so
- * the toast can say what was SENT rather than claiming a success neither one can
- * confirm:
- *
- *  1. **OSC 52.** It reaches the clipboard of the machine the USER is sitting
- *     at, which is the only correct target over SSH, and it is the only mechanism
- *     that works with no helper binary installed. `/copy` gained SSH support the
- *     moment it moved onto this module.
- *  2. **The platform binary** (`clip` / `pbcopy` / `xclip`), moved here unchanged
- *     from `commands/builtins.ts`, for the local case and for terminals that
- *     ignore OSC 52 (tmux without `set -g set-clipboard on`, R-7).
- *
- * IT TAKES A WRITE *DOOR*, NOT A STREAM, and that is P1-6 rather than taste. In
- * full-screen mode stdout is a `Proxy` in front of the frame differ; an
- * unrecognised chunk there takes `passThrough(true)`, which increments
- * `fallbacks` and — on the first one — raises `onFirstFallback`, wired to
- * `console.warn(FRAME_FALLBACK_NOTICE)`. Sending OSC 52 through the proxy would
- * therefore print a diagnostic at a user who did nothing wrong the first time
- * they copied anything, and would permanently corrupt a counter documented to
- * mean "something wrote to stdout behind Ink's back". The caller supplies
- * `writeForeign` instead, and this module cannot pick the wrong door.
- */
-
-import { spawn } from 'node:child_process';
+/** The only clipboard writer. Interaction callers share clipboard-task's coordinator. */
+import { spawn, type ChildProcess } from 'node:child_process';
 import process from 'node:process';
 
-export type CopyVia = 'osc52' | 'native' | 'none';
+export type CopyFailureReason =
+  | 'empty' | 'unavailable' | 'write' | 'timeout' | 'too-large' | 'cancelled';
 
-/**
- * Ceiling on an OSC 52 payload, in bytes of the ORIGINAL text.
- *
- * xterm's default limit is around 100 000 BASE64 characters and tmux / screen
- * are stricter, so 56 000 source bytes (~74 700 base64) stays inside all three
- * with room to spare. Past it the sequence is skipped rather than truncated: a
- * terminal that drops an over-long OSC 52 leaves the clipboard holding whatever
- * was there before, and half a selection is worse than none.
- */
-export const MAX_OSC52_BYTES = 56_000;
+export type CopyResult =
+  | { status: 'confirmed'; via: 'native' }
+  | { status: 'sent'; via: 'osc52'; fallbackReason?: CopyFailureReason }
+  | { status: 'failed'; reason: CopyFailureReason };
 
-/** `\x1b]52;c;<base64>\x07` — `c` is the CLIPBOARD selection, not PRIMARY. */
-export function osc52(text: string): string {
-  return `\x1b]52;c;${Buffer.from(text, 'utf-8').toString('base64')}\x07`;
+export interface ClipboardOptions {
+  /** Frame differ's foreign-write door, never the intercepted stdout stream. */
+  write?: (chunk: string) => void;
+  remote?: boolean;
+  timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
-/** Best-effort clipboard copy via the platform's clipboard CLI. */
-function copyNative(text: string): boolean {
-  const cmd =
-    process.platform === 'win32'
-      ? { file: 'clip', args: [] as string[] }
-      : process.platform === 'darwin'
-      ? { file: 'pbcopy', args: [] }
-      : { file: 'xclip', args: ['-selection', 'clipboard'] };
+export interface ClipboardTask {
+  result: Promise<CopyResult>;
+  /** Resolves only after no writer can change the clipboard again. */
+  released: Promise<void>;
+}
+
+export const MAX_OSC52_BYTES = 56_000;
+const CLEANUP_GRACE_MS = 500;
+// clip.exe preserves a supplied BOM and guesses BOM-less UTF-16 incorrectly for
+// short CJK text. Decode stdin explicitly; never interpolate clipboard content.
+const WINDOWS_CLIPBOARD_COMMAND = "$ErrorActionPreference='Stop'; "
+  + '$reader=[IO.StreamReader]::new([Console]::OpenStandardInput(),'
+  + '[Text.UTF8Encoding]::new($false),$false); Set-Clipboard -Value $reader.ReadToEnd()';
+
+/** Encode the full clipboard selection as UTF-8, without truncating its payload. */
+export function osc52(text: string): string {
+  return `\x1b]52;c;${Buffer.from(text, 'utf8').toString('base64')}\x07`;
+}
+
+function sendOsc52(
+  text: string,
+  options: ClipboardOptions,
+  fallbackReason?: CopyFailureReason,
+): CopyResult {
+  if (options.signal?.aborted) return { status: 'failed', reason: 'cancelled' };
+  if (Buffer.byteLength(text, 'utf8') > MAX_OSC52_BYTES) {
+    return { status: 'failed', reason: 'too-large' };
+  }
+  if (!options.write) return { status: 'failed', reason: fallbackReason ?? 'unavailable' };
   try {
-    const child = spawn(cmd.file, cmd.args, { stdio: ['pipe', 'ignore', 'ignore'] });
-    child.on('error', () => {
-      /* swallow — clipboard is best-effort, and a missing xclip is ordinary */
-    });
-    child.stdin?.end(text);
-    return true;
+    options.write(osc52(text));
+    return { status: 'sent', via: 'osc52', ...(fallbackReason ? { fallbackReason } : {}) };
   } catch {
-    return false;
+    return { status: 'failed', reason: 'write' };
   }
 }
 
-/**
- * Put `text` on the clipboard and report the best mechanism that was reached.
- *
- * `write` is the foreign-write door (see the module header). Omit it and OSC 52
- * is skipped entirely, which is the correct behaviour for a caller that has no
- * terminal to write to.
- *
- * NEITHER MECHANISM IS DETECTABLE. `spawn` returning without throwing does not
- * mean `xclip` exists, and an OSC 52 sequence a terminal ignores is
- * indistinguishable from one it honours. The return value therefore names what
- * was ATTEMPTED, and every caller's user-facing text is worded accordingly.
- */
-export function copyText(text: string, write?: (chunk: string) => void): CopyVia {
-  if (text.length === 0) return 'none';
+function settledTask(result: CopyResult): ClipboardTask {
+  return { result: Promise.resolve(result), released: Promise.resolve() };
+}
 
-  let sentOsc52 = false;
-  if (write && Buffer.byteLength(text, 'utf-8') <= MAX_OSC52_BYTES) {
+function spawnNative(): ChildProcess {
+  const windows = process.platform === 'win32';
+  const file = windows ? 'powershell.exe' : process.platform === 'darwin' ? 'pbcopy' : 'xclip';
+  const args = windows
+    ? ['-NoProfile', '-NonInteractive', '-STA', '-Command', WINDOWS_CLIPBOARD_COMMAND]
+    : file === 'xclip' ? ['-selection', 'clipboard'] : [];
+  return spawn(file, args, {
+    stdio: ['pipe', 'ignore', 'ignore'], shell: false, windowsHide: true,
+  });
+}
+
+/** Owns a writer through close, even when its user-facing result timed out earlier. */
+class NativeClipboardTask implements ClipboardTask {
+  readonly result: Promise<CopyResult>;
+  readonly released: Promise<void>;
+  private resolveResult!: (result: CopyResult) => void;
+  private resolveReleased!: () => void;
+  private settled = false;
+  private closed = false;
+  private stopping = false;
+  private failure: CopyFailureReason | undefined;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+
+  constructor(
+    private readonly child: ChildProcess,
+    private readonly text: string,
+    private readonly options: ClipboardOptions,
+  ) {
+    this.result = new Promise((resolve) => { this.resolveResult = resolve; });
+    this.released = new Promise((resolve) => { this.resolveReleased = resolve; });
+    child.on('error', this.onError);
+    child.once('close', this.onClose);
+    child.stdin?.on('error', this.onStdinError);
+    options.signal?.addEventListener('abort', this.onAbort, { once: true });
+    this.timer = setTimeout(() => this.stop('timeout'), options.timeoutMs ?? 1500);
+    if (options.signal?.aborted) { this.onAbort(); return; }
+    if (!child.stdin) { this.stop('write'); return; }
     try {
-      write(osc52(text));
-      sentOsc52 = true;
+      child.stdin.end(Buffer.from(text, 'utf8'));
     } catch {
-      // A closed or broken stdout must never turn a copy into a crash.
+      this.stop('write');
     }
   }
 
-  const sentNative = copyNative(text);
-  if (sentOsc52) return 'osc52';
-  return sentNative ? 'native' : 'none';
+  private settle(result: CopyResult): void {
+    if (this.settled) return;
+    this.settled = true;
+    clearTimeout(this.timer);
+    clearTimeout(this.cleanupTimer);
+    this.resolveResult(result);
+  }
+
+  private stop(reason: CopyFailureReason): void {
+    if (this.closed || this.stopping) return;
+    this.stopping = true;
+    this.failure = reason;
+    clearTimeout(this.timer);
+    // No fallback before close: even a successful kill request is not proof of exit.
+    if (!this.settled) {
+      this.cleanupTimer = setTimeout(() => {
+        this.settle({ status: 'failed', reason });
+      }, CLEANUP_GRACE_MS);
+    }
+    try { this.child.stdin?.destroy(); } catch { /* Keep error listeners until close. */ }
+    try { this.child.kill(); } catch { /* A failed kill must not release the writer lock. */ }
+  }
+
+  private readonly onAbort = (): void => {
+    this.settle({ status: 'failed', reason: 'cancelled' });
+    this.stop('cancelled');
+  };
+
+  private readonly onError = (): void => { this.stop('unavailable'); };
+  private readonly onStdinError = (): void => { this.stop('write'); };
+
+  private readonly onClose = (code: number | null): void => {
+    this.closed = true;
+    clearTimeout(this.timer);
+    clearTimeout(this.cleanupTimer);
+    this.options.signal?.removeEventListener('abort', this.onAbort);
+    if (!this.settled) {
+      const result: CopyResult = code === 0 && !this.failure
+        ? { status: 'confirmed', via: 'native' }
+        : sendOsc52(this.text, this.options, this.failure ?? 'write');
+      this.settle(result);
+    }
+    this.child.removeListener('error', this.onError);
+    this.child.stdin?.removeListener('error', this.onStdinError);
+    this.resolveReleased();
+  };
+}
+
+/** Start a copy without rejecting; result and writer release are separate signals. */
+export function startClipboardTask(text: string, options: ClipboardOptions = {}): ClipboardTask {
+  if (options.signal?.aborted) return settledTask({ status: 'failed', reason: 'cancelled' });
+  if (text.length === 0) return settledTask({ status: 'failed', reason: 'empty' });
+  const remote = options.remote ?? Boolean(process.env.SSH_CONNECTION || process.env.SSH_TTY);
+  if (remote) return settledTask(sendOsc52(text, options));
+  let child: ChildProcess;
+  try { child = spawnNative(); } catch {
+    return settledTask(sendOsc52(text, options, 'unavailable'));
+  }
+  return new NativeClipboardTask(child, text, options);
+}
+
+/** Promise convenience wrapper; interactive callers must use the shared coordinator. */
+export function copyText(text: string, options: ClipboardOptions = {}): Promise<CopyResult> {
+  return startClipboardTask(text, options).result;
 }

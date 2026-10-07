@@ -157,13 +157,18 @@ describe('I-12: no useInput consumer appends a raw `input` to a string', () => {
     // design listed it: section 5.4.1's table calls it "key-driven only; inert",
     // which stopped being true when its revision-feedback field was added. That
     // is the whole argument for writing this as a scan.
+    // The call is now the COMPOSITION with `stripEnterFrames`
+    // (tui-shift-enter-copy-queue 3.5): the same broadcast carries the newline
+    // frame a Shift+Enter produces, and this order is the one that leaves no
+    // NUL in the stored value. `enter-frames.test.ts` pins that second half
+    // with its own scan.
     for (const rel of [
       'ui/overlays/SettingsScreen.tsx',
       'ui/overlays/QuestionOverlay.tsx',
       'ui/overlays/PlanReviewOverlay.tsx',
     ]) {
       const source = readFileSync(join(SRC, rel), 'utf8');
-      expect(source, rel).toContain('stripPasteFrames(input)');
+      expect(source, rel).toContain('stripPasteFrames(stripEnterFrames(input))');
     }
   });
 

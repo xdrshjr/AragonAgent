@@ -1,25 +1,14 @@
-/**
- * The run status row's width plan (tui-scrollbar-edge-and-run-row §3.3.3).
- *
- * While a run is in flight, ONE row above the input box carries the spinner, the
- * phrase and the `steer / interrupt / exit` hint clauses, and `planRunRow` decides
- * what survives when the line is too narrow. It is a pure function with no React
- * and no I/O so the whole ladder can be tested as arithmetic.
- *
- * THE ALLOCATION IS PER CLAUSE, NOT PER STRING, and that is the whole point.
- * The idle hint row this one replaces owned the full line width and ended in
- * `wrap="truncate"`; handing the label half the line and truncating the joined
- * hint would cut `interrupt` to `inter...` at 38 columns - a regression of the
- * "running hint is NEVER abbreviated" rule `Composer.hintText` documents. So:
- *
- *  - clauses are dropped WHOLE, from the tail (`exit`, then `stop N`), and
- *  - `steer` and `interrupt` (REQUIRED_CLAUSES) are never dropped or cut mid-word
- *    while the row is enabled, and
- *  - the only thing allowed to end in an ellipsis is the label.
+/** Compatibility planner for former composer run rows. The current UI uses
+ * status-layout.ts and interaction-hints.ts; keep this pure API for existing callers.
  */
 
-/** Everything the label needs, kept in one shape so there is one place that names it. */
+import type { StatusLayoutInput } from './layout/status-layout.js';
+
+/** Shared activity facts; omitted phase fields retain the legacy phrase behavior. */
 export interface RunActivity {
+  phase?: StatusLayoutInput['phase'];
+  outcome?: StatusLayoutInput['runOutcome'];
+  activeTool?: StatusLayoutInput['activeTool'];
   /** Epoch ms the current run began - the phrase sequence's seed. */
   startedAt: number;
   /** `Date.now() - startedAt`, already computed by App's 200 ms ticker. */

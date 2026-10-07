@@ -432,14 +432,14 @@ completes, `Up` / `Down` moves the selection, `Esc` closes it.
 
 | Key | Action |
 | --- | --- |
-| `Enter` | Submit (idle) / queue a steering message (running) |
-| `Alt+Enter` / `Shift+Enter` | Insert a newline |
+| `Enter` | 空闲时发送，运行时加入队列；收到 Core 已纳入会话的接收凭据后才移除 Queue 提示 |
+| `Ctrl+J` / `Alt+Enter` / `Shift+Enter` | 插入换行。Ctrl+J 已通过输入链路测试；另外两种组合键需要宿主发送独立序列，Alt+Enter 可能被宿主拦截。参见 [终端设置](#terminal-setup-for-shiftenter) |
 | `Shift+Tab` | Toggle **plan mode** (`BUILD` <-> `PLAN`). Equivalent: `/plan`. On Windows this needs a console flag Node < 22.17 does not set; aragon sets it at startup — see [Requirements](#requirements) |
 | `Ctrl+P` | The same toggle, over a channel no Windows console can swallow. Use it if `Shift+Tab` does nothing |
 | `Esc` | Close an overlay or popup; otherwise ask for interruption confirmation. While idle, cancel pending auto-continuation |
 | `Esc` ×2 | Interrupt the run when pressed within 1.5 seconds. Other keys or closing a menu cancel the first press |
 | `Esc` again after interruption | **Force-stop** a run that is still stopping, kill foreground shell commands and return to `idle`; background services remain running |
-| `Ctrl+C` | Stop the background **services** the agent started, when there are any. It does not arm exit |
+| `Ctrl+C` | **Copy the selection** when a drag-selection is waiting (release no longer copies by itself). Otherwise: stop the background **services** the agent started, when there are any. It does not arm exit |
 | `Ctrl+C` ×2 | Exit (first press warns), once no services are running |
 | `Ctrl+L` | Redraw the frame |
 | `Ctrl+T` | Show / hide thinking (**off by default**) for the entire session |
@@ -452,7 +452,7 @@ completes, `Up` / `Down` moves the selection, `Esc` closes it.
 | `Alt/Ctrl+←` / `→` | Word-wise cursor jump |
 | `Ctrl+W`, `Alt+Backspace` | Delete the previous word |
 | `Ctrl+U` / `Ctrl+K` | Kill to line start / end |
-| `Up` / `Down` | Move between draft lines; recall prompt history at the edges |
+| `Up` / `Down` | 按视觉行移动；空草稿或正在浏览历史时，才在边界召回历史，避免覆盖新草稿 |
 | Paste | Inserted as-is up to 6 lines / 400 chars; larger collapses to `[Pasted text #1 +15 lines]`, which deletes as one unit and expands in full when you send. `--no-paste` restores the pre-0.6.3 behaviour |
 | `?` | Open help (empty input) |
 
@@ -462,7 +462,7 @@ new output automatically; once you scroll away the status bar shows `↑N`, a sl
 scrollbar occupies the terminal's last column (including 40-column windows). Drag its thumb
 to move through history, or click the track to move one page. Messages, the team panel
 and the input area scroll together; typing or editing returns to the input without
-losing the draft. The fixed status row shows `PgDn down` while reading history.
+losing the draft. The fixed status row reports the distance from the end while reading history.
 `PgDn` moves one page down; editing or submitting returns directly to the end.
 
 **The mouse wheel is a viewport gesture and nothing else.** Wherever the pointer
@@ -474,10 +474,12 @@ open. It never touches your draft, and it never recalls prompt history: that is
 Two things follow from the app owning the mouse, and they are worth knowing
 before you meet them:
 
-- **Dragging text selects and copies it when mouse selection is enabled.**
-  Dragging the last-column scrollbar scrolls instead. `--no-mouse-select` disables
-  text selection while preserving scrollbar dragging. `Shift`+drag uses the
-  terminal's native selection on hosts that support that convention.
+- **Dragging selects; `Ctrl+C` copies.** Releasing the mouse keeps the
+  highlight (and freezes the rows under it) until you commit: `Ctrl+C` over a
+  pending selection copies it and never arms exit; any other key drops it.
+  Dragging the last-column scrollbar scrolls instead. `--no-mouse-select`
+  disables text selection while preserving scrollbar dragging. `Shift`+drag
+  uses the terminal's native selection on hosts that support that convention.
 - **`tmux` with `mouse on` keeps the wheel for itself**, so the app never sees
   it. `set -g mouse off` hands it back.
 - **A Windows console on Node below 22.17.0 cannot report the wheel at all**,
@@ -488,6 +490,56 @@ Turn the whole thing off with `--no-mouse`, `ARAGON_MOUSE=0`, or
 `aragon config set mouse false`. With mouse support off the wheel simply does
 nothing in full-screen mode — it does not fall back to editing your draft, which
 is what it used to do. Inline mode is unaffected either way.
+
+## Terminal setup for Shift+Enter
+
+输入支持 `Ctrl+J`、`Alt+Enter` 和可独立编码的 `Shift+Enter` 换行。如果终端把
+Shift+Enter 与 Enter 都发送为 CR，应用无法区分；请用 `/terminal-setup` 查看绑定，
+让 Shift+Enter 发送 `\u001b[13;2u`。合并到已有终端配置，不要覆盖其他快捷键；
+终端拦截某个组合键时可使用另外两种方式。参考绑定如下：
+
+- **Windows Terminal** — `settings.json` 的 `actions` 与 `keybindings` 分别定义动作和按键；完整示例见下文“输入、待处理队列与底部状态区”。
+- **VS Code integrated terminal** — `keybindings.json`:
+  `{ "key": "shift+enter", "command": "workbench.action.terminal.sendSequence", "when": "terminalFocus", "args": { "text": "\u001b[13;2u" } }`
+- **iTerm2** — Settings > Profiles > Keys > Key Mappings, `Shift+Enter` ->
+  *Send Escape Sequence* `[13;2u`
+- **kitty / WezTerm / foot** — native once keyboard-enhancement mode is on
+  (kitty: `map shift+enter send_text all \u001b[13;2u`)
+- **Alacritty** — `[keyboard]` bindings in `alacritty.toml`:
+  `{ key = "Enter", mods = "Shift", chars = "\u001b[13;2u" }`
+- **macOS Terminal.app / legacy conhost** — cannot rebind `Enter`; use
+  `Ctrl+J` or `Alt+Enter`
+
+aragon deliberately does not push kitty keyboard mode or `modifyOtherKeys=2`
+onto the terminal itself: mode 2 re-encodes *every* modified key as CSI-u and
+would blind this app's (and Ink's) key parsing for the whole session. One
+user-side binding reaches the same result for the one key that needs it.
+
+## Queued messages while the agent runs
+
+Agent 运行中发送的消息会进入队列。输入框附近的独立 Queue 面板按顺序显示摘要，
+限高后显示隐藏条数；固定状态栏始终显示真实待处理总数，没有自动消失的时间限制。
+使用 `/queue` 分页查看所有消息的完整原文，未接收消息不会在普通转录中重复显示：
+
+```
+◷ Queue: also check the tests
+```
+
+仅当 Core 将消息写入对话历史并发出对应消息 ID 的接收回执，Queue 状态才移除。
+这表示引擎已接管后续处理，不表示回答完成；`turn_start`、动画和提示超时都不能代替回执。
+相同正文的两次发送仍是两条消息。中断或失败后尚未接收的消息保留并标记暂停。
+窄屏优先保留运行状态、待处理数量和上下文；其他字段整项隐藏，不截断关键数值。
+快捷键集中在操作提示行，并随覆盖层、补全、选区和中断确认状态变化。
+
+`/clear` 清转录和 TODO，但保留待接收队列。保存和退出会补回被清屏或保留环裁剪的
+未发送全文。恢复存档时，queued 一律成为 `Queued but never sent: ...` 警告，
+不会自动重发；需要发送时请复制正文重新提交。运行尚未退出时 `/reset`、`/resume`
+会拒绝切换，损坏存档在替换当前会话之前报错。
+
+应用捕获鼠标时，拖选只保留高亮，按 Ctrl+C 才复制；本次按键不会停止服务或退出。
+选中文字改变、滚轮、其他按键或关闭选区会取消高亮。`--no-mouse` 或宿主原生选择的
+选中即复制由终端设置控制。OSC 52 发送成功仅证明请求已发出，不保证远程终端剪贴板
+已写入；SSH/tmux 是否允许该请求需在实际环境中验证。
 
 ## Themes
 
@@ -540,12 +592,12 @@ beside it (it takes the place of the idle hint row below the box, so starting a
 run never moves the layout):
 
 ```
-  ⠋ Percolating… · ⏎ steer · esc×2 interrupt · ctrl+c×2 exit            PLAN
+  ⠋ Percolating… · ⏎ queue · esc×2 interrupt · ctrl+c×2 exit            PLAN
 ```
 
 The row scrolls with the input box. On a narrow terminal whole clauses are dropped
 from the end (`exit` first) and only the phrase is shortened with an ellipsis, so
-`steer` and `interrupt` are never cut mid-word. When you scroll history until the
+`queue` and `interrupt` are never cut mid-word. When you scroll history until the
 input box is out of view, the animation moves to the fixed row at the bottom, so
 there is always exactly one spinner on screen. Terminals shorter than 20 rows, and
 `--no-hints`, keep the animation on that fixed row instead.
@@ -2290,3 +2342,72 @@ UTF-16 编辑和 ZWJ/组合字形仍有既有限制，本次修复保证视觉�
 检查流式输出不阻止闪烁；单 ESC 不停止任务，两击中断，卡住时第三击强停；菜单关闭不计入两击。
 任务结束后保留最终计划，下一条普通消息启动时旧计划消失，新有效计划出现才恢复；显式续跑保留计划。
 强停后立即提交，在等待中双 ESC 取消，旧引擎退出后不得自行执行已取消的消息。
+
+## 输入、待处理队列与底部状态区
+
+Enter 在空闲时发送，运行时加入队列；启动阶段拒绝重复提交并保留草稿。
+Ctrl+J 换行；终端能发送独立序列时，Shift+Enter 与 Alt+Enter 也可换行。
+光标按完整字素移动，支持中文、组合字符和 emoji；输入最多占终端高度四分之一且不超过六行。
+括号粘贴保留换行，不触发发送。过滤器或粘贴支持关闭时，不保证未标记多行粘贴安全。
+过滤器不可用时 Delete 保守按 Backspace 处理，避免退格误删后文。
+
+应用鼠标拖选只建立选区，Ctrl+C 才复制；复制中再次按 Ctrl+C 不会退出或停止服务。
+原生剪贴板工具完成后显示确认，OSC 52 只表示请求已发送，终端可能拒绝。
+Shift+拖动或 `/mouse off` 后的选区由宿主管理，应用无法关闭宿主的自动复制。
+
+Queue 面板逐条显示待处理消息，数量始终留在状态栏。只有 Core 已把消息纳入会话并发回接收凭据，
+该条提示才会消失。中断时未接收消息显示暂停；`/queue` 可分页查看全部原文，Esc 关闭。
+`/clear` 不丢待处理消息；`/reset`、切换会话会明确报告取消数量；恢复保存的未发送历史不会自动重发。
+
+底部依次为输入框、固定操作提示/短反馈行、全局状态栏。状态字段按显示宽度完整保留或整项隐藏。
+上下文表示当前主 Agent 的已用/上限 tokens；`~` 表示含估算，`?` 表示上限未知。
+费用是含子代理、快速模型及压缩的会话估算 USD，恢复会话沿用累计，缺价格按零计，零值不保证免费。
+本轮均速是本轮期间入账输出 token 增量除以耗时，可能包含上述辅助调用，并非瞬时生成速度。
+`/context` 提供统计范围和完整值。
+
+Windows Terminal：在设置 JSON **根级**添加 `"copyOnSelect": false`，把以下条目合并到已有数组：
+
+```json
+{
+  "actions": [{ "id": "User.AragonNewline", "command": {
+    "action": "sendInput", "input": "\u001b[13;2u"
+  } }],
+  "keybindings": [{ "keys": "shift+enter", "id": "User.AragonNewline" }]
+}
+```
+
+依据：[Windows Terminal 交互设置](https://learn.microsoft.com/en-us/windows/terminal/customize-settings/interaction)、
+[按键动作](https://learn.microsoft.com/en-us/windows/terminal/customize-settings/actions)。PowerShell 是 shell，不能在其 profile 中设置终端按键映射。
+
+VS Code 用户设置添加 `"terminal.integrated.copyOnSelection": false`，快捷键 JSON 添加：
+
+```json
+{
+  "key": "shift+enter", "command": "workbench.action.terminal.sendSequence",
+  "when": "terminalFocus", "args": { "text": "\u001b[13;2u" }
+}
+```
+
+依据：[终端基础](https://code.visualstudio.com/docs/terminal/basics)、
+[终端高级设置](https://code.visualstudio.com/docs/terminal/advanced)。应用的 `/terminal-setup` 只输出说明，不修改宿主配置。
+若宿主把 Shift+Enter 或 IME 候选确认同样编码为 CR，应用无法从相同字节推断用户意图。
+可使用经输入链路测试的 Ctrl+J、独立 CSI-u 绑定及外部编辑后括号粘贴；具体宿主组合仍需实测。
+双宿主、微软拼音及持续流式性能验收状态见 `docs/plans/tui-composer-queue-status/manual-test.md`。
+
+## 多套模型配置
+
+在 `/settings` 中使用 **Main profile** 和 **Fast profile**，可以分别为主任务与快速模型选择已保存的方案。两种角色共享配置库，但各自选择互不影响，也可以选择同一个方案。**Manage profiles** 提供新建、编辑、复制和删除；名称留空时采用模型名。同名方案通过地址主机和唯一 ID 区分。超过八条时按 `/` 搜索名称、模型或服务商。
+
+上下方向键或 Tab 移动，Enter 选择或编辑，根设置页 Ctrl+S 保存。普通文本字段的 Enter 仍保存设置。选择和子表单的修改先进入草稿；Esc 返回或确认丢弃。被主模型或快速模型引用的方案必须先解除绑定才能删除。复制包含本轮已经编辑的凭据，并产生新的 ID。
+
+方案保存服务商、模型、地址和凭据，不改变思考级别、token 上限、快速评审频率或预算。选择快速模型方案不会自动启用快速层。若本次启动时快速层未注册，首次启用会提示“已保存，待重启”；缺少模型或凭据时也需要先补齐。
+
+**Current custom** 保留旧式连接，可继续编辑原连接字段。创建方案时从磁盘上的旧式配置预填，不复制环境变量或 `--api-key` 的运行时密钥。专属密钥可保持、替换或切换为共享/环境凭据；修改服务商或地址后，必须明确选择保留原密钥，或重新输入。空地址在方案中表示服务商默认地址，快速方案不会继承主网关。
+
+启动优先级为 CLI 参数、环境变量、所选方案、旧式字段、默认值。界面显示启动覆盖；明确重新选择方案可对本次会话立即生效，重启仍遵循启动参数。专属密钥仅对对应角色和目标地址生效；主模型启动密钥不会跟随切换发往另一个网关。
+
+运行、团队任务、后台评审或压缩尚未结束时禁止保存。保存采用原子文件替换，同时检查磁盘与当前会话版本；失败保留草稿，发生冲突时选择 Reload settings。写入已成功但会话应用异常时会明确提示重启并禁用重复保存。跨进程版本检查属于乐观检查，不能消除同时写入的极小竞态。
+
+`/model`、`/fast model` 和 `config set` 修改连接会回到对应角色的自定义配置。若解除绑定会丢失专属账户或默认地址语义，命令会拒绝并引导到设置中编辑或复制。`/reload` 会一起刷新两个角色的连接和凭据，保留对话与用量。
+
+配置库仍位于 `ARAGON_HOME` 指向目录中的 `config.json`，不写入会话文件。密钥按现有机制明文保存：POSIX 创建权限为 0600，Windows 依赖用户目录 ACL，不提供加密。`config get/list` 对方案密钥使用固定掩码；损坏或未来版本的配置段整体隐藏。既有 `config edit` 备份也包含凭据。关闭通用日志脱敏、使用短密钥或分享第三方 SDK 错误日志时，仍需自行检查日志内容。

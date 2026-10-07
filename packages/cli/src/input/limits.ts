@@ -62,6 +62,18 @@ export const PASTE_OPEN = '\u0000[';
 export const PASTE_CLOSE = '\u0000]';
 
 /**
+ * The inline frame that carries ONE newline intent from the stdin filter to the
+ * composer (tui-shift-enter-copy-queue 3.2).
+ *
+ * SAME FAMILY AS `PASTE_OPEN`, with the same guarantee and for the same reason:
+ * NUL is the delimiter because no terminal delivers it for any key, and because
+ * `sanitisePaste` strips every NUL out of every payload -- so pasted text can
+ * never forge this frame either. A newline intent is single, atomic and carries
+ * no payload, so one constant replaces the OPEN/CLOSE pair.
+ */
+export const ENTER_NEWLINE_FRAME = '\u0000n';
+
+/**
  * The one channel from the stdin filter to `App`'s notice dispatch (P1-3 / I-15).
  *
  * The filter is constructed in `cli.tsx` BEFORE `render()`, so it has no

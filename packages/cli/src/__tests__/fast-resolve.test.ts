@@ -180,3 +180,43 @@ describe('describeFastTierProblem - the startup notice (§3.3)', () => {
     expect(describeFastTierProblem({ ok: false, reason: 'no_key' }, 'openai')).toContain('openai');
   });
 });
+
+describe('配置方案独立地址和角色凭据', () => {
+  function boundConfig(): CliConfig {
+    return config({ enabled: true, provider: 'anthropic', model: 'haiku' }, {
+      baseUrl: 'https://main.example/v1',
+      modelProfiles: { version: 1, mainId: null, fastId: 'fast-profile', entries: [{
+        id: 'fast-profile', name: '快速配置', provider: 'anthropic', model: 'haiku',
+        baseUrl: null, apiKey: 'fast-key',
+      }] },
+    });
+  }
+
+  it('有效 fast 绑定的空地址表示默认端点，不随主网关改变', () => {
+    const cfg = boundConfig();
+    for (const baseUrl of ['https://main.example/v1', 'https://other.example/v1']) {
+      cfg.baseUrl = baseUrl;
+      const tier = resolveFastTier(cfg, hasKey(['anthropic']));
+      expect(tier.ok).toBe(true);
+      expect(tier.ok && tier.ref.baseUrl).toBeUndefined();
+    }
+  });
+
+  it('失效配置段退回旧式 fast 地址继承规则', () => {
+    const cfg = boundConfig();
+    const invalid = { selectedId: null, appliedId: null, overriddenFields: [], invalid: true };
+    cfg.modelProfileState = { main: invalid, fast: invalid };
+    const tier = resolveFastTier(cfg, hasKey(['anthropic']));
+    expect(tier.ok && tier.ref.baseUrl).toBe('https://main.example/v1');
+  });
+
+  it('主角色有密钥不能代替 fast 角色的缺钥校验', () => {
+    const roles: Array<string | undefined> = [];
+    const tier = resolveFastTier(boundConfig(), (_provider, role) => {
+      roles.push(role);
+      return role === 'main';
+    });
+    expect(tier).toEqual({ ok: false, reason: 'no_key' });
+    expect(roles).toEqual(['fast']);
+  });
+});

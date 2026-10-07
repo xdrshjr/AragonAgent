@@ -144,6 +144,25 @@ describe('ActivityLabel / resolveActivityLabel (T15)', () => {
   const glyphs = pickGlyphs(RICH);
   const base = { startedAt: STARTED, elapsedMs: 0, reducedMotion: true };
 
+  it('显式运行阶段保持真实标签，不再随趣味短语轮换', () => {
+    for (const [phase, label] of [['starting', '启动中'], ['waiting', '等待模型'],
+      ['thinking', '正在思考'], ['generating', '正在生成内容']] as const) {
+      expect(resolveActivityLabel({ ...base, phase, reducedMotion: false }, glyphs)).toBe(label);
+      expect(resolveActivityLabel({ ...base, phase, elapsedMs: 120000, reducedMotion: false }, glyphs)).toBe(label);
+    }
+  });
+
+  it('显式结束结局没有活动spinner', () => {
+    for (const [outcome, label] of [['ended', '已结束'], ['interrupted', '已中断'], ['failed', '运行失败']] as const) {
+      const view = render(<ActivityLine {...base} reducedMotion={false} phase="idle" outcome={outcome}
+        theme={getTheme('cool', RICH)} caps={RICH} />);
+      const frame = stripAnsi(view.lastFrame() ?? '');
+      expect(frame).toContain(label);
+      expect(frame).not.toMatch(/[\u2800-\u28ff]/);
+      view.unmount();
+    }
+  });
+
   it('resolves the three rungs most specific first', () => {
     expect(resolveActivityLabel({ ...base, compacting: true, runningTool: 'bash' }, glyphs))
       .toBe(`Compacting context${glyphs.ellipsis}`);

@@ -1,8 +1,8 @@
 /**
  * The selection controller (tui-selection-and-scroll-follow §4.4). NON-REACT: it
- * owns the mouse lifecycle, the 16 ms drag coalescer, the `decorate` hook and the
- * copy-on-release, and it reaches the React tree only through the two callbacks
- * `App` registers on mount.
+ * owns the mouse lifecycle, the 16 ms drag coalescer, the `decorate` hook and
+ * the released-selection state Ctrl+C consumes, and it reaches the React tree
+ * only through the callbacks `App` registers on mount.
  *
  * WHY IT IS NOT A COMPONENT (D-6). A React re-render per motion report goes
  * through the render governor and the whole component tree; the frame pipeline
@@ -28,11 +28,12 @@
  *    than by a staleness check that can be wrong.
  */
 
+import stripAnsi from 'strip-ansi';
 import type { MouseSource } from '../../input/stdin-filter.js';
 import type { MouseEvent } from '../../input/mouse-events.js';
+import type { CopyResult } from '../clipboard.js';
 import type { Theme } from '../theme.js';
 import type { TermCapabilities } from '../capabilities.js';
-import type { CopyVia } from '../clipboard.js';
 import { createScreenMirror } from './screen-mirror.js';
 import { paintRow, selectionOpen } from './highlight.js';
 import {
@@ -40,6 +41,7 @@ import {
   normalize,
   rowSpan,
   selectedText,
+  sliceColumns,
   type Cell,
   type Selection,
 } from './selection.js';
@@ -70,9 +72,6 @@ export interface SelectionControllerOptions {
   repaint: () => boolean;
   /** `App`'s `redrawNonce`, for the invalidated case (§4.4.3). */
   requestRedraw: () => void;
-  copy: (text: string) => CopyVia;
-  /** Toast sink, registered by `App` on mount (§6.3). */
-  onCopied: (via: CopyVia, lines: number, chars: number) => void;
   theme: () => Theme;
   caps: TermCapabilities;
   /** Terminal width, for the right edge of a multi-row highlight. */
@@ -86,6 +85,22 @@ export interface SelectionControllerOptions {
 export interface SelectionController {
   /** Feed to `createFrameDiffer({ decorate })`. Mirrors, then paints. */
   decorate(lines: string[]): string[];
+  /**
+   * Whether a RELEASED, non-empty selection is waiting for Ctrl+C
+   * (tui-shift-enter-copy-queue 4.2). Dragging does not count: the gesture
+   * is not finished, and a copy key pressed mid-drag must fall through to
+   * whatever it meant before this feature.
+   */
+  hasPendingSelection(): boolean;
+  /**
+   * Take the pending selection: returns its text and line count, and clears
+   * the highlight, the settled state and the hold. `null` when nothing is
+   * pending. The caller owns the copy itself (`copyText` is the single
+   * clipboard path) and MUST take BEFORE copying: OSC 52 writes through
+   * `writeForeign`, the differ invalidates, and its `onInvalidate` clears
+   * this controller -- taking first makes that clear a no-op (4.3 / R7).
+   */
+  takeSelection(): { text: string; lines: number } | null;
   /** Subscribe to `hold` transitions; `App` mirrors this into React state. */
   onHoldChange(listener: (hold: boolean) => void): () => void;
   /** Called by `App` for key / resize / overlay / clear, and by `onInvalidate`. */
@@ -105,7 +120,7 @@ export interface SelectionController {
  */
 export interface SelectionBridge {
   controller: SelectionController | null;
-  onCopied: ((via: CopyVia, lines: number, chars: number) => void) | null;
+  onCopied: ((result: CopyResult, lines: number, chars: number) => void) | null;
   requestRedraw: (() => void) | null;
 }
 
@@ -125,15 +140,34 @@ export function createSelectionController(
   let enabled = true;
   let sel: Selection | null = null;
   let dragging = false;
+  /** A released, non-empty selection is waiting for Ctrl+C (4.2.1). */
+  let settled = false;
+  /** Mirror of the last `hold` emitted, so exits can be conditional. */
+  let holdActive = false;
   let pendingFocus: Cell | null = null;
   let flushTimer: NodeJS.Timeout | null = null;
   let holdWatchdog: NodeJS.Timeout | null = null;
   let disposed = false;
   /** Guards `decorate` against being re-entered from inside a repaint. */
   let painting = false;
+  let notifiedHold = false;
+  let holdNotificationPending = false;
+
+  const notifyHold = (): void => {
+    if (disposed || notifiedHold === holdActive) return;
+    notifiedHold = holdActive;
+    for (const listener of [...holdListeners]) listener(holdActive);
+  };
 
   const emitHold = (hold: boolean): void => {
-    for (const listener of [...holdListeners]) listener(hold);
+    holdActive = hold;
+    if (!painting) { notifyHold(); return; }
+    if (holdNotificationPending) return;
+    holdNotificationPending = true;
+    queueMicrotask(() => {
+      holdNotificationPending = false;
+      notifyHold();
+    });
   };
 
   const clearFlushTimer = (): void => {
@@ -159,13 +193,7 @@ export function createSelectionController(
     holdWatchdog = setTimeout(() => {
       holdWatchdog = null;
       if (!dragging) return;
-      // Let go of `hold` and the drag; KEEP whatever was selected. The user may
-      // still want to copy it, and throwing it away would turn a terminal quirk
-      // into lost work.
-      dragging = false;
-      pendingFocus = null;
-      clearFlushTimer();
-      emitHold(false);
+      clear();
     }, holdMaxMs);
     holdWatchdog.unref?.();
   };
@@ -184,19 +212,27 @@ export function createSelectionController(
     if (!painted && wanted) options.requestRedraw();
   };
 
-  const clear = (): void => {
+  const clearState = (): void => {
     // Nothing to undo: no timers, no repaint, no redraw. This is what keeps
     // `onInvalidate` — which fires on every resize and every foreign write —
     // free for a session that has never selected anything.
-    if (sel === null && !dragging && pendingFocus === null) return;
-    const wasDragging = dragging;
+    if (sel === null && !dragging && pendingFocus === null && !settled) return;
     sel = null;
     dragging = false;
+    settled = false;
     pendingFocus = null;
     clearFlushTimer();
     clearWatchdog();
-    if (wasDragging) emitHold(false);
-    paint(false);
+    // `holdActive`, not `wasDragging`: since tui-shift-enter-copy-queue a
+    // RELEASED selection also holds the viewport (4.2.3), so this is the
+    // exit for two states, not one.
+    if (holdActive) emitHold(false);
+  };
+
+  const clear = (): void => {
+    const hadSelection = sel !== null || holdActive;
+    clearState();
+    if (hadSelection) paint(false);
   };
 
   const cellOf = (event: { x: number; y: number }): Cell => {
@@ -217,26 +253,40 @@ export function createSelectionController(
   };
 
   const finishSelection = (): void => {
-    if (!sel) return;
+    if (!sel) {
+      emitHold(false);
+      return;
+    }
     const normal = normalize(sel);
     if (isEmpty(normal)) {
-      // A plain click. It must never leave a one-cell highlight behind, and it
-      // must never clobber the clipboard.
+      // A plain click. It must never leave a one-cell highlight behind, and
+      // it must never clobber the clipboard.
       sel = null;
+      settled = false;
+      emitHold(false);
       paint(false);
       return;
     }
-    const text = selectedText(mirror.plain, normal);
-    if (text.length === 0) {
+    if (selectedText(mirror.plain, normal).length === 0) {
+      // Geometry without content (blank cells): nothing honest to promise a
+      // later Ctrl+C, so this is the same no-op a click is.
       sel = null;
+      settled = false;
+      emitHold(false);
       paint(false);
       return;
     }
-    const via = options.copy(text);
-    options.onCopied(via, text.split('\n').length, text.length);
-    // The highlight STAYS after a release: it is the receipt for what was taken,
-    // and it goes away on the next thing that moves the rows (I-9).
+    // RELEASED AND NON-EMPTY: the highlight STAYS and so does the hold
+    // (4.2.1 / 4.2.3). The highlight is the promise of what Ctrl+C will
+    // copy -- not a receipt for a copy that already happened -- and the
+    // hold keeps the rows under it frozen until that promise resolves,
+    // which is what lets "what you see is what you get" survive a
+    // streaming run. The watchdog is NOT re-armed: the release already
+    // happened, and the frozen state has explicit exits (Ctrl+C, any other
+    // key, resize, overlay, /mouse off).
+    settled = true;
     paint(true);
+    options.requestRedraw();
   };
 
   const onMouse = (event: MouseEvent): void => {
@@ -247,7 +297,7 @@ export function createSelectionController(
       // a selection — N1 already declines auto-scroll-while-dragging. The notch
       // then scrolls normally, because the wheel router is a separate subscriber
       // on the same channel.
-      if (dragging) clear();
+      clear();
       return;
     }
 
@@ -260,6 +310,7 @@ export function createSelectionController(
         return;
       }
       const cell = cellOf(event);
+      settled = false;
       sel = { anchor: cell, focus: cell };
       pendingFocus = null;
       clearFlushTimer();
@@ -288,20 +339,37 @@ export function createSelectionController(
     clearFlushTimer();
     clearWatchdog();
     dragging = false;
-    emitHold(false);
+    // `finishSelection` decides the hold: a non-empty release KEEPS it
+    // (4.2.3) so the pending selection cannot be pushed off screen; every
+    // empty path releases it there.
     finishSelection();
   };
 
   const unsubscribe = options.source.subscribe(onMouse);
 
+  const selectedCellsChanged = (lines: readonly string[]): boolean => {
+    if (!settled || !sel) return false;
+    const normal = normalize(sel);
+    for (let row = normal.start.row; row <= normal.end.row; row += 1) {
+      const span = rowSpan(normal, row);
+      if (!span) continue;
+      const before = sliceColumns(stripAnsi(mirror.raw[row] ?? ''), span.from, span.to);
+      const after = sliceColumns(stripAnsi(lines[row] ?? ''), span.from, span.to);
+      if (before !== after) return true;
+    }
+    return false;
+  };
+
   return {
     decorate(lines: string[]): string[] {
-      mirror.set(lines);
-      if (painting || sel === null) return lines;
-      const normal = normalize(sel);
-      if (isEmpty(normal)) return lines;
+      if (painting || disposed) return lines;
       painting = true;
       try {
+        if (selectedCellsChanged(lines)) clearState();
+        mirror.set(lines);
+        if (sel === null) return lines;
+        const normal = normalize(sel);
+        if (isEmpty(normal)) return lines;
         const open = selectionOpen(options.theme(), options.caps);
         const cols = Math.max(1, options.cols());
         const out = lines.slice();
@@ -321,6 +389,29 @@ export function createSelectionController(
       holdListeners.add(listener);
       return () => holdListeners.delete(listener);
     },
+    hasPendingSelection(): boolean {
+      return settled && sel !== null;
+    },
+    takeSelection(): { text: string; lines: number } | null {
+      if (!settled || sel === null) return null;
+      const normal = normalize(sel);
+      const text = selectedText(mirror.plain, normal);
+      // CONSUMED BEFORE THE CALLER COPIES (4.3 / R7). The copy writes OSC
+      // 52 through `writeForeign`; the differ treats that as a foreign
+      // write and invalidates, and `onInvalidate` clears this controller on
+      // the next macrotask. Clearing first makes that callback a no-op;
+      // copying first would let it erase the held viewport state a tick
+      // after the copy -- the "copy flashes the screen" regression.
+      sel = null;
+      settled = false;
+      pendingFocus = null;
+      clearFlushTimer();
+      clearWatchdog();
+      if (holdActive) emitHold(false);
+      paint(false);
+      if (text.length === 0) return null;
+      return { text, lines: text.split('\n').length };
+    },
     clear,
     setEnabled(next: boolean): void {
       if (enabled === next) return;
@@ -329,6 +420,9 @@ export function createSelectionController(
     },
     dispose(): void {
       if (disposed) return;
+      // 4.2.3: a pending selection holds the viewport; teardown must let go
+      // of it explicitly, exactly like `clear()` does.
+      if (holdActive) emitHold(false);
       disposed = true;
       unsubscribe();
       clearFlushTimer();

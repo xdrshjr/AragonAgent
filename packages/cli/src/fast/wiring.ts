@@ -31,6 +31,7 @@
  * caused it (`agent-loop.ts:140-145`).
  */
 
+import type { ModelRole } from '../config/model-profiles.js';
 import {
   DEFAULT_RETRY_POLICY,
   initProviders,
@@ -59,8 +60,8 @@ export interface FastWiringDeps {
   /** Read LIVE on every call - the controller replaces the object on mutation. */
   getConfig: () => CliConfig;
   /** `AgentController.hasApiKey`, so there is exactly one key resolver. */
-  hasKey: (providerId: string) => boolean;
-  getApiKey: (providerId: string) => string | undefined;
+  hasKey: (providerId: string, role?: ModelRole) => boolean;
+  getApiKey: (providerId: string, role?: ModelRole) => string | undefined;
   /** Whether the static price table knows this model (C-11 / RV-4). */
   isPricedModel: (ref: Pick<ModelRef, 'providerId' | 'modelId'>) => boolean;
   /** The lead agent's event stream and steering surface. */
@@ -177,7 +178,7 @@ export class FastWiring {
       getTier: () => this.tier,
       getConfig: () => this.deps.getConfig().fast,
       available: () => this.available(),
-      getApiKey: deps.getApiKey,
+      getApiKey: (id) => deps.getApiKey(id, 'fast'),
       emit: (event) => this.emit(event),
       // The reviewer announces its own self-disable with a `tier_changed`, and
       // only the wiring can build the snapshot that carries it.
@@ -274,7 +275,8 @@ export class FastWiring {
    * resolved model id and a prompt naming a model the tier will not use is worse
    * than no prompt at all.
    */
-  onConfigChanged(): void {
+  onConfigChanged(refreshPrompt = true, enabled?: boolean): void {
+    if (enabled !== undefined) this.enabled = enabled;
     const next = resolveFastTier(this.deps.getConfig(), this.deps.hasKey);
     const before = this.tier;
     this.tier = next;
@@ -292,7 +294,7 @@ export class FastWiring {
       }
     }
 
-    this.deps.onPromptChanged();
+    if (refreshPrompt) this.deps.onPromptChanged();
     this.emit({ type: 'tier_changed', snapshot: this.snapshot() });
   }
 
@@ -316,10 +318,10 @@ export class FastWiring {
    * `tier: 'fast'` spec this factory would refuse, and this factory can never
    * build a child against a `ModelRef` the tier no longer resolves (RV-3).
    */
-  resolveTier(tier: FastTierName): { ref: ModelRef; thinkingLevel: ThinkingLevel } {
+  resolveTier(tier: FastTierName): { ref: ModelRef; thinkingLevel: ThinkingLevel; role?: ModelRole } {
     const config = this.deps.getConfig();
     if (tier === 'fast' && this.delegationAvailable() && this.tier.ok) {
-      return { ref: this.tier.ref, thinkingLevel: this.tier.thinkingLevel };
+      return { ref: this.tier.ref, thinkingLevel: this.tier.thinkingLevel, role: 'fast' };
     }
     return {
       ref: {
@@ -328,6 +330,7 @@ export class FastWiring {
         ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
       },
       thinkingLevel: config.thinkingLevel,
+      role: 'main',
     };
   }
 

@@ -93,19 +93,22 @@ function Invoke-ReleaseFixture(
   [string[]]$Arguments,
   [switch]$Unauthenticated,
   [switch]$ScopeMissing,
-  [switch]$OmitCliRuntime
+  [switch]$OmitCliRuntime,
+  [string]$FailTestWorkspace = ''
 ) {
   $previousLog = $env:ARAGON_FAKE_NPM_LOG
   $previousState = $env:ARAGON_FAKE_NPM_STATE
   $previousUnauthenticated = $env:ARAGON_FAKE_NPM_UNAUTHENTICATED
   $previousScopeMissing = $env:ARAGON_FAKE_NPM_SCOPE_MISSING
   $previousOmitCliRuntime = $env:ARAGON_FAKE_NPM_OMIT_CLI_RUNTIME
+  $previousFailTestWorkspace = $env:ARAGON_FAKE_NPM_FAIL_TEST_WORKSPACE
   try {
     $env:ARAGON_FAKE_NPM_LOG = $Fixture.Log
     $env:ARAGON_FAKE_NPM_STATE = $Fixture.State
     $env:ARAGON_FAKE_NPM_UNAUTHENTICATED = if ($Unauthenticated) { '1' } else { $null }
     $env:ARAGON_FAKE_NPM_SCOPE_MISSING = if ($ScopeMissing) { '1' } else { $null }
     $env:ARAGON_FAKE_NPM_OMIT_CLI_RUNTIME = if ($OmitCliRuntime) { '1' } else { $null }
+    $env:ARAGON_FAKE_NPM_FAIL_TEST_WORKSPACE = $FailTestWorkspace
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $output = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Fixture.Repo 'publish-latest.ps1') @Arguments 2>&1
@@ -119,6 +122,7 @@ function Invoke-ReleaseFixture(
     $env:ARAGON_FAKE_NPM_UNAUTHENTICATED = $previousUnauthenticated
     $env:ARAGON_FAKE_NPM_SCOPE_MISSING = $previousScopeMissing
     $env:ARAGON_FAKE_NPM_OMIT_CLI_RUNTIME = $previousOmitCliRuntime
+    $env:ARAGON_FAKE_NPM_FAIL_TEST_WORKSPACE = $previousFailTestWorkspace
   }
 }
 
@@ -300,9 +304,11 @@ try {
   Assert-Command $patchCommands 'pkg set dependencies.@aragon-agent/core=^0.1.1 -w packages/cli'
   Assert-Command $patchCommands 'install --package-lock-only --ignore-scripts'
   Assert-Command $patchCommands 'install --include=dev --ignore-scripts'
-  Assert-Command $patchCommands 'test'
+  Assert-Command $patchCommands 'test -w packages/cli'
+  Assert-Command $patchCommands 'test -w packages/core'
   Assert-Command $patchCommands 'run build'
-  Assert-True ([array]::IndexOf($patchCommands, 'run build') -lt [array]::IndexOf($patchCommands, 'test')) 'release must build before tests inspect dist'
+  Assert-True ([array]::IndexOf($patchCommands, 'run build') -lt [array]::IndexOf($patchCommands, 'test -w packages/cli')) 'release must build before tests inspect dist'
+  Assert-True ([array]::IndexOf($patchCommands, 'test -w packages/cli') -lt [array]::IndexOf($patchCommands, 'test -w packages/core')) 'release must check each workspace separately in order'
   Assert-Command $patchCommands 'run verify:dist -w packages/core'
   # The brand gate is the machine form of "no legacy brand ships"; asserting it in
   # both dry-run scenarios is what stops it from being quietly lifted back out of
@@ -311,6 +317,25 @@ try {
   Assert-Command $patchCommands 'pack -w packages/core --dry-run --json'
   Assert-Command $patchCommands 'pack -w packages/cli --dry-run --json'
   Assert-True (-not ($patchCommands | Where-Object { $_ -like 'publish *' })) 'DryRun called npm publish'
+
+  foreach ($workspace in @('packages/cli', 'packages/core')) {
+    Write-Host "[release-test] $workspace test failure stops release and restores versions"
+    $testFailureFixture = New-ReleaseFixture
+    $fixtures += $testFailureFixture
+    $versionHashes = @{}
+    foreach ($path in @('packages/core/package.json', 'packages/cli/package.json', 'package-lock.json')) {
+      $versionHashes[$path] = (Get-FileHash -LiteralPath (Join-Path $testFailureFixture.Repo $path)).Hash
+    }
+    $testFailureResult = Invoke-ReleaseFixture $testFailureFixture @('-NpmCommand', $fakeNpm) -FailTestWorkspace $workspace
+    Assert-True ($testFailureResult.ExitCode -ne 0) 'failed workspace tests did not block release'
+    $testFailureText = ($testFailureResult.Output | ForEach-Object { $_.ToString() }) -join "`n"
+    Assert-True ($testFailureText.Contains("npm command failed (1): npm test -w $workspace")) 'error did not identify the failing workspace'
+    $testFailureCommands = Get-LoggedCommands $testFailureFixture
+    Assert-Equal "test -w $workspace" $testFailureCommands[-1] 'release continued after a workspace test failure'
+    foreach ($path in $versionHashes.Keys) {
+      Assert-Equal $versionHashes[$path] (Get-FileHash -LiteralPath (Join-Path $testFailureFixture.Repo $path)).Hash "test failure did not restore $path exactly"
+    }
+  }
 
   Write-Host '[release-test] minor dry-run'
   $minorFixture = New-ReleaseFixture
@@ -528,7 +553,7 @@ try {
     Assert-Equal 1 ([regex]::Matches($failureChildOptions, '--require\s+"[^"]*insecure-tls-warning\.cjs"', 'IgnoreCase').Count) 'child did not inherit exactly one require preload'
   }
 
-  Write-Host '[release-test] PASS (14 scenarios)'
+  Write-Host '[release-test] PASS (16 scenarios)'
 } finally {
   foreach ($fixture in $fixtures) {
     if ($fixture -and (Test-Path -LiteralPath $fixture.Base)) {

@@ -27,6 +27,7 @@ import type {
   ContextManager,
 } from './context-manager.js';
 import { validateHistory } from './compaction.js';
+import { acceptSteering } from './accept-steering.js';
 import { estimatePromptTokens } from '../llm/output-limits.js';
 
 // ---------------------------------------------------------------------------
@@ -350,6 +351,21 @@ function getToolCalls(message: AssistantMessage): ToolCallBlock[] {
   );
 }
 
+/** Close the outstanding tool batch before steering creates the next user turn. */
+function acceptToolSteering(ctx: AgentLoopContext, remainingCalls: ToolCallBlock[]): boolean {
+  if (ctx.signal.aborted || !ctx.messageQueueManager.hasSteering()) return false;
+  for (const skipped of remainingCalls) {
+    ctx.messageManager.push({
+      role: 'tool_result',
+      toolCallId: skipped.toolCallId,
+      content: 'Tool execution skipped due to steering interrupt.',
+      isError: true,
+    });
+  }
+  acceptSteering(ctx);
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // runAgentLoop
 // ---------------------------------------------------------------------------
@@ -376,14 +392,7 @@ export async function runAgentLoop(ctx: AgentLoopContext): Promise<void> {
 
   while (!ctx.signal.aborted) {
     // ----- Steering checkpoint (before LLM call) -----
-    if (ctx.messageQueueManager.hasSteering()) {
-      const steeringMessages = ctx.messageQueueManager.drainSteering();
-      for (const text of steeringMessages) {
-        const userMsg: UserMessage = { role: 'user', content: text, timestamp: Date.now() };
-        ctx.messageManager.push(userMsg);
-      }
-      // Continue to LLM call with injected steering messages.
-    }
+    acceptSteering(ctx);
 
     turnIndex += 1;
 
@@ -495,6 +504,7 @@ export async function runAgentLoop(ctx: AgentLoopContext): Promise<void> {
     lastUsage = usage;
     overflowRecovered = false;
     ctx.messageManager.push(assistantMessage);
+    if (ctx.signal.aborted) break;
 
     // ----- Process tool calls -----
     const toolCalls = getToolCalls(assistantMessage);
@@ -504,12 +514,7 @@ export async function runAgentLoop(ctx: AgentLoopContext): Promise<void> {
     if (hasToolCalls) {
       // Steering checkpoint: if steering arrived during the LLM call,
       // skip tool execution and inject steering messages instead.
-      if (ctx.messageQueueManager.hasSteering()) {
-        const steeringMessages = ctx.messageQueueManager.drainSteering();
-        for (const text of steeringMessages) {
-          const userMsg: UserMessage = { role: 'user', content: text, timestamp: Date.now() };
-          ctx.messageManager.push(userMsg);
-        }
+      if (acceptToolSteering(ctx, toolCalls)) {
         // Loop continues — LLM will see the steering messages.
         continue;
       }
@@ -519,23 +524,7 @@ export async function runAgentLoop(ctx: AgentLoopContext): Promise<void> {
         if (ctx.signal.aborted) break;
 
         // Check steering between individual tool executions.
-        if (ctx.messageQueueManager.hasSteering()) {
-          // Inject remaining tool results as errors so LLM knows they were skipped.
-          const remainingCalls = toolCalls.slice(toolCalls.indexOf(toolCall));
-          for (const skipped of remainingCalls) {
-            ctx.messageManager.push({
-              role: 'tool_result',
-              toolCallId: skipped.toolCallId,
-              content: 'Tool execution skipped due to steering interrupt.',
-              isError: true,
-            });
-          }
-          // Inject steering messages.
-          const steeringMessages = ctx.messageQueueManager.drainSteering();
-          for (const text of steeringMessages) {
-            const userMsg: UserMessage = { role: 'user', content: text, timestamp: Date.now() };
-            ctx.messageManager.push(userMsg);
-          }
+        if (acceptToolSteering(ctx, toolCalls.slice(toolCalls.indexOf(toolCall)))) {
           steeringInterrupted = true;
           break;
         }
@@ -650,7 +639,8 @@ export async function runAgentLoop(ctx: AgentLoopContext): Promise<void> {
 
     // ----- Exit or follow-up checkpoint -----
     if (!hasToolCalls && !hasCodeBlocks) {
-      // No tools and no code blocks — check for follow-up messages.
+      // Give streaming and turn_end steering priority over follow-up and normal exit.
+      if (ctx.messageQueueManager.hasSteering()) continue;
       if (ctx.messageQueueManager.hasFollowUp()) {
         const followUpMessages = ctx.messageQueueManager.drainFollowUp();
         for (const text of followUpMessages) {

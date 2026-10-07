@@ -8,6 +8,7 @@ export interface TodoRailLayoutInput {
   itemCount: number;
   viewportBudget: number;
   teamRows: number;
+  queueRows?: number;
   popupRows: number;
   composerBaseRows?: number;
 }
@@ -29,7 +30,7 @@ export function buildTodoRailLayout(input: TodoRailLayoutInput): TodoRailLayout 
   const cols = nonNegativeInt(input.cols);
   const budget = nonNegativeInt(input.viewportBudget);
   const teamRows = Math.min(budget, nonNegativeInt(input.teamRows));
-  const popupMaxHeight = Math.max(0, budget - teamRows - TODO_LIMITS.panelMinRows
+  const popupMaxHeight = Math.max(0, budget - teamRows - nonNegativeInt(input.queueRows ?? 0) - 1
     - nonNegativeInt(input.composerBaseRows ?? 0));
   const popupRows = popupMaxHeight < 3 ? 0 : Math.min(nonNegativeInt(input.popupRows), popupMaxHeight);
   const rows = budget;
