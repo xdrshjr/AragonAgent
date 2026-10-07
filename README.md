@@ -1,165 +1,221 @@
 <p align="center">
-  <img src="./logo/logo-circle.png" alt="AragonAgent logo" width="128" height="128" />
+  <img src="./logo/logo-circle.png" alt="AragonAgent logo" width="140" />
 </p>
 
-# AragonAgent
-
-A zero-coupling TypeScript agent engine, extracted from AragonMesh's "JR Agent"
-core so it can be reused across projects and published to the public registry.
-
-AragonAgent provides the full agentic LLM execution loop:
-
-- **LLM provider adapters** — Anthropic, OpenAI, Google, with a pluggable
-  provider registry and streaming (`streamLLM` / `completeLLM`).
-- **Tool system** — typed tool definitions, a registry, a JSON-Schema validator
-  (uses `ajv` when available, falls back to a built-in validator), and an
-  executor with per-tool timeouts.
-- **Engine** — multi-turn agent loop, message management, a steering/follow-up
-  queue, and an idle watchdog.
-- **Skills** — reusable expert procedures on disk, surfaced to the model through
-  three levels of progressive disclosure so fifty of them cost a few thousand
-  characters of context. Parsing, validation, budgeting and rendering live in
-  core; all I/O lives in the CLI behind an injected `SkillHost` port. See the
-  [Skills section of the CLI README](packages/cli/README.md#skills).
-- **Optional sandbox** — an `isolated-vm` based JavaScript CodeAct sandbox
-  (lazy-loaded; `isolated-vm` is an optional dependency).
-
-The engine is **dependency-injected**: you supply the provider registry, an
-API-key resolver, the tool list, and the model reference. It holds no database,
-no persistence, and no framework coupling.
-
-## Layout
-
-This repository is an npm-workspaces mono-repo:
-
-```
-aragon-agent-core/
-  package.json            # workspaces root (private)
-  tsconfig.base.json      # shared compiler options (ES2022 / NodeNext / strict)
-  packages/
-    core/                 # @aragon-agent/core — the publishable engine
-    cli/                  # @aragon-agent/cli  — the interactive terminal UI (TUI)
-```
-
-At run time the CLI keeps everything it owns in one directory in the user's
-home — `~/.aragon-agent/` (`C:\Users\<you>\.aragon-agent\` on Windows), holding
-`config.json`, `logs/`, `sessions/` and installed `skills/`. `ARAGON_HOME`
-relocates it; `aragon config home` prints whichever is in effect. Nothing under
-this repository is written to at run time.
-
-## CLI
-
-[`@aragon-agent/cli`](./packages/cli) is a Claude-Code / Codex-style interactive
-terminal UI built on top of the engine. Run `aragon` in any directory for a
-full-screen, keyboard-driven chat with a built-in filesystem/shell toolset.
-The full-screen TUI is the only interactive layout; `-p`, `exec` and piped input
-remain available for headless use.
+<h1 align="center">AragonAgent</h1>
 
 <p align="center">
-  <img src="./logo/screenshot.png" width="900"
-       alt="aragon running in Windows PowerShell: the ARAGON banner over a full-screen TUI, with the active model and working directory in the header, a message composer at the bottom, and a status bar reporting idle state, thinking level, context usage, token counts, and session cost." />
+  <strong>An open-source coding agent that lives in your terminal —<br />and the embeddable engine it runs on.</strong>
 </p>
 
+<p align="center">
+  A Claude&nbsp;Code / Codex-style interactive TUI, a zero-coupling TypeScript agent engine,
+  and a stable machine-facing CLI contract — in one MIT-licensed monorepo.
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@aragon-agent/cli"><img src="https://img.shields.io/npm/v/@aragon-agent/cli?label=%40aragon-agent%2Fcli&logo=npm" alt="npm @aragon-agent/cli"></a>
+  <a href="https://www.npmjs.com/package/@aragon-agent/core"><img src="https://img.shields.io/npm/v/@aragon-agent/core?label=%40aragon-agent%2Fcore&logo=npm" alt="npm @aragon-agent/core"></a>
+  <a href="https://github.com/xdrshjr/AragonAgent/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/node-%E2%89%A518-brightgreen" alt="Node ≥ 18">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="Platforms">
+  <a href="https://github.com/xdrshjr/AragonAgent/stargazers"><img src="https://img.shields.io/github/stars/xdrshjr/AragonAgent?style=social" alt="Stars"></a>
+</p>
+
+<p align="center">
+  <img src="./logo/screenshot.png" width="880"
+       alt="aragon running in a terminal: the ARAGON banner over a full-screen TUI, with the active model and working directory in the header, a message composer at the bottom, and a status bar reporting idle state, thinking level, context usage, token counts, and session cost." />
+</p>
+
+---
+
+## Why another agent?
+
+Most coding agents are one of two things: a **closed product** you can only use the way
+the vendor intends, or a **framework** that stops at "here is an LLM loop, good luck."
+
+AragonAgent is deliberately both faces of the same machine:
+
+| You want to… | You use |
+| --- | --- |
+| Chat with an agent in your terminal and watch it work | **`aragon`** — the interactive TUI |
+| Embed an agent loop in your own app, with your own tools | **`@aragon-agent/core`** — the engine |
+| Drive an agent from a script, CI job, or another agent | **`aragon exec`** — the JSON contract |
+
+The same loop that streams into your terminal is a library you can import and a
+subprocess you can spawn. Nothing about the engine assumes a terminal exists.
+
+## Highlights
+
+- **Terminal-native TUI** — full-screen streaming chat, live tool-call cards, scrollback,
+  themes, queued follow-ups while the agent runs, and a status bar that tracks context
+  usage, tokens, and session cost.
+- **Bring your own model** — first-class adapters for **Anthropic, OpenAI, and Google**,
+  a pluggable provider registry, and automatic retry with backoff across every stream.
+- **Team subagents** — the agent can hand parts of a job to short-lived subagents that
+  run in parallel and return one combined report. Depth-capped by construction.
+- **Plan mode & TODO planning** — a read-only planning mode (`Shift+Tab`) where the agent
+  investigates first and asks before touching anything, plus a live todo list it keeps
+  honest as it works.
+- **Skills** — reusable expert procedures on disk, surfaced to the model through three
+  levels of progressive disclosure, with an explicit `allowed-tools` ceiling per skill.
+- **Context that survives** — a context gauge, automatic compaction with a restorable
+  archive, and sessions that resume across process boundaries.
+- **Background services** — the agent can start a dev server, see it come up, and stop
+  it; supervised children are reaped on exit, best-effort, even on hard crashes.
+- **A real machine contract** — `aragon exec` emits a versioned NDJSON event stream, with
+  tool permissions enforced at the tool boundary, caller-set budgets, stable exit codes,
+  and `aragon info --json` / `aragon doctor` for introspection.
+- **An engine, not a framework** — dependency-injected, ESM-only TypeScript, zero
+  database / persistence / host coupling, JSON-Schema-validated tools with per-tool
+  timeouts, and an optional `isolated-vm` CodeAct sandbox.
+- **Fast model tier** — an optional cheap second model for reflection and review, so the
+  expensive one only spends tokens on the work itself.
+
+## Get started in 30 seconds
+
 ```bash
-# Global
+# 1. Install (Node ≥ 18)
 npm i -g @aragon-agent/cli
+
+# 2. Set any one key (or paste it live in the TUI via /settings)
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# 3. Run — full-screen interactive TUI, in any directory
 aragon
-
-# Zero-install
-npx @aragon-agent/cli
 ```
 
-From a clone of this monorepo, build and launch it against your working copy
-instead:
+Prefer to look before you install?
 
 ```bash
-npm run dev:cli          # build + launch the TUI from this monorepo
-aragon "summarize README" # or one-shot: echo "list files" | aragon -p
+npx @aragon-agent/cli          # zero-install one-off
+aragon "summarize README.md"   # interactive, auto-submits the prompt
+echo "list files" | aragon -p  # one-shot: print, exit, pipeable
 ```
 
-See [`packages/cli/README.md`](./packages/cli/README.md) for install, usage,
-keybindings, slash commands, and configuration.
+From a clone of this monorepo: `npm install && npm run dev:cli` builds and launches the
+TUI against your working copy.
 
-## Use it from another project
-
-The same binary has a second, machine-facing face. `aragon exec` gives a build
-script, a CI job, a web backend or another agent a contract to code against: a
-versioned JSON event stream on stdout, sessions that survive across process
-boundaries, tool permissions enforced at the tool boundary rather than promised
-in a prompt, and caller-set budgets with their own exit code.
+## Embed the engine
 
 ```bash
-npm i -g @aragon-agent/cli
+npm install @aragon-agent/core
+```
 
-aragon info --json                                          # what does this build support?
-aragon exec --output-format json "summarize src/index.ts"   # answer + usage + cost
+```ts
+import {
+  AragonAgent, defineTool, textResult,
+  getProviderRegistry, initProviders,
+  type AgentTool, type ModelRef,
+} from '@aragon-agent/core';
+
+const greet: AgentTool = defineTool({
+  name: 'greet',
+  label: 'Greeter',
+  description: 'Greets the user by name.',
+  parameters: {
+    type: 'object',
+    properties: { name: { type: 'string' } },
+    required: ['name'],
+  },
+  async execute(_id, params) {
+    const name = typeof params.name === 'string' ? params.name : 'world';
+    return textResult(`Hello, ${name}!`);
+  },
+});
+
+initProviders();
+
+const model: ModelRef = { providerId: 'anthropic', modelId: 'claude-sonnet-4-6' };
+
+const agent = new AragonAgent({
+  systemPrompt: 'You are a helpful coding agent.',
+  model,
+  tools: [greet],
+  providerRegistry: getProviderRegistry(),
+  getApiKey: (providerId) => process.env.ANTHROPIC_API_KEY,
+});
+
+await agent.prompt('Greet the world.');
+```
+
+You supply the provider registry, an API-key resolver, the tool list, and the model
+reference — the engine holds no database, no persistence, and no framework coupling.
+`AragonAgent` is an alias of the engine's `Agent` class; the full public surface is
+frozen by a contract test and documented in
+[`packages/core/API.md`](./packages/core/API.md).
+
+## Drive it from another program
+
+`aragon exec` gives a build script, a CI job, a web backend, or another agent a contract
+to code against:
+
+```bash
+aragon info --json                                            # what does this build support?
+aragon exec --output-format json "summarize src/index.ts"     # answer + usage + cost
+
+# a research agent that can read, search, and plan — but touch nothing
 aragon exec --permission-mode strict --allow-tool read_file,grep \
   --max-turns 20 --output-format stream-json "find the retry policy"
 ```
 
-Reading the stream from Node:
-
-```js
-import { spawn } from 'node:child_process';
-import readline from 'node:readline';
-
-const child = spawn('aragon', ['exec', '--output-format', 'stream-json', 'hi'], {
-  stdio: ['ignore', 'pipe', 'inherit'],
-});
-
-let result = null;
-readline.createInterface({ input: child.stdout }).on('line', (line) => {
-  try {
-    const event = JSON.parse(line);
-    if (event.type === 'result') result = event;
-    // Ignore event types you do not know — that is the forward-compatibility contract.
-  } catch {
-    /* never fatal */
-  }
-});
-// Resolve on exit as well as on `result`: process exit is terminal either way.
-child.on('close', (code) => console.log(code, result?.result));
-```
-
-Full reference — output formats, the event schema, permission modes, session
-continuity, budgets, exit codes, and an honest list of the limits (there is no
-filesystem sandbox) — is in
+`stream-json` emits one JSON object per line (init, turns, tool calls, todos, result);
+ignore event types you do not know — that is the forward-compatibility contract. The
+full reference — output formats, the event schema, permission modes, session
+continuity, budgets, exit codes — is in
 [`packages/cli/README.md`](./packages/cli/README.md#use-it-from-another-project).
 
-## Quick start
+## The repository
 
-```ts
-import { AragonAgent, getProviderRegistry, initProviders } from '@aragon-agent/core';
-
-initProviders();
-
-const agent = new AragonAgent({
-  systemPrompt: 'You are a coding agent.',
-  model: { providerId: 'anthropic', modelId: 'claude-...', baseUrl: '...' },
-  tools: [],
-  providerRegistry: getProviderRegistry(),
-  getApiKey: () => process.env.ANTHROPIC_API_KEY,
-});
-
-await agent.prompt('Hello');
+```
+aragon-agent-core/
+  packages/
+    core/    @aragon-agent/core  — the publishable engine (ESM-only, Node ≥ 18)
+    cli/     @aragon-agent/cli   — the interactive TUI + the exec contract
+  logo/      brand + screenshot
 ```
 
-`AragonAgent` is an alias of the engine's `Agent` class — both are exported.
+At run time the CLI keeps everything it owns in one directory in the user's home —
+`~/.aragon-agent/` — holding `config.json`, `logs/`, `sessions/`, and installed
+`skills/`. `ARAGON_HOME` relocates it; `aragon config home` prints whichever is in
+effect. Nothing under this repository is written to at run time.
 
-## Build & test
+## Documentation
+
+| Document | What is in it |
+| --- | --- |
+| [`packages/cli/README.md`](./packages/cli/README.md) | The CLI: install, keybindings, slash commands, plan mode, teams, skills, compaction, configuration |
+| [`packages/core/README.md`](./packages/core/README.md) | The engine: entry points, optional dependencies, publishing |
+| [`packages/core/API.md`](./packages/core/API.md) | The frozen public API surface of `@aragon-agent/core` |
+| [`packages/cli/CHANGELOG.md`](./packages/cli/CHANGELOG.md) | Release history |
+
+## Honest limits
+
+- **Full permission, no sandbox, by default.** `bash` executes directly, file writes hit
+  the real filesystem, and there is no per-action approval gate unless you ask for one.
+  Only run it in workspaces you trust; opt in with `--confirm` or
+  `--permission-mode strict`.
+- **Early-stage and Windows-first.** Developed and daily-driven on Windows Terminal /
+  PowerShell, with cross-platform fallbacks (e.g. `Ctrl+P` where `Shift+Tab` cannot
+  work). Expect fewer polished edges than a funded product.
+
+## Contributing
 
 ```bash
+git clone https://github.com/xdrshjr/AragonAgent
+cd AragonAgent
 npm install
 npm run build        # builds every package (tsc → dist)
 npm test             # runs each package's test suite
+npm run dev:cli      # build + launch the TUI from this monorepo
 ```
 
-## Publishing
+Issues and pull requests are welcome. A good first move is reproducing something you
+think is wrong in an issue before changing code.
 
-`@aragon-agent/core` is published from its own package directory, not from the
-workspace root. See [`packages/core/README.md`](./packages/core/README.md#publishing)
-for the full release procedure (`cd packages/core && npm publish`, or
-`npm publish -w packages/core` from the root).
+## Star history
+
+[![Star History Chart](https://api.star-history.com/svg?repos=xdrshjr/AragonAgent&type=Date)](https://star-history.com/#xdrshjr/AragonAgent&Date)
 
 ## License
 
