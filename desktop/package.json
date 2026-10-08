@@ -1,0 +1,40 @@
+{
+  "name": "@aragon-agent/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AragonAgent Desktop - an Electron + Next.js desktop host for the aragon agent runtime (multi-session chat, model profiles, packaged installer).",
+  "license": "MIT",
+  "author": "AragonAgent contributors",
+  "main": "dist-electron/electron/main.js",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build:renderer": "next build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build": "npm run build:renderer && npm run build:electron",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "test": "node node_modules/vitest/vitest.mjs run",
+    "stage:runtime": "node scripts/stage-agent-runtime.mjs",
+    "package": "node scripts/package.mjs",
+    "start:packaged": "electron ."
+  },
+  "dependencies": {
+    "highlight.js": "^11.11.1",
+    "react-markdown": "^9.0.3",
+    "remark-gfm": "^4.0.0",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "concurrently": "^9.1.2",
+    "electron": "^33.3.1",
+    "electron-builder": "^25.1.8",
+    "next": "^14.2.32",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4",
+    "wait-on": "^8.0.2"
+  }
+}

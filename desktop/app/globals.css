@@ -1,0 +1,418 @@
+/* AragonAgent desktop design system.
+ *
+ * Visual language: warm paper tones, a single coral accent, serif display
+ * type over a quiet sans, hairline borders, soft depth. Light-first, matching
+ * the calm, editorial feel of Anthropic's product surfaces.
+ */
+
+:root {
+  /* Paper */
+  --bg: #f0eee6;          /* oat - app canvas */
+  --bg-sidebar: #ebe9e0;  /* sidebar tint */
+  --surface: #faf9f5;     /* bone - cards, composer */
+  --surface-raised: #ffffff;
+  --surface-sunken: #e9e7dd;
+
+  /* Ink */
+  --ink: #191919;
+  --ink-2: #52514c;
+  --ink-3: #8b8a84;
+  --ink-faint: #b3b1a9;
+
+  /* Lines */
+  --line: #e0ddd2;
+  --line-strong: #cfcbbd;
+
+  /* Accent - coral */
+  --accent: #d97757;
+  --accent-hover: #c4633f;
+  --accent-soft: #f6e3da;
+  --accent-ink: #8f4a2e;
+
+  /* Support */
+  --ok: #6d8f6a;
+  --ok-soft: #e6ede4;
+  --warn: #a3762e;
+  --warn-soft: #f3e9d4;
+  --danger: #bf4d43;
+  --danger-soft: #f5e0dc;
+  --info-soft: #e7e9df;
+
+  /* Type */
+  --font-display: var(--font-source-serif), Georgia, 'Times New Roman', serif;
+  --font-sans: var(--font-inter), 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Mono', 'Segoe UI Mono', Consolas, 'Courier New', monospace;
+
+  /* Shape & depth */
+  --radius-lg: 16px;
+  --radius-md: 12px;
+  --radius-sm: 8px;
+  --shadow-1: 0 1px 2px rgba(25, 25, 25, 0.05);
+  --shadow-2: 0 2px 6px rgba(25, 25, 25, 0.05), 0 12px 32px rgba(25, 25, 25, 0.09);
+  --shadow-3: 0 24px 64px rgba(25, 25, 25, 0.22);
+
+  --ease: cubic-bezier(0.2, 0.6, 0.2, 1);
+  --speed: 160ms;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+/* Scrollbars: slim, warm, unobtrusive */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-faint);
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+/* ---- Shared primitives ---- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border-radius: var(--radius-sm);
+  padding: 7px 14px;
+  font-weight: 500;
+  transition: background var(--speed) var(--ease), border-color var(--speed) var(--ease),
+    color var(--speed) var(--ease), box-shadow var(--speed) var(--ease);
+  white-space: nowrap;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: var(--shadow-1);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.btn-ghost {
+  color: var(--ink-2);
+}
+.btn-ghost:hover:not(:disabled) {
+  background: var(--surface-sunken);
+  color: var(--ink);
+}
+
+.btn-secondary {
+  border: 1px solid var(--line-strong);
+  background: var(--surface-raised);
+  color: var(--ink);
+  box-shadow: var(--shadow-1);
+}
+.btn-secondary:hover:not(:disabled) {
+  border-color: var(--ink-faint);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface-raised);
+  border-radius: 999px;
+  padding: 3px 11px;
+  font-size: 12px;
+  color: var(--ink-2);
+  transition: border-color var(--speed) var(--ease), background var(--speed) var(--ease);
+  max-width: 260px;
+}
+button.chip:hover {
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.field > label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-2);
+  letter-spacing: 0.01em;
+}
+.field input,
+.field select {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  padding: 8px 11px;
+  outline: none;
+  transition: border-color var(--speed) var(--ease), box-shadow var(--speed) var(--ease);
+}
+.field input:focus,
+.field select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.field .hint {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.field .issue {
+  font-size: 12px;
+  color: var(--danger);
+}
+
+/* ---- Markdown body ---- */
+
+.md {
+  font-size: 14.5px;
+  line-height: 1.65;
+  color: var(--ink);
+  overflow-wrap: break-word;
+}
+.md > *:first-child {
+  margin-top: 0;
+}
+.md > *:last-child {
+  margin-bottom: 0;
+}
+.md p {
+  margin: 0 0 12px;
+}
+.md h1,
+.md h2,
+.md h3,
+.md h4 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 20px 0 10px;
+  letter-spacing: -0.01em;
+}
+.md h1 { font-size: 22px; }
+.md h2 { font-size: 19px; }
+.md h3 { font-size: 16.5px; }
+.md h4 { font-size: 15px; }
+.md ul,
+.md ol {
+  margin: 0 0 12px;
+  padding-left: 22px;
+}
+.md li {
+  margin: 3px 0;
+}
+.md li > p {
+  margin: 2px 0;
+}
+.md a {
+  color: var(--accent-ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--accent-soft);
+}
+.md a:hover {
+  text-decoration-color: var(--accent);
+}
+.md blockquote {
+  margin: 0 0 12px;
+  padding: 2px 0 2px 14px;
+  border-left: 3px solid var(--accent-soft);
+  color: var(--ink-2);
+}
+.md hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 18px 0;
+}
+.md code {
+  font-family: var(--font-mono);
+  font-size: 12.8px;
+  background: var(--surface-sunken);
+  border-radius: 5px;
+  padding: 1.5px 5px;
+}
+.md pre code {
+  background: none;
+  padding: 0;
+  font-size: 12.6px;
+  line-height: 1.6;
+}
+.md pre {
+  background: #28261f;
+  color: #e8e4d8;
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin: 0 0 12px;
+}
+.md table {
+  border-collapse: collapse;
+  margin: 0 0 12px;
+  font-size: 13px;
+  display: block;
+  overflow-x: auto;
+}
+.md th,
+.md td {
+  border: 1px solid var(--line);
+  padding: 6px 11px;
+  text-align: left;
+}
+.md th {
+  background: var(--surface-sunken);
+  font-weight: 600;
+}
+.md img {
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+}
+
+/* highlight.js - warm theme tuned to the palette */
+.hljs {
+  color: #e8e4d8;
+}
+.hljs-comment,
+.hljs-quote {
+  color: #97918a;
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-tag,
+.hljs-name {
+  color: #e8a87c;
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition {
+  color: #b5c98f;
+}
+.hljs-number,
+.hljs-literal,
+.hljs-meta {
+  color: #d9a4a0;
+}
+.hljs-title,
+.hljs-section,
+.hljs-attr,
+.hljs-attribute {
+  color: #8fb8c9;
+}
+.hljs-type,
+.hljs-built_in,
+.hljs-builtin-name {
+  color: #c9b18f;
+}
+.hljs-deletion {
+  color: #d98880;
+}
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+
+/* Streaming caret */
+.caret::after {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 15px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  border-radius: 2px;
+  background: var(--accent);
+  animation: caret-blink 1s steps(2, start) infinite;
+}
+@keyframes caret-blink {
+  0%, 60% { opacity: 1; }
+  61%, 100% { opacity: 0.15; }
+}
+
+/* Subtle entrance for new transcript rows */
+@keyframes row-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
+.row-in {
+  animation: row-in 220ms var(--ease);
+}
+
+/* Sidebar session items */
+.session-item:hover {
+  background: var(--surface);
+  border-color: var(--line);
+}
+.session-item:hover .item-delete {
+  opacity: 1 !important;
+}
+.session-item .item-delete:hover {
+  color: var(--danger);
+}
+
+/* Spinner */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 0.25; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: inline-block;
+  animation: pulse-dot 1.1s var(--ease) infinite;
+}
+.dot:nth-child(2) { animation-delay: 0.18s; }
+.dot:nth-child(3) { animation-delay: 0.36s; }

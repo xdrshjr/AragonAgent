@@ -1,0 +1,51 @@
+appId: com.aragonagent.desktop
+productName: AragonAgent
+copyright: Copyright (c) AragonAgent contributors
+# The monorepo hoists electron to the root node_modules, outside this config's
+# project dir - pin the version explicitly so no module resolution is needed.
+electronVersion: 33.4.11
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - out/**
+  - dist-electron/**
+  - package.json
+  - "!**/*.map"
+
+extraResources:
+  - from: agent-runtime
+    to: agent-runtime
+    filter: ["**/*", "!**/*.md", "!**/package-lock.json"]
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  icon: build/icon.png
+  artifactName: ${productName}-Setup-${version}.${ext}
+
+portable:
+  artifactName: ${productName}-Portable-${version}.${ext}
+
+nsis:
+  oneClick: true
+  perMachine: false
+  allowToChangeInstallationDirectory: false
+  createDesktopShortcut: always
+  shortcutName: AragonAgent
+  deleteAppDataOnUninstall: false
+
+mac:
+  target: [dmg]
+  icon: build/icon.png
+  category: public.app-category.developer-tools
+
+linux:
+  target: [AppImage]
+  icon: build/icon.png
+  category: Development

@@ -1,0 +1,8 @@
+.next/
+out/
+dist-electron/
+release/
+agent-runtime/
+build/
+next-env.d.ts
+*.tsbuildinfo

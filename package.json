@@ -5,13 +5,17 @@
   "description": "AragonAgent — a zero-coupling TypeScript agent engine (LLM provider adapters, streaming, tool registry/execution, steering, idle watchdog, optional isolated-vm sandbox). Extracted from AragonMesh's JR Agent core for reuse and publishing.",
   "license": "MIT",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "desktop"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "dev:cli": "npm run build -w packages/cli && node packages/cli/dist/cli.js",
+    "dev:desktop": "npm run dev -w @aragon-agent/desktop",
+    "package:desktop": "npm run package -w @aragon-agent/desktop",
+    "test:desktop": "npm run test -w @aragon-agent/desktop",
     "start": "node packages/cli/dist/cli.js",
     "verify:brand": "node scripts/assert-brand-clean.mjs",
     "preflight": "node scripts/release-preflight.mjs",
