@@ -43,6 +43,19 @@ export interface SystemPromptParams {
   /** `planModeMaxAskRounds`, substituted into the block so the two agree. */
   planMaxAskRounds?: number;
   /**
+   * The rendered `<unrestricted_mode>` block, or `''` (unrestricted-mode).
+   *
+   * Spliced conditionally exactly as the plan block is, which is what keeps
+   * invariant I-U1 true: any other mode, and an absent or empty value,
+   * produce a BYTE-IDENTICAL prompt for a fixed `tools` array.
+   *
+   * Passed ONLY by the lead controller when the effective mode is
+   * `unrestricted` AND a validated package loaded. Subagent prompts are
+   * built from their own explicit parameter list and never carry it, so a
+   * `task` dispatch cannot fan an unrestricted posture out to children.
+   */
+  unrestrictedBlock?: string;
+  /**
    * The rendered `<team_mode>` block for a LEAD with team mode on, or `''`.
    *
    * Spliced conditionally exactly as `skillsBlock` and the plan block are, which
@@ -145,6 +158,7 @@ export function buildSystemPrompt(params: SystemPromptParams): string {
         })
       : '';
 
+  const unrestrictedBlock = params.unrestrictedBlock ?? '';
   const teamBlock = params.teamBlock ?? '';
   const subagentBlock = params.subagentBlock ?? '';
   const todoBlock = params.todoBlock ?? '';
@@ -168,6 +182,7 @@ export function buildSystemPrompt(params: SystemPromptParams): string {
     buildProjectGuidanceBlock(),
     ...(hasSkills ? ['', skillsBlock] : []),
     ...(planBlock ? ['', planBlock] : []),
+    ...(unrestrictedBlock ? ['', unrestrictedBlock] : []),
     ...(teamBlock ? ['', teamBlock] : []),
     ...(subagentBlock ? ['', subagentBlock] : []),
     ...(todoBlock ? ['', todoBlock] : []),

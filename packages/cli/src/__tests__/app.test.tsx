@@ -492,17 +492,24 @@ class FakeController {
   }
   setAgentMode(next: AgentMode, opts: { force?: boolean } = {}) {
     // Same asymmetry as the real controller: tightening lands now, loosening
-    // waits for `agent_end` unless it was forced by a plan approval.
+    // waits for `agent_end` unless it was forced by a plan approval. The
+    // package-refusal branch has no stub counterpart: this fake never refuses
+    // entry, so unrestricted-entry refusal is covered by the loader tests.
     if (next === 'plan') {
       this.agentMode = 'plan';
       this.pendingMode = null;
-    } else if (this.agentMode === 'build' || opts.force || !this.running) {
-      this.agentMode = 'build';
+    } else if (this.agentMode === next) {
+      this.pendingMode = null;
+    } else if (opts.force || !this.running) {
+      this.agentMode = next;
       this.pendingMode = null;
     } else {
-      this.pendingMode = 'build';
+      this.pendingMode = next;
     }
     return { effective: this.agentMode, pending: this.pendingMode };
+  }
+  getUnrestrictedStatus(): { dir: string; pkg: null } {
+    return { dir: '/tmp/unrestricted', pkg: null };
   }
   applyPendingMode() {
     if (!this.pendingMode) return null;
@@ -937,6 +944,12 @@ describe('App (fullscreen frame)', () => {
     stdin.write(`${ESC}[Z`);
     await delay(40);
     expect(fc.agentMode).toBe('plan');
+
+    // The cycle now has a third stop: a stray double-press lands in
+    // unrestricted, and a third press returns home.
+    stdin.write(`${ESC}[Z`);
+    await delay(40);
+    expect(fc.agentMode).toBe('unrestricted');
 
     stdin.write(`${ESC}[Z`);
     await delay(40);

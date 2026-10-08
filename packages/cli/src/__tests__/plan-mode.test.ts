@@ -10,7 +10,13 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentTool } from '@aragon-agent/core';
-import { AGENT_MODES, MODE_LABEL, nextMode, planRefusal } from '../agent/agent-mode.js';
+import {
+  AGENT_MODES,
+  MODE_LABEL,
+  nextMode,
+  planRefusal,
+  type AgentMode,
+} from '../agent/agent-mode.js';
 import { buildPlanModeBlock } from '../agent/plan-prompt.js';
 import { buildSystemPrompt } from '../agent/system-prompt.js';
 import { registerBuiltinCommands } from '../commands/builtins.js';
@@ -29,13 +35,15 @@ const TOOLS: AgentTool[] = [
 describe('nextMode / MODE_LABEL', () => {
   it('cycles, so a third mode is a one-line change', () => {
     expect(nextMode('build')).toBe('plan');
-    expect(nextMode('plan')).toBe('build');
-    expect(AGENT_MODES).toEqual(['build', 'plan']);
+    expect(nextMode('plan')).toBe('unrestricted');
+    expect(nextMode('unrestricted')).toBe('build');
+    expect(AGENT_MODES).toEqual(['build', 'plan', 'unrestricted']);
   });
 
   it('labels both modes in English', () => {
     expect(MODE_LABEL.build).toBe('BUILD');
     expect(MODE_LABEL.plan).toBe('PLAN');
+    expect(MODE_LABEL.unrestricted).toBe('UNRESTRICTED');
   });
 });
 
@@ -120,21 +128,24 @@ describe('planRefusal', () => {
  * registry to test four branches of pure logic.
  */
 class ModeOwner {
-  effective: 'build' | 'plan' = 'build';
-  pending: 'build' | 'plan' | null = null;
+  effective: AgentMode = 'build';
+  pending: AgentMode | null = null;
   running = false;
 
-  set(next: 'build' | 'plan', opts: { force?: boolean } = {}) {
+  set(next: AgentMode, opts: { force?: boolean } = {}) {
+    // Same shape as the controller, minus the package-refusal branch:
+    // the double has no package state to consult (that path is covered
+    // by the real-controller tests).
     if (next === 'plan') {
       this.effective = 'plan';
       this.pending = null;
-    } else if (this.effective === 'build') {
+    } else if (this.effective === next) {
       this.pending = null;
     } else if (opts.force || !this.running) {
-      this.effective = 'build';
+      this.effective = next;
       this.pending = null;
     } else {
-      this.pending = 'build';
+      this.pending = next;
     }
     return { effective: this.effective, pending: this.pending };
   }
@@ -216,7 +227,7 @@ describe('AC-P24 - /plan uses applyAgentMode, not its own pair of calls', () => 
   } {
     const owner = new ModeOwner();
     const notices: string[] = [];
-    const applyAgentMode = vi.fn((next: 'build' | 'plan') => owner.set(next));
+    const applyAgentMode = vi.fn((next: AgentMode) => owner.set(next));
     const controller = {
       getAgentMode: () => owner.effective,
       getPlanStatus: () => ({
@@ -256,6 +267,10 @@ describe('AC-P24 - /plan uses applyAgentMode, not its own pair of calls', () => 
     expect(h.applyAgentMode).toHaveBeenCalledWith('plan');
     expect(h.owner.effective).toBe('plan');
 
+    await runSlashInput(registry, '/plan', h.ctx);
+    expect(h.applyAgentMode).toHaveBeenLastCalledWith('unrestricted');
+
+    // And the third press closes the cycle back to build.
     await runSlashInput(registry, '/plan', h.ctx);
     expect(h.applyAgentMode).toHaveBeenLastCalledWith('build');
   });

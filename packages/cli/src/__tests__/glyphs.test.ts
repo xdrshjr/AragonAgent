@@ -228,7 +228,7 @@ export function inScope(rel: string): boolean {
     // writes strings that reach a model AND strings that reach a legacy console
     // (`[background] service s1 started`), so an unscanned tree is the same hole
     // in the same place.
-    /^(agent|boot|commands|compaction|config|diagnostics|exec|fast|input|proc|session|team|todo|tools|update)\//.test(
+    /^(agent|boot|commands|compaction|config|diagnostics|exec|fast|input|proc|session|team|todo|tools|update|unrestricted)\//.test(
       rel,
     ) ||
     rel === 'cli.tsx' ||
@@ -284,6 +284,8 @@ describe('A-1: no hardcoded non-ASCII outside glyphs.ts', () => {
     // one, so a green suite is not evidence either way (C-19).
     expect(inScope('boot/guard.ts')).toBe(true);
     expect(inScope('boot/rollback.ts')).toBe(true);
+    expect(inScope('unrestricted/limits.ts')).toBe(true);
+    expect(inScope('unrestricted/package.ts')).toBe(true);
     expect(inScope('launcher.ts')).toBe(true);
     // And the predicate is still narrow: a top-level file that is not an entry
     // point stays out, or the exemption list stops meaning anything.

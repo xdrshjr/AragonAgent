@@ -292,12 +292,19 @@ const COMMANDS: SlashCommand[] = [
         );
         return;
       }
-      if (arg.length > 0 && arg !== 'on' && arg !== 'off') {
+      if (arg.length > 0 && arg !== 'on' && arg !== 'off' && arg !== 'unr' && arg !== 'unrestricted') {
         ctx.notify('warn', `Unknown argument "${arg}" - use /plan [on|off|status].`);
         return;
       }
       const current = ctx.controller.getAgentMode();
-      const target = arg === 'on' ? 'plan' : arg === 'off' ? 'build' : nextMode(current);
+      const target =
+        arg === 'on'
+          ? 'plan'
+          : arg === 'off'
+            ? 'build'
+            : arg === 'unr' || arg === 'unrestricted'
+              ? 'unrestricted'
+              : nextMode(current);
       ctx.applyAgentMode(target);
     },
   },

@@ -1540,8 +1540,18 @@ export function App({
     const applied = controller.setAgentMode(next, opts.force ? { force: true } : {});
     dispatch({ type: 'setAgentMode', mode: applied.effective, pending: applied.pending });
     if (opts.silent) return applied;
+    if (next === 'unrestricted' && applied.effective !== 'unrestricted' && !applied.pending) {
+      toast('error', `No unrestricted package in ${controller.getUnrestrictedStatus().dir} - mode not entered.`);
+      return applied;
+    }
     if (applied.pending) {
       toast('info', `${MODE_LABEL[applied.pending]} mode applies after this run.`);
+    } else if (applied.effective === 'unrestricted') {
+      const pkg = controller.getUnrestrictedStatus().pkg;
+      toast(
+        'warn',
+        `UNRESTRICTED mode (${pkg ? pkg.name : 'package'}). Research use only; provider accounts may be at risk.`,
+      );
     } else {
       toast('info', `${MODE_LABEL[applied.effective]} mode.`);
     }

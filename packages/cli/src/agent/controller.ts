@@ -57,6 +57,13 @@ import { resolveModelProfileState } from '../config/model-profile-resolution.js'
 import { makeGetApiKey } from '../config/load.js';
 import { updatePersistedConfig } from '../config/store.js';
 import { ModelWindows } from '../config/model-windows.js';
+import { getHomeRoot } from '../config/app-paths.js';
+import {
+  defaultUnrestrictedDir,
+  loadUnrestrictedPackage,
+  type UnrestrictedPackage,
+} from '../unrestricted/package.js';
+import { buildUnrestrictedBlock } from '../unrestricted/prompt.js';
 import { createBuiltinTools, type ConfirmRequest } from '../tools/index.js';
 // `import type` ONLY — see the same note in `tools/index.ts`.
 import type { ToolPermission } from '../exec/permission.js';
@@ -260,6 +267,19 @@ export class AgentController {
   private readonly planInteractive: boolean;
 
   // -----------------------------------------------------------------------
+  // Unrestricted mode (unrestricted-mode branch) - ONE LOAD, AT BIRTH.
+  //
+  // The package directory is read once, here, exactly like the tool array:
+  // the mode is a live toggle but its PAYLOAD is not. Reloading per prompt
+  // rebuild would let a mid-session file edit change what the model was told
+  // with no signal in the transcript; refusing entry on a bad directory is
+  // honest, silently swapping packages mid-run is not.
+  // -----------------------------------------------------------------------
+
+  private readonly unrestrictedDir: string;
+  private readonly unrestricted: ReturnType<typeof loadUnrestrictedPackage>;
+
+  // -----------------------------------------------------------------------
   // Team mode (team-subagents §4.5) — TWO FLAGS, AND THEY ARE NOT THE SAME.
   //
   // `teamRegistered` is decided ONCE, at construction, and can never change:
@@ -458,6 +478,8 @@ export class AgentController {
     const humanInput = deps.humanInput ?? DENY_ALL_HUMAN_INPUT;
     this.planInteractive = humanInput.neverPrompts !== true;
     this.effectiveMode = config.startInPlanMode ? 'plan' : 'build';
+    this.unrestrictedDir = defaultUnrestrictedDir(getHomeRoot());
+    this.unrestricted = loadUnrestrictedPackage(this.unrestrictedDir);
     // The retry policy is installed HERE and replaced live by `setRetryConfig`
     // (llm-api-retry-backoff §6.3). Subagents inherit it for free: `TeamRuntime`
     // reuses this very registry instance.
@@ -932,6 +954,10 @@ export class AgentController {
       tools: this.tools,
       skillsBlock: this.skillsEnabled ? this.skills.catalogBlock() + this.skills.alwaysBlock() : '',
       agentMode: this.effectiveMode,
+      unrestrictedBlock:
+        this.effectiveMode === 'unrestricted' && this.unrestricted.ok
+          ? buildUnrestrictedBlock(this.unrestricted.pkg)
+          : '',
       planInteractive: this.planInteractive,
       planMaxAskRounds: config.planModeMaxAskRounds,
       // BOTH flags, and both are required (§4.5). `teamRegistered` false means
@@ -1378,6 +1404,18 @@ export class AgentController {
   }
 
   /**
+   * Where unrestricted packages come from and which one is active, if any.
+   * Named read surface for the UI's refusal notice; nothing else reaches into
+   * the loader state directly.
+   */
+  getUnrestrictedStatus(): { dir: string; pkg: UnrestrictedPackage | null } {
+    return {
+      dir: this.unrestrictedDir,
+      pkg: this.unrestricted.ok ? this.unrestricted.pkg : null,
+    };
+  }
+
+  /**
    * Request a mode change and return what was ACTUALLY ADOPTED.
    *
    * Returning the adopted state rather than `void` is the whole point of this
@@ -1402,14 +1440,19 @@ export class AgentController {
     if (next === 'plan') {
       this.effectiveMode = 'plan';
       this.pendingMode = null;
-    } else if (this.effectiveMode === 'build') {
+    } else if (next === 'unrestricted' && !this.unrestricted.ok) {
+      // REFUSED, NOT ADOPTED: an UNRESTRICTED badge the prompt cannot honour
+      // is exactly the lie `AgentModeState` exists to prevent. Return the
+      // unchanged state; the UI reads it back and says why.
+      this.pendingMode = null;
+    } else if (this.effectiveMode === next) {
       // Already there. Clear any stale deferral rather than queueing a second.
       this.pendingMode = null;
     } else if (opts.force || !this.isRunning()) {
-      this.effectiveMode = 'build';
+      this.effectiveMode = next;
       this.pendingMode = null;
     } else {
-      this.pendingMode = 'build';
+      this.pendingMode = next;
     }
     this.rebuildSystemPrompt();
     return { effective: this.effectiveMode, pending: this.pendingMode };

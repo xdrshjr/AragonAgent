@@ -1,0 +1,5 @@
+# Byte-stable instruction packages: the sha256 digests in manifest.json are
+# computed over the exact working-tree bytes, so git must never convert line
+# endings on checkout. A CRLF-converted package would fail hash validation
+# and the unrestricted mode would refuse to load it (fail-closed, but broken).
+unrestricted-packages/* -text

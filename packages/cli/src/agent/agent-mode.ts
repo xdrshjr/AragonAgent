@@ -17,19 +17,25 @@
  * at render time from `glyphs.ellipsis`.
  */
 
-export type AgentMode = 'build' | 'plan';
+export type AgentMode = 'build' | 'plan' | 'unrestricted';
 
-export const AGENT_MODES: readonly AgentMode[] = ['build', 'plan'] as const;
+export const AGENT_MODES: readonly AgentMode[] = ['build', 'plan', 'unrestricted'] as const;
 
 /** The user-visible word for each mode. English, per the repo convention. */
-export const MODE_LABEL: Record<AgentMode, string> = { build: 'BUILD', plan: 'PLAN' };
+export const MODE_LABEL: Record<AgentMode, string> = {
+  build: 'BUILD',
+  plan: 'PLAN',
+  unrestricted: 'UNRESTRICTED',
+};
 
 /**
  * The next mode in the cycle.
  *
  * Written as a cycle rather than a boolean flip so that adding Claude Code's
  * "auto-accept edits" as a third posture is a one-line change to `AGENT_MODES`
- * and nothing else. Two ship today (§1 non-goals).
+ * and nothing else. Three ship today: `plan` tightens to read-only;
+ * `unrestricted` swaps in the operator's instruction package (entry is
+ * refused when no validated package is installed).
  */
 export function nextMode(current: AgentMode): AgentMode {
   const index = AGENT_MODES.indexOf(current);
