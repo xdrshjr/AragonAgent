@@ -11,6 +11,7 @@
 
 import path from 'node:path';
 import { BrowserWindow, app, net, protocol } from 'electron';
+import { promises as fs } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { SessionRegistry } from './agent/registry';
 import { SettingsStore } from './settings/store';
@@ -43,6 +44,10 @@ if (!singleInstance) {
 }
 
 async function main(): Promise<void> {
+  // Test/docs override for the userData directory (screenshot seeding, CI).
+  const userDataOverride = process.env.ARAGON_DESKTOP_USER_DATA;
+  if (userDataOverride) app.setPath('userData', userDataOverride);
+
   const settings = new SettingsStore(app.getPath('userData'));
   await settings.load();
 
@@ -159,6 +164,27 @@ function createWindow(): void {
           console.error('[bridge-check] failed:', error);
           app.exit(4);
         });
+    });
+  }
+
+  // Docs helper: ARAGON_DESKTOP_SCREENSHOT=<file.png> captures the rendered
+  // page after fonts settle and exits - used to refresh README screenshots.
+  const screenshotTarget = process.env.ARAGON_DESKTOP_SCREENSHOT;
+  if (screenshotTarget) {
+    mainWindow.webContents.once('did-finish-load', () => {
+      setTimeout(() => {
+        void mainWindow?.webContents
+          .capturePage()
+          .then((image) => fs.writeFile(screenshotTarget, image.toPNG()))
+          .then(() => {
+            console.log(`[screenshot] wrote ${screenshotTarget}`);
+            app.exit(0);
+          })
+          .catch((error: unknown) => {
+            console.error('[screenshot] failed:', error);
+            app.exit(5);
+          });
+      }, 2600);
     });
   }
 }

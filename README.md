@@ -39,6 +39,7 @@ AragonAgent is deliberately both faces of the same machine:
 | You want to… | You use |
 | --- | --- |
 | Chat with an agent in your terminal and watch it work | **`aragon`** — the interactive TUI |
+| Use the same agent in a native desktop app | **AragonAgent Desktop** — Electron + Next.js, multi-session |
 | Embed an agent loop in your own app, with your own tools | **`@aragon-agent/core`** — the engine |
 | Drive an agent from a script, CI job, or another agent | **`aragon exec`** — the JSON contract |
 
@@ -50,6 +51,10 @@ subprocess you can spawn. Nothing about the engine assumes a terminal exists.
 - **Terminal-native TUI** — full-screen streaming chat, live tool-call cards, scrollback,
   themes, queued follow-ups while the agent runs, and a status bar that tracks context
   usage, tokens, and session cost.
+- **A native desktop app** — the same agent in an Electron + Next.js shell: multi-session
+  chat with a warm, calm UI, model profiles (Anthropic / OpenAI / any OpenAI-compatible
+  endpoint), encrypted key storage, one-click connection tests, and a manual
+  clear-context control. Packaged installers need no system Node install.
 - **Bring your own model** — first-class adapters for **Anthropic, OpenAI, and Google**,
   a pluggable provider registry, and automatic retry with backoff across every stream.
 - **Team subagents** — the agent can hand parts of a job to short-lived subagents that
@@ -172,7 +177,8 @@ aragon-agent-core/
   packages/
     core/    @aragon-agent/core  — the publishable engine (ESM-only, Node ≥ 18)
     cli/     @aragon-agent/cli   — the interactive TUI + the exec contract
-  logo/      brand + screenshot
+  logo/      brand + screenshots
+  desktop/  AragonAgent Desktop — Electron + Next.js host, packaged installer
 ```
 
 At run time the CLI keeps everything it owns in one directory in the user's home —
@@ -180,11 +186,41 @@ At run time the CLI keeps everything it owns in one directory in the user's home
 `skills/`. `ARAGON_HOME` relocates it; `aragon config home` prints whichever is in
 effect. Nothing under this repository is written to at run time.
 
+## AragonAgent Desktop
+
+<p align="center">
+  <img src="./logo/desktop-screenshot.png" width="880"
+       alt="AragonAgent Desktop: session sidebar with search, a conversation showing a thinking block, tool cards for read_file/edit_file/bash with timings, a completed three-item plan, and a markdown answer with syntax-highlighted code; the header carries the working folder, model profile, clear-context and usage chips." />
+</p>
+
+The desktop app is a thin host around the same `aragon exec` machine contract the CLI
+exposes - each conversation session runs as a supervised child process, so every
+capability of the TUI (tools, durable sessions, auto-compaction, budgets, interrupts)
+works unchanged:
+
+- **Multi-session** — concurrent chats, journal replay on reopen, resume across app
+  restarts, queue follow-ups while a turn runs.
+- **Model profiles** — Anthropic, OpenAI, or any OpenAI-compatible endpoint
+  (DeepSeek, Qwen, Ollama gateways...); API keys encrypted with the OS credential
+  store; live connection test; switch model or working folder mid-conversation.
+- **Context control** — automatic compaction notices plus a manual *Clear* that gives
+  the model a fresh window while your transcript stays readable.
+
+Build it from a clone:
+
+```bash
+npm install
+npm run dev:desktop        # develop (hot reload)
+npm run package:desktop    # NSIS installer + portable exe (win x64)
+```
+
+Details in [`desktop/README.md`](./desktop/README.md).
 ## Documentation
 
 | Document | What is in it |
 | --- | --- |
-| [`packages/cli/README.md`](./packages/cli/README.md) | The CLI: install, keybindings, slash commands, plan mode, teams, skills, compaction, configuration |
+| [`packages/cli/README.md`](./packages/cli/README.md) |
+| [`desktop/README.md`](./desktop/README.md) | The desktop app: architecture, development, tests, packaging | The CLI: install, keybindings, slash commands, plan mode, teams, skills, compaction, configuration |
 | [`packages/core/README.md`](./packages/core/README.md) | The engine: entry points, optional dependencies, publishing |
 | [`packages/core/API.md`](./packages/core/API.md) | The frozen public API surface of `@aragon-agent/core` |
 | [`packages/cli/CHANGELOG.md`](./packages/cli/CHANGELOG.md) | Release history |
