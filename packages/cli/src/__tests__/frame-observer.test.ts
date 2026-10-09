@@ -100,6 +100,19 @@ describe('output-confirmed scrollbar geometry', () => {
       terminal.destroy();
     }
   });
+  it('waits for output after a same-sized geometry revision', () => {
+    const { terminal, bridge, observer, layout } = setup();
+    try {
+      layout(); observer.stdout.write(frame());
+      expect(bridge.frameReady).toBe(true);
+      bridge.invalidate();
+      bridge.geometry = { ...bridge.geometry!, revision: 2 };
+      bridge.onGeometry?.();
+      expect(bridge.frameReady).toBe(false);
+      observer.stdout.write(frame());
+      expect(bridge.frameReady).toBe(true);
+    } finally { observer.dispose(); terminal.destroy(); }
+  });
   it('rejects partial and cursor-moving writes', () => {
     expect(parseInkFrame('text')).toBeNull();
     expect(parseInkFrame('\x1b[2Jtext\n')).toBeNull();

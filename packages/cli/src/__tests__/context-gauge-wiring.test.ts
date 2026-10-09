@@ -15,7 +15,7 @@
  * tests over the pieces cannot see either, because both are defects of the SEAM.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi, afterEach } from 'vitest';
 import {
   Agent,
   ProviderRegistry,
@@ -71,10 +71,14 @@ function assistantText(text: string): Message {
 /** A history whose ESTIMATE alone is roughly `tokens`. */
 function historyOfSize(tokens: number): Message[] {
   const out: Message[] = [];
-  const perMessage = 8_000; // ~2 000 tokens
-  const count = Math.max(6, Math.ceil((tokens * 4) / perMessage));
+  const count = 12;
+  const perMessage = Math.ceil((tokens * 4) / count);
   for (let i = 0; i < count; i += 1) {
-    out.push(user(`turn ${i}: ${'q'.repeat(perMessage)}`));
+    out.push(user(`turn ${i}: inspect the repository`));
+    out.push({ role: 'assistant', content: [{ type: 'tool_call', toolCallId: `read-${i}`,
+      toolName: 'read_file', args: { path: `file-${i}.txt` } }] });
+    out.push({ role: 'tool_result', toolCallId: `read-${i}`, isError: false,
+      content: `result ${i}: ${'q'.repeat(perMessage)}` });
     out.push(assistantText(`answer ${i}`));
   }
   return out;
@@ -192,7 +196,10 @@ function harness(opts: HarnessOpts = {}) {
 }
 
 const SUCCESSFUL_COMPACTION: ScriptStep[] = [
-  { kind: 'summary', text: '## Task\ncompacted' },
+  { kind: 'summary', text: JSON.stringify({ schemaVersion: 2, additions: [{
+    section: 'facts', text: 'The first repository file was read.',
+    sources: [{ messageId: 'g1:m2', role: 'tool_result', excerpt: 'result 0:' }],
+  }] }) },
   { kind: 'assistant', text: 'answered' },
 ];
 
@@ -320,6 +327,97 @@ function controllerConfig(overrides: Partial<CliConfig> = {}): CliConfig {
     ...overrides,
   };
 }
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe('live model context discovery', () => {
+  it.each([
+    ['openai', { data: [{ id: 'custom', context_length: 1000000 }] }],
+    ['anthropic', { data: [{ id: 'custom', max_input_tokens: 1000000 }] }],
+    ['google', { models: [{ name: 'models/custom', inputTokenLimit: 1000000,
+      supportedGenerationMethods: ['generateContent'] }] }],
+  ] as const)('publishes %s context without a model turn, even with compaction off', async (provider, body) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body))));
+    const controller = new AgentController(controllerConfig({ provider, model: 'custom',
+      apiKeys: { [provider]: 'test' }, baseUrl: 'https://gateway.test/v1',
+      compaction: { ...DEFAULT_COMPACTION_CONFIG, enabled: false } }));
+    try {
+      const published: number[] = [];
+      controller.subscribeContextUsage((u) => published.push(u.window));
+      await controller.refreshModelMetadata();
+      expect(controller.getContextUsage()).toMatchObject({ window: 1000000, windowKnown: true, windowSource: 'api' });
+      expect(published).toContain(1000000);
+      expect(controller.isPricedModel({ providerId: 'openai', modelId: 'custom' })).toBe(false);
+    } finally { controller.dispose(); }
+  });
+
+  it('uses verified catalog context when the endpoint supplies only model IDs', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ data: [{ id: 'gpt-5' }] }))));
+    const controller = new AgentController(controllerConfig({ provider: 'openai', model: 'gpt-5',
+      apiKeys: { openai: 'test' } }));
+    try {
+      await controller.refreshModelMetadata();
+      expect(controller.getContextUsage()).toMatchObject({ window: 400000, windowKnown: true });
+    } finally { controller.dispose(); }
+  });
+
+  it('keeps a manual window override above discovery', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ data: [
+      { id: 'custom', context_length: 1000000 },
+    ] }))));
+    const controller = new AgentController(controllerConfig({ provider: 'openai', model: 'custom',
+      apiKeys: { openai: 'test' }, contextWindow: 300000 }));
+    try {
+      await controller.refreshModelMetadata();
+      expect(controller.getContextUsage()).toMatchObject({ window: 300000, windowOverridden: true });
+    } finally { controller.dispose(); }
+  });
+
+  it('switches endpoint automatically and ignores a late previous response', async () => {
+    let completeOld!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => url.includes('old.test')
+      ? new Promise<Response>((resolve) => { completeOld = resolve; })
+      : new Response(JSON.stringify({ data: [{ id: 'custom', context_length: 64000 }] }))));
+    const controller = new AgentController(controllerConfig({ provider: 'openai', model: 'custom',
+      apiKeys: { openai: 'test' }, baseUrl: 'https://old.test/v1' }));
+    try {
+      const old = controller.refreshModelMetadata();
+      controller.setModel('openai', 'custom', 'https://new.test/v1');
+      await vi.waitFor(() => expect(controller.getContextUsage().window).toBe(64000));
+      completeOld(new Response(JSON.stringify({ data: [{ id: 'custom', context_length: 1000000 }] })));
+      await old;
+      expect(controller.getContextUsage().window).toBe(64000);
+    } finally { controller.dispose(); }
+  });
+
+  it('leaves an unknown model unverified when discovery fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
+    const controller = new AgentController(controllerConfig({ provider: 'openai', model: 'custom',
+      apiKeys: { openai: 'test' } }));
+    try {
+      await controller.refreshModelMetadata();
+      expect(controller.getContextUsage().windowKnown).toBe(false);
+    } finally { controller.dispose(); }
+  });
+
+  it('invalidates the displayed limit immediately when credentials change at the same endpoint', async () => {
+    let finish!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => { finish = resolve; });
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: 'custom', context_length: 1000000 }] })))
+      .mockReturnValueOnce(pending));
+    const controller = new AgentController(controllerConfig({ provider: 'openai', model: 'custom',
+      apiKeys: { openai: 'first' }, baseUrl: 'https://gateway.test/v1' }));
+    try {
+      await controller.refreshModelMetadata();
+      const config = { ...controller.getConfig(), apiKeys: { openai: 'second' } };
+      controller.applyModelSettingsSnapshot(controller.prepareModelSettingsSnapshot(config));
+      expect(controller.getContextUsage().windowKnown).toBe(false);
+      finish(new Response(JSON.stringify({ data: [{ id: 'custom', context_length: 64000 }] })));
+      await vi.waitFor(() => expect(controller.getContextUsage().window).toBe(64000));
+    } finally { finish(new Response('{}')); controller.dispose(); }
+  });
+});
 
 describe('T8 - P0-2: `/resume` reports a real occupancy with no turn at all', () => {
   it('replaceMessages of a huge history moves the gauge immediately', () => {

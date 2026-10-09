@@ -69,6 +69,103 @@ describe('CLI 渲染退出的真实进程验证', () => {
     expect(result.stdout).not.toContain('\x1b[?1049h');
   });
 
+  it.each(['default', 'no-color', 'no-color-env', 'force-off', 'force-low'])(
+    'uses the full display policy through the real CLI: %s', (preference) => {
+      const app = `
+        import React from 'react';
+        import {Text,Box,useApp} from 'ink';
+        import {pickGlyphs} from './glyphs.js';
+        export function App({controller}) {
+          const {exit}=useApp(); const config=controller.getConfig();
+          React.useEffect(()=>{const t=setTimeout(()=>exit(),100);return()=>clearTimeout(t)},[]);
+          return React.createElement(Box,{borderStyle:pickGlyphs(config).boxStyle},
+            React.createElement(Text,{color:'#123456'},
+              'DISPLAY_PROBE:'+JSON.stringify({unicode:config.unicode,colorLevel:config.colorLevel})));
+        }`;
+      const loader = `export async function load(url,ctx,next){
+        if(url!==${JSON.stringify(pathToFileURL(join(buildDirectory, 'ui/App.js')).href)})return next(url,ctx);
+        return {format:'module',shortCircuit:true,source:${JSON.stringify(app)}};
+      }`;
+      const env: NodeJS.ProcessEnv = {
+        ...process.env, TERM: 'dumb', CI: '1', ARAGON_HOME: commandHome,
+      };
+      for (const key of ['WT_SESSION', 'TERM_PROGRAM', 'LANG', 'LC_ALL', 'LC_CTYPE',
+        'NO_COLOR', 'FORCE_COLOR', 'COLORTERM']) delete env[key];
+      if (preference === 'no-color-env') env.NO_COLOR = '';
+      if (preference === 'force-off') env.FORCE_COLOR = '0';
+      if (preference === 'force-low') env.FORCE_COLOR = '1';
+      const result = spawnSync(process.execPath, ['--import', ttyPreload, '--experimental-loader',
+        `data:text/javascript,${encodeURIComponent(loader)}`, join(buildDirectory, 'cli.js'),
+        ...(preference === 'no-color' ? ['--no-color'] : []), 'config'], {
+        windowsHide: true, encoding: 'utf8', timeout: 10_000, env, cwd: commandHome,
+      });
+      const color = preference === 'default' || preference === 'force-low';
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('DISPLAY_PROBE:');
+      expect(result.stdout).toContain('"unicode":true');
+      expect(result.stdout).toContain(`"colorLevel":${color ? 3 : 0}`);
+      expect(result.stdout).toContain('\u256d');
+      expect(result.stdout.includes('\x1b[38;2;18;52;86m')).toBe(color);
+      if (!color) expect(result.stdout).not.toMatch(/\x1b\[[\d;]*m/);
+      expect(result.stdout).toContain('\x1b[?1049l');
+    }, 15_000,
+  );
+
+  it.each(['render-error', 'immediate-exit', 'live-exit'])(
+    'restores the terminal and records startup health for %s', (mode) => {
+    const failed = mode === 'render-error';
+    const home = join(buildDirectory, `initial-${mode}`);
+    mkdirSync(home);
+    writeFileSync(join(home, 'config.json'), JSON.stringify({ update: { mode: 'off' }, log: { toFile: false } }));
+    const version = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')).version;
+    const statePath = join(home, 'update-state.json');
+    const liveStatePath = join(home, 'live-state.json');
+    writeFileSync(statePath, JSON.stringify({ schema: 1, autoInstalledVersion: version,
+      lastGoodVersion: '0.5.9', bootFailures: 0 }));
+    const app = `
+      import React from 'react';
+      import {useApp} from 'ink';
+      import {readFileSync,writeFileSync} from 'node:fs';
+      export function App() {
+        const {exit}=useApp();
+        React.useLayoutEffect(()=>{
+          if (${mode === 'live-exit'}) {
+            const timer=setTimeout(()=>{
+              writeFileSync(${JSON.stringify(liveStatePath)},readFileSync(${JSON.stringify(statePath)}));
+              exit();
+            },100);
+            return ()=>clearTimeout(timer);
+          }
+          exit();
+        },[]);
+        if (${failed}) throw new Error('INITIAL_RENDER_FAILURE');
+        return null;
+      }`;
+    const loader = `export async function load(url,ctx,next){
+      if(url!==${JSON.stringify(pathToFileURL(join(buildDirectory, 'ui/App.js')).href)})return next(url,ctx);
+      return {format:'module',shortCircuit:true,source:${JSON.stringify(app)}};
+    }`;
+    const result = spawnSync(process.execPath, ['--import', ttyPreload, '--experimental-loader',
+      `data:text/javascript,${encodeURIComponent(loader)}`, join(buildDirectory, 'launcher.js'), 'config'], {
+      windowsHide: true, encoding: 'utf8', timeout: 10_000, cwd: home,
+      env: { ...process.env, TERM: 'dumb', CI: '1', ARAGON_HOME: home },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(failed ? 1 : 0);
+    expect(result.stdout).toContain('\x1b[?1049h');
+    expect(result.stdout).toContain('\x1b[?1049l');
+    if (failed) expect(result.stderr).toContain('INITIAL_RENDER_FAILURE');
+    const state = JSON.parse(readFileSync(statePath, 'utf8'));
+    expect(state.autoInstalledVersion).toBe(failed ? version : '');
+    expect(state.lastGoodVersion).toBe(failed ? '0.5.9' : version);
+    expect(state.bootFailures).toBe(failed ? 1 : 0);
+    if (mode === 'live-exit') {
+      const liveState = JSON.parse(readFileSync(liveStatePath, 'utf8'));
+      expect(liveState.autoInstalledVersion).toBe('');
+      expect(liveState.lastGoodVersion).toBe(version);
+    }
+  }, 15_000);
+
   it('rejects a non-TTY settings screen before entering the alternate screen', () => {
     const result = spawnSync(process.execPath, [join(buildDirectory, 'cli.js'), 'config'], {
       windowsHide: true, encoding: 'utf8', timeout: 10_000,

@@ -7,6 +7,17 @@ were written.
 
 ## Unreleased
 
+### Fixed
+
+- Model context resolution now reads explicit OpenAI-compatible, Anthropic and
+  Google API limits, preserves their provenance, and resolves endpoint-scoped
+  discovery before catalog/alias fallbacks. Unknown limits stay marked as such.
+  Context metadata does not imply known pricing.
+- Google/Anthropic discovery follows bounded pagination under a single 15-second
+  deadline. All three adapters accept cancellation; cancelled or invalidated
+  lookups cannot overwrite current metadata. Clearing one provider's cache leaves
+  other providers' pending discoveries intact.
+
 ### Added
 
 - **Steering 精确接收回执。** `Agent.steer(text, id?)` 兼容原单参数调用，

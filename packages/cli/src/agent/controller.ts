@@ -6,6 +6,8 @@ import type {
   ModelSettingsDraft, ModelSettingsPatch, ModelSettingsSaveResult,
 } from '../config/model-profile-store.js';
 import { randomUUID } from 'node:crypto';
+import { verifyCompactionIdentity, type CompactionIdentity } from '../compaction/memory-identity.js';
+import { COMPACTION_LIMITS } from '../compaction/limits.js';
 /**
  * AgentController — builds the core `Agent`, wires the built-in toolset, and
  * exposes a small run/abort/steer surface plus the pre-flight validation that
@@ -54,6 +56,7 @@ import type { ModelRole } from '../config/model-profiles.js';
 import { resolveModelProfileState } from '../config/model-profile-resolution.js';
 import { makeGetApiKey } from '../config/load.js';
 import { updatePersistedConfig } from '../config/store.js';
+import { ModelWindows } from '../config/model-windows.js';
 import { createBuiltinTools, type ConfirmRequest } from '../tools/index.js';
 // `import type` ONLY — see the same note in `tools/index.ts`.
 import type { ToolPermission } from '../exec/permission.js';
@@ -185,6 +188,13 @@ export interface ControllerDeps {
    * once at construction and lost at the first `rebuildSystemPrompt()`.
    */
   appendSystemPrompt?: string;
+  /**
+   * The per-model window table from ~/.aragon-agent/model-windows.json.
+   * Injectable so tests can hand the controller a table without writing into
+   * the shared vitest home root (app-paths.ts TEST-ISOLATION CONTRACT);
+   * production leaves it absent and the constructor builds the real one.
+   */
+  modelWindows?: ModelWindows;
 }
 
 /** What `setAgentMode` actually adopted — see `AgentController.setAgentMode`. */
@@ -210,6 +220,12 @@ export class AgentController {
   private readonly agent: Agent;
   private readonly providerRegistry: ProviderRegistry;
   private readonly modelRegistry: ModelRegistry;
+  /** Per-model user-declared context windows; see `config/model-windows.ts`. */
+  private readonly modelWindows: ModelWindows;
+  private modelMetadataEnabled = false;
+  private modelMetadataGeneration = 0;
+  private modelMetadataAbort = new AbortController();
+  private disposed = false;
   private readonly tools: AgentTool[];
   private readonly skills: SkillService;
   private readonly skillsEnabled: boolean;
@@ -373,6 +389,10 @@ export class AgentController {
   // -----------------------------------------------------------------------
 
   private settingsRevision = 0;
+  private requestVersion = 0;
+  private idleCompaction: AbortController | undefined;
+  private restoredCompactionIdentity: CompactionIdentity | undefined;
+  private readonly compactionBusyListeners = new Set<(busy: boolean) => void>();
   private modelSettingsBlocked = false;
   private preparedSystemPrompt: string | undefined;
   private readonly contextMeter: ContextMeter;
@@ -427,7 +447,7 @@ export class AgentController {
    */
   private abortRequested = false;
   /** Only exact acceptance receipts release user messages from reviewer protection. */
-  private readonly pendingUserSteering = new Set<string>();
+  private readonly pendingUserSteering = new Map<string, string>();
   /** Session changes must not make a delayed receipt match a new message. */
   private readonly steeringPrefix = randomUUID();
   private steeringSequence = 0;
@@ -443,6 +463,7 @@ export class AgentController {
     // reuses this very registry instance.
     this.providerRegistry = initProviders({ retryPolicy: toRetryPolicy(config.retry) });
     this.modelRegistry = new ModelRegistry(this.providerRegistry);
+    this.modelWindows = deps.modelWindows ?? new ModelWindows();
     this.skillsEnabled = config.skills.enabled;
     this.onSkillsChanged = deps.onSkillsChanged;
 
@@ -715,18 +736,12 @@ export class AgentController {
     // EVERY session, including one with compaction off, because that is the one
     // whose gauge was broken (P1-4 / P0-2).
     this.contextMeter = new ContextMeter({
+      getRequestVersion: () => this.requestVersion,
       getMessages: () => this.agent.state.messages,
       getSystemPrompt: () => this.agent.state.systemPrompt,
       getModelInfo: () => this.getModelInfo(),
-      // ONE PREDICATE FOR "IS THE DENOMINATOR REAL". `isPricedModel` is
-      // `modelRegistry.getModel(...) !== undefined`, and `getModelInfoFor` falls
-      // back to `buildRuntimeModel` - a 128k placeholder AND a zero cost table -
-      // for exactly the models it answers `false` for. The two are the same
-      // question about the same static table, not a coincidence.
-      isWindowKnown: () => this.isPricedModel({
-        providerId: this.config.provider,
-        modelId: this.config.model,
-      }),
+      // Context discovery does not imply that the model's price is known.
+      isWindowKnown: () => this.getModelInfo().contextWindowSource !== 'fallback',
       // LIVE, so a settings-screen edit moves the denominator without a relaunch.
       getWindowOverride: () => this.config.contextWindow,
     });
@@ -972,7 +987,9 @@ export class AgentController {
   }
 
   private rebuildSystemPrompt(): void {
-    this.agent.setSystemPrompt(this.preparedSystemPrompt ?? this.composeSystemPrompt());
+    const prompt = this.preparedSystemPrompt ?? this.composeSystemPrompt();
+    if (prompt !== this.agent.state.systemPrompt) this.idleCompaction?.abort();
+    this.agent.setSystemPrompt(prompt);
   }
 
   /** Re-render the prompt from the current skill set and tell the UI. */
@@ -1008,7 +1025,7 @@ export class AgentController {
    * re-memoizes the palette (P1-1). Does not touch `@aragon-agent/core`.
    */
   setTheme(name: ThemeName): void {
-    this.settingsRevision += 1;
+    this.advanceSettingsRevision();
     this.config = { ...this.config, theme: name };
   }
 
@@ -1073,10 +1090,12 @@ export class AgentController {
    * never rejects, so callers must not treat resolution as success.
    */
   async prompt(text: string, options: PromptOptions = {}): Promise<PromptOutcome> {
+    if (this.isCompactionBusy()) return this.compactionBusyOutcome();
     // Capture BEFORE stopping: synchronous abort listeners may cancel this request.
     if (this.modelSettingsBlocked) {
       return { status: 'not-started', reason: 'failed' };
     }
+    if (this.modelMetadataEnabled) void this.refreshModelMetadata();
     const request = ++this.startupSequence;
     try {
       if (this.agent.state.isRunning) {
@@ -1087,6 +1106,7 @@ export class AgentController {
         return { status: 'not-started', reason: 'cancelled' };
       }
       if (this.agent.state.isRunning) throw new Error('The previous run is still stopping.');
+      if (this.isCompactionBusy()) return this.compactionBusyOutcome();
       return await this.startPrompt(text, options, request);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
@@ -1124,9 +1144,7 @@ export class AgentController {
   private async startPrompt(
     text: string, options: PromptOptions, request: number,
   ): Promise<PromptOutcome> {
-    if (this.skillsEnabled) this.skills.beginUserTurn();
-    this.askRounds = 0;
-    this.fast?.setGoal(text);
+    this.prepareUserTurn(text);
     if (request !== this.startupSequence) {
       return { status: 'not-started', reason: 'cancelled' };
     }
@@ -1135,9 +1153,16 @@ export class AgentController {
     return { status: 'finished' };
   }
 
+  private prepareUserTurn(text: string): void {
+    if (this.skillsEnabled) this.skills.beginUserTurn();
+    this.askRounds = 0;
+    this.fast?.setGoal(text);
+  }
+
   /** Cancel pending startup as well as any engine run already in progress. */
   abort(): void {
     this.startupSequence += 1;
+    this.idleCompaction?.abort();
     this.stopEngine();
   }
 
@@ -1298,9 +1323,9 @@ export class AgentController {
 
   private enqueueSteering(text: string, user: boolean): string | undefined {
     // Both reviewer and user guidance can activate queued skill frames.
-    if (this.skillsEnabled) this.skills.absorbPendingFrames();
+    if (this.skillsEnabled && this.isRunning()) this.skills.absorbPendingFrames();
     const id = user ? `${this.steeringPrefix}:${++this.steeringSequence}` : undefined;
-    if (id !== undefined) this.pendingUserSteering.add(id);
+    if (id !== undefined) this.pendingUserSteering.set(id, text);
     try {
       this.agent.steer(text, id);
     } catch (error) {
@@ -1312,6 +1337,32 @@ export class AgentController {
 
   followUp(text: string): void {
     this.agent.followUp(text);
+  }
+
+  /** Resume queued input without appending a duplicate user message. */
+  async continue(): Promise<PromptOutcome> {
+    if (this.isCompactionBusy()) return this.compactionBusyOutcome();
+    if (this.modelSettingsBlocked || this.isRunning()) {
+      return { status: 'not-started', reason: 'failed' };
+    }
+    if (this.pendingUserSteering.size > 0) {
+      const request = ++this.startupSequence;
+      this.prepareUserTurn([...this.pendingUserSteering.values()].join('\n\n'));
+      if (request !== this.startupSequence) {
+        return { status: 'not-started', reason: 'cancelled' };
+      }
+      this.todos?.beginUserTurn('new-task');
+    }
+    await this.agent.continue();
+    return { status: 'finished' };
+  }
+
+  /** Pending user receipts survive until Core accepts or the host clears them. */
+  hasPendingUserMessages(): boolean { return this.pendingUserSteering.size > 0; }
+
+  private compactionBusyOutcome(): PromptOutcome {
+    this.notifyHostFn?.('warn', 'Context compaction is busy; your input was not submitted.');
+    return { status: 'not-started', reason: 'failed' };
   }
 
   isRunning(): boolean {
@@ -1453,7 +1504,7 @@ export class AgentController {
    * honestly by checking `isTeamRegistered()` first.
    */
   setTeamEnabled(enabled: boolean): void {
-    this.settingsRevision += 1;
+    this.advanceSettingsRevision();
     this.teamEnabled = enabled;
     this.rebuildSystemPrompt();
   }
@@ -1469,7 +1520,7 @@ export class AgentController {
    */
   setTeamConfig(patch: Partial<TeamConfig>): TeamConfig {
     const team = clampTeamConfig({ ...this.config.team, ...patch });
-    this.settingsRevision += 1;
+    this.advanceSettingsRevision();
     this.config = { ...this.config, team };
     this.rebuildSystemPrompt();
     return team;
@@ -1498,6 +1549,10 @@ export class AgentController {
 
   /** Abort every child and clear timers. Idempotent; safe to call twice. */
   dispose(): void {
+    this.idleCompaction?.abort();
+    this.disposed = true;
+    this.modelMetadataGeneration += 1;
+    this.modelMetadataAbort.abort();
     this.teamRuntime?.dispose();
     this.fast?.dispose();
     this.compaction?.dispose();
@@ -1538,7 +1593,7 @@ export class AgentController {
    * reports that honestly by checking `isTodoRegistered()` first.
    */
   setTodoEnabled(enabled: boolean): void {
-    this.settingsRevision += 1;
+    this.advanceSettingsRevision();
     this.todoEnabled = enabled;
     this.rebuildSystemPrompt();
   }
@@ -1563,7 +1618,7 @@ export class AgentController {
    */
   setTodoConfig(patch: Partial<TodoConfig>): TodoConfig {
     const todo = clampTodoConfig({ ...this.config.todo, ...patch });
-    this.settingsRevision += 1;
+    this.advanceSettingsRevision();
     this.config = { ...this.config, todo };
     this.rebuildSystemPrompt();
     return todo;
@@ -1625,7 +1680,7 @@ export class AgentController {
    */
   setRetryConfig(patch: Partial<RetryConfig>): RetryConfig {
     const retry = clampRetryConfig({ ...this.config.retry, ...patch });
-    this.settingsRevision += 1;
+    this.advanceSettingsRevision();
     this.config = { ...this.config, retry };
     this.providerRegistry.setRetryPolicy(toRetryPolicy(retry));
     return retry;
@@ -1637,12 +1692,18 @@ export class AgentController {
 
   /** True while any request can still use a model or credential snapshot. */
   isModelSettingsBusy(): boolean {
-    return this.isRunning() || this.isTeamBusy() || this.getCompactionSnapshot().inFlight
+    return this.isRunning() || this.isTeamBusy() || this.isCompactionBusy()
+      || this.getCompactionSnapshot().inFlight
       || this.getFastStatus().snapshot.inFlight;
   }
 
   /** Monotonic revision protects an editor from all intervening settings changes. */
   getSettingsRevision(): number { return this.settingsRevision; }
+
+  private advanceSettingsRevision(): void {
+    this.settingsRevision += 1;
+    this.idleCompaction?.abort();
+  }
 
   /** Read-only draft creation; no startup migration or credential copying. */
   createModelSettingsDraft(): ModelSettingsDraft {
@@ -1674,20 +1735,33 @@ export class AgentController {
 
   /** Apply prepared state synchronously, without rebuilding the controller or its history. */
   applyModelSettingsSnapshot(snapshot: ModelSettingsSnapshot): void {
+    const connectionChanged = this.config.provider !== snapshot.config.provider
+      || this.config.model !== snapshot.config.model || this.config.baseUrl !== snapshot.config.baseUrl;
+    this.idleCompaction?.abort();
     this.preparedSystemPrompt = snapshot.systemPrompt;
     try {
       this.config = snapshot.config;
-      this.settingsRevision += 1;
+      this.advanceSettingsRevision();
       this.agent.setModel(snapshot.model);
       this.agent.setThinkingLevel(snapshot.config.thinkingLevel);
       this.agent.setMaxTokens(snapshot.config.maxTokens);
+      // Credentials may change even when endpoint/model do not. Invalidate
+      // before publishing a window, including when the new profile has no key.
+      if (this.modelMetadataEnabled) {
+        this.resetModelMetadataRequest();
+        this.modelRegistry.clearCache();
+      }
       this.fast?.onConfigChanged(false, snapshot.config.fast.enabled);
       this.compaction?.onConfigChanged(snapshot.config.compaction.enabled);
-      this.contextMeter.onWindowChanged();
+      if (connectionChanged) {
+        this.requestVersion += 1;
+        this.contextMeter.onHistoryReplaced();
+      } else this.contextMeter.onWindowChanged();
       this.rebuildSystemPrompt();
     } finally {
       this.preparedSystemPrompt = undefined;
     }
+    if (this.modelMetadataEnabled) void this.refreshModelMetadata();
   }
 
   /** Potentially failing ordinary-setting side effects are isolated from model application. */
@@ -1697,6 +1771,7 @@ export class AgentController {
   blockModelSettingsRequests(): void {
     this.modelSettingsBlocked = true;
     this.config.modelSettingsRestartRequired = true;
+    this.resetModelMetadataRequest();
   }
 
   /** The UI uses this before accepting or draining queued prompts. */
@@ -1704,7 +1779,10 @@ export class AgentController {
 
   setModel(provider: string, model: string, baseUrl?: string): void {
     if (this.isModelSettingsBusy()) throw new Error('Model settings are busy.');
-    this.settingsRevision += 1;
+    const connectionChanged = this.config.provider !== provider || this.config.model !== model
+      || this.config.baseUrl !== baseUrl;
+    if (this.modelMetadataEnabled) this.resetModelMetadataRequest();
+    this.advanceSettingsRevision();
     this.config = { ...this.config, provider, model, baseUrl };
     this.config.modelProfileState = resolveModelProfileState(this.config);
     this.agent.setModel({ providerId: provider, modelId: model, ...(baseUrl ? { baseUrl } : {}) });
@@ -1719,23 +1797,21 @@ export class AgentController {
     // so the snapshot the chip and `/compact status` read has to be refreshed
     // for the same reason and at the same moments (the RV-3 lesson).
     this.compaction?.onConfigChanged();
-    // THE DENOMINATOR MOVED, NOT THE HISTORY (context-usage-gauge-accuracy §3.4).
-    // A re-measure, deliberately NOT a reset: the measured base is still a true
-    // statement about the messages, and throwing it away would swap a correct
-    // numerator for a whole-history estimate on a common operation. The
-    // numerator's calibration is one turn stale until the next `turn_end`
-    // (RV-13), which is the trade this call names.
-    this.contextMeter.onWindowChanged();
+    if (connectionChanged) {
+      this.requestVersion += 1;
+      this.contextMeter.onHistoryReplaced();
+    } else this.contextMeter.onWindowChanged();
+    if (this.modelMetadataEnabled) void this.refreshModelMetadata();
   }
 
   setThinkingLevel(level: ThinkingLevel): void {
-    this.settingsRevision += 1;
+    this.advanceSettingsRevision();
     this.config = { ...this.config, thinkingLevel: level };
     this.agent.setThinkingLevel(level);
   }
 
   setMaxTokens(value: number | undefined): void {
-    this.settingsRevision += 1;
+    this.advanceSettingsRevision();
     this.config = { ...this.config, maxTokens: value };
     this.agent.setMaxTokens(value);
   }
@@ -1743,11 +1819,17 @@ export class AgentController {
   setApiKey(provider: string, key: string): void {
     // The Agent resolves keys via `resolveKey(this.config)` at call time, so
     // updating the config here is sufficient — no Agent rebuild needed.
-    this.settingsRevision += 1;
+    this.advanceSettingsRevision();
     this.config = {
       ...this.config,
       apiKeys: { ...this.config.apiKeys, [provider]: key },
     };
+    if (this.modelMetadataEnabled) {
+      this.resetModelMetadataRequest();
+      this.modelRegistry.clearCache(provider);
+      this.contextMeter.onWindowChanged();
+      void this.refreshModelMetadata();
+    }
     // Rule 5 of §3.2 reads `apiKeys`, so a key edit is a tier event: this is the
     // path that turns `no_key` back into a working tier without a relaunch.
     this.fast?.onConfigChanged();
@@ -1759,7 +1841,7 @@ export class AgentController {
 
   setCwd(cwd: string): void {
     this.cwd = cwd;
-    this.settingsRevision += 1;
+    this.advanceSettingsRevision();
     this.config = { ...this.config, cwd };
     // The project scope moved with the cwd, so rescan BEFORE rebuilding — then
     // let the single prompt entry point emit a prompt that reflects both the new
@@ -1829,6 +1911,8 @@ export class AgentController {
   }
 
   clearMessages(): void {
+    this.idleCompaction?.abort();
+    this.restoredCompactionIdentity = undefined;
     this.agent.clearMessages();
     this.startupSequence += 1;
     // INVALIDATION SITE 3 (context-auto-compaction-hardening §3.2.3). The history
@@ -1858,7 +1942,9 @@ export class AgentController {
     return this.agent.state.systemPrompt;
   }
 
-  replaceMessages(messages: Message[]): void {
+  replaceMessages(messages: Message[], identity?: CompactionIdentity): void {
+    this.idleCompaction?.abort();
+    this.restoredCompactionIdentity = identity;
     this.agent.replaceMessages(messages);
     this.startupSequence += 1;
     // INVALIDATION SITE 4 (§3.2.3) - `/resume`, and any future host-side rewrite.
@@ -1871,12 +1957,28 @@ export class AgentController {
     // reading stood until the next completed turn. The DEEP reset also drops
     // `estimateOffset`, because `/resume` can change the model in the same
     // breath (I-8).
-    this.compaction?.onHistoryReplaced();
+    this.compaction?.onHistoryReplaced(identity);
     this.contextMeter.onHistoryReplaced();
   }
 
   getMessages(): Message[] {
     return this.agent.state.messages as Message[];
+  }
+
+  /** Atomically capture adopted history and its host credential for serialization. */
+  getSessionSnapshot(): { messages: Message[]; compactionIdentity?: CompactionIdentity } {
+    const messages = this.getMessages();
+    const identity = this.compaction ? this.compaction.getIdentity() : this.restoredCompactionIdentity;
+    if (identity && !verifyCompactionIdentity(messages, identity)) {
+      getLogger().debug('agent', 'invalid_compaction_session_identity');
+    }
+    // Retain invalid evidence so damaged host memory cannot become ordinary text.
+    return { messages, ...(identity ? { compactionIdentity: { ...identity } } : {}) };
+  }
+
+  /** Compatibility name for the documented compaction session boundary. */
+  getCompactionSessionState(): ReturnType<AgentController['getSessionSnapshot']> {
+    return this.getSessionSnapshot();
   }
 
   clearAllQueues(): void {
@@ -1916,10 +2018,47 @@ export class AgentController {
    * cost table for the model that actually billed" cannot drift from "the cost
    * table for the session's model" as two separate bodies.
    */
-  getModelInfoFor(ref: Pick<ModelRef, 'providerId' | 'modelId'>): ModelInfo {
+  getModelInfoFor(ref: Pick<ModelRef, 'providerId' | 'modelId' | 'baseUrl'>): ModelInfo {
     const found = this.modelRegistry.getModel(ref.providerId, ref.modelId);
-    if (found) return found;
-    return this.modelRegistry.buildRuntimeModel(ref.providerId, ref.modelId);
+    const baseUrl = ref.baseUrl ?? (ref.providerId === this.config.provider && ref.modelId === this.config.model
+      ? this.config.baseUrl : undefined);
+    const userWindow = this.modelWindows.lookup(ref.modelId);
+    return {
+      ...(found ?? this.modelRegistry.buildRuntimeModel(ref.providerId, ref.modelId)),
+      ...this.modelRegistry.getContextWindow(ref.providerId, ref.modelId, baseUrl),
+      // A USER-DECLARED WINDOW OUTRANKS EVERY TABLE (model-windows.json): the
+      // user asserted the number for exactly this id, while api/catalog are
+      // what this process managed to look up about it. It still LOSES to
+      // config.json's `contextWindow`, which `ContextMeter.resolveWindow`
+      // consults before it ever reaches here.
+      ...(userWindow !== undefined
+        ? { contextWindow: userWindow, contextWindowSource: 'user' as const }
+        : {}),
+    };
+  }
+
+  /** Best-effort metadata lookup; never block typing or a model request. */
+  async refreshModelMetadata(): Promise<void> {
+    if (this.disposed || this.modelSettingsBlocked) return;
+    this.modelMetadataEnabled = true;
+    const generation = ++this.modelMetadataGeneration;
+    const { provider, baseUrl } = this.config;
+    try {
+      const key = this.resolveKey(provider);
+      if (!key) return;
+      await this.modelRegistry.discoverModels(provider, key, baseUrl, this.modelMetadataAbort.signal);
+      if (this.disposed || generation !== this.modelMetadataGeneration) return;
+      this.contextMeter.onWindowChanged();
+    } catch {
+      // Offline or unsupported discovery leaves catalog/unknown metadata intact.
+    }
+  }
+
+  /** Invalidate an old connection without restarting a lookup on every prompt. */
+  private resetModelMetadataRequest(): void {
+    this.modelMetadataGeneration += 1;
+    this.modelMetadataAbort.abort();
+    this.modelMetadataAbort = new AbortController();
   }
 
   /**
@@ -1959,7 +2098,7 @@ export class AgentController {
    * `/fast` reports that honestly by checking `isFastRegistered()` first.
    */
   setFastEnabled(enabled: boolean): void {
-    this.settingsRevision += 1;
+    this.advanceSettingsRevision();
     this.fast?.setEnabled(enabled);
   }
 
@@ -1977,7 +2116,7 @@ export class AgentController {
    */
   setFastConfig(patch: Partial<FastConfig>): FastConfig {
     const fast = clampFastConfig({ ...this.config.fast, ...patch });
-    this.settingsRevision += 1;
+    this.advanceSettingsRevision();
     this.config = { ...this.config, fast };
     // `onConfigChanged` rebuilds the prompt; when there is no wiring (the tier
     // was never registered) nothing has to be rebuilt, because no block is
@@ -2087,7 +2226,7 @@ export class AgentController {
    * on purpose (§3.2).
    */
   setCompactionEnabled(enabled: boolean): void {
-    this.settingsRevision += 1;
+    this.advanceSettingsRevision();
     this.compaction?.setEnabled(enabled);
   }
 
@@ -2104,7 +2243,7 @@ export class AgentController {
    */
   setCompactionConfig(patch: Partial<CompactionConfig>): CompactionConfig {
     const compaction = clampCompactionConfig({ ...this.config.compaction, ...patch });
-    this.settingsRevision += 1;
+    this.advanceSettingsRevision();
     this.config = { ...this.config, compaction };
     this.compaction?.onConfigChanged();
     return compaction;
@@ -2160,17 +2299,75 @@ export class AgentController {
   async compactNow(instructions?: string): Promise<{ ok: boolean; reason?: string }> {
     if (this.modelSettingsBlocked) return { ok: false, reason: 'settings_restart_required' };
     if (!this.compaction) return { ok: false, reason: 'not_registered' };
+    if (this.isCompactionBusy() || this.isRunning()) return { ok: false, reason: 'busy' };
     const controller = new AbortController();
-    const outcome = await this.compaction.compactNow({
-      messages: this.agent.state.messages,
-      systemPrompt: this.agent.state.systemPrompt,
-      model: this.agent.state.model,
-      signal: controller.signal,
-      ...(instructions ? { instructions } : {}),
+    const epoch = this.startupSequence;
+    const settings = this.settingsRevision;
+    let adopted = false;
+    let timedOut = false;
+    const isCurrent = () => this.idleCompaction === controller && !controller.signal.aborted
+      && epoch === this.startupSequence && settings === this.settingsRevision
+      && !this.isRunning() && !this.disposed;
+    this.idleCompaction = controller;
+    this.publishCompactionBusy(true);
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, COMPACTION_LIMITS.operationTimeoutMs);
+    deadline.unref?.();
+    try {
+      // The wiring races cancellation locally and settles before releasing ownership.
+      const outcome = await this.compaction.compactNow({
+        messages: this.agent.state.messages,
+        systemPrompt: this.agent.state.systemPrompt,
+        model: this.agent.state.model,
+        signal: controller.signal,
+        ...(instructions ? { instructions } : {}),
+        isCurrent,
+        adopt: (messages) => {
+          if (!isCurrent()) throw new Error('stale_history');
+          this.agent.replaceMessages(messages);
+          adopted = true;
+        },
+      });
+      return outcome.ok || adopted ? { ok: true }
+        : { ok: false, reason: timedOut ? 'timeout' : outcome.reason };
+    } finally {
+      clearTimeout(deadline);
+      if (this.idleCompaction === controller) {
+        this.idleCompaction = undefined;
+        this.publishCompactionBusy(false);
+      }
+    }
+  }
+
+  /** Local prepare/adopt ownership, available before any network-start event. */
+  isCompactionBusy(): boolean { return this.idleCompaction !== undefined; }
+
+  /** Cancel local compaction and await ownership release before a conversation switch. */
+  cancelCompaction(): Promise<void> {
+    if (!this.idleCompaction) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const unsubscribe = this.subscribeCompactionBusy((busy) => {
+        if (busy) return;
+        unsubscribe();
+        resolve();
+      });
+      this.abort();
     });
-    if (!outcome.ok) return { ok: false, reason: outcome.reason };
-    this.agent.replaceMessages(outcome.messages);
-    return { ok: true };
+  }
+
+  /** Subscribe to synchronous ownership transitions; observers cannot break adoption. */
+  subscribeCompactionBusy(listener: (busy: boolean) => void): () => void {
+    this.compactionBusyListeners.add(listener);
+    return () => { this.compactionBusyListeners.delete(listener); };
+  }
+
+  private publishCompactionBusy(busy: boolean): void {
+    for (const listener of this.compactionBusyListeners) {
+      try { listener(busy); }
+      catch { getLogger().debug('agent', 'compaction_busy_listener_threw'); }
+    }
   }
 
   /**

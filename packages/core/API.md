@@ -38,7 +38,7 @@
 | `AnthropicProvider` | class | `.` | Built-in Anthropic provider adapter. |
 | `OpenAIProvider` | class | `.` | Built-in OpenAI provider adapter. |
 | `GoogleProvider` | class | `.` | Built-in Google provider adapter. |
-| `ModelRegistry` | class | `.` | In-memory registry of `ModelInfo` metadata. |
+| `ModelRegistry` | class | `.` | In-memory registry of `ModelInfo` metadata. `getContextWindow(providerId, modelId, baseUrl?)` resolves cached API limits, catalog IDs/aliases, then an explicitly marked 128k fallback. `ModelInfo.contextWindowSource?` distinguishes `api`, `catalog`, `fallback`, and `user` (the last set only by a host layer from user configuration; Core never produces it). `discoverModels(providerId, apiKey, baseUrl?, signal?)` supports cancellation; provider `listModels(apiKey, baseUrl?, signal?)` implementations receive the same optional signal. |
 | `getModelRegistry` | fn | `.` | Get the global singleton model registry. |
 | `setModelRegistry` | fn | `.` | Replace the global singleton model registry. |
 | `DEFAULT_MAX_OUTPUT_TOKENS` | const | `.` | `64000` — the product default output cap. THE single source of truth. |

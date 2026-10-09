@@ -12,6 +12,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { reportedContextWindow } from '../context-window.js';
+import { createModelDiscoverySignal } from '../model-discovery.js';
 
 import type {
   AssistantMessage,
@@ -239,20 +241,35 @@ export class GoogleProvider implements LLMProvider {
   // listModels
   // -----------------------------------------------------------------------
 
-  async listModels(apiKey: string, baseUrl?: string): Promise<ModelInfo[]> {
+  async listModels(apiKey: string, baseUrl?: string, signal?: AbortSignal): Promise<ModelInfo[]> {
     const base = (baseUrl || this.defaultBaseUrl).replace(/\/+$/, '');
     const url = `${base}/v1beta/models?key=${encodeURIComponent(apiKey)}`;
+    const scope = createModelDiscoverySignal(signal);
 
     try {
-      const res = await fetch(url, {
-        method: 'GET',
-        signal: AbortSignal.timeout(15_000),
-      });
-
-      if (!res.ok) return [];
-
-      const data = await res.json() as { models?: Array<Record<string, unknown>> };
-      return (data.models || [])
+      const models: Array<Record<string, unknown>> = [];
+      const seen = new Set<string>();
+      let cursor: string | undefined;
+      for (let page = 0; page < 20 && !scope.signal.aborted; page++) {
+        try {
+          const pageUrl = cursor === undefined ? url : `${url}&pageToken=${encodeURIComponent(cursor)}`;
+          const res = await fetch(pageUrl, { method: 'GET', signal: scope.signal });
+          if (!res.ok) break;
+          const data = await res.json() as { models?: Array<Record<string, unknown>>; nextPageToken?: unknown };
+          if (!Array.isArray(data.models)) break;
+          models.push(...data.models);
+          const next = data.nextPageToken;
+          if (typeof next !== 'string' || next.length === 0 || seen.has(next)) break;
+          seen.add(next);
+          cursor = next;
+        } catch {
+          break; // Preserve metadata from earlier pages when continuation fails.
+        }
+      }
+      // Explicit session cancellation must not publish partial results or learn ceilings.
+      // The internal timeout still permits useful metadata from completed pages.
+      if (signal?.aborted) return [];
+      return models
         .filter((m) => {
           const methods = (m.supportedGenerationMethods || []) as string[];
           return methods.includes('generateContent') || methods.includes('streamGenerateContent');
@@ -270,7 +287,7 @@ export class GoogleProvider implements LLMProvider {
             id,
             name: String(m.displayName || id),
             provider: this.id,
-            contextWindow: (m.inputTokenLimit as number) || 128_000,
+            ...reportedContextWindow(m),
             maxOutputTokens: reported || DEFAULT_MAX_OUTPUT_TOKENS,
             supportsThinking: false,
             supportsTools: true,
@@ -280,6 +297,8 @@ export class GoogleProvider implements LLMProvider {
         });
     } catch {
       return [];
+    } finally {
+      scope.dispose();
     }
   }
 }

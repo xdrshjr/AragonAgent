@@ -95,6 +95,60 @@ function harness(opts: HarnessOpts = {}) {
 
 const USAGE: TokenUsage = { inputTokens: 100_000, outputTokens: 500 };
 
+describe('history-bound measurements', () => {
+  it('refreshes metadata without a timer and deeply invalidates request versions', () => {
+    let model: ModelInfo = { ...MODEL, contextWindowSource: 'catalog' };
+    let version = 0;
+    const messages = [user('task')];
+    const meter = new ContextMeter({ getMessages: () => messages,
+      getSystemPrompt: () => 'sys', getModelInfo: () => model,
+      isWindowKnown: () => true, getWindowOverride: () => null,
+      getRequestVersion: () => version });
+    meter.onTurnEnd(USAGE);
+    model = { ...model, contextWindow: 150000, contextWindowSource: 'api' };
+    expect(meter.current()).toMatchObject({ occupied: 100500, source: 'usage',
+      contextWindow: 150000, windowSource: 'api' });
+    version += 1;
+    expect(meter.current().source).toBe('estimate');
+    expect(meter.current().estimateOffset).toBeUndefined();
+  });
+  it('invalidates calibration after a splice when the prompt changes', () => {
+    const messages = [user('task')];
+    let prompt = 'old';
+    const meter = new ContextMeter({ getMessages: () => messages,
+      getSystemPrompt: () => prompt, getModelInfo: () => MODEL,
+      isWindowKnown: () => true, getWindowOverride: () => null });
+    meter.onTurnEnd(USAGE);
+    meter.onHistorySpliced();
+    expect(meter.current().estimateOffset).toBeGreaterThan(0);
+    prompt = 'new request instructions';
+    expect(meter.current().estimateOffset).toBeUndefined();
+    expect(meter.current().occupied).toBeLessThan(1000);
+  });
+  it('keeps a valid sample when a new run has no usage', () => {
+    const h = harness({ messages: [user('task')] });
+    h.meter.onTurnEnd(USAGE);
+    expect(h.meter.measureWith(undefined).occupied).toBe(100_500);
+  });
+
+  it('rejects equal-length replacement and cannot revive spliced usage', () => {
+    const h = harness({ messages: [user('old')] });
+    h.meter.onTurnEnd(USAGE);
+    h.setMessages([user('new')]);
+    expect(h.meter.current().source).toBe('estimate');
+    h.meter.onHistorySpliced();
+    expect(h.meter.measureWith(USAGE).source).toBe('estimate');
+  });
+
+  it('sees appended messages before a timer or notification', () => {
+    const messages = [user('task')];
+    const h = harness({ messages });
+    h.meter.onTurnEnd(USAGE);
+    h.setMessages(afterTurn(messages, user('x'.repeat(10_000))));
+    expect(h.meter.current().occupied).toBeGreaterThan(100_500);
+  });
+});
+
 describe('T1 - the fully measured moment', () => {
   it('turn_end yields source `usage` and a zero delta', () => {
     // `turn_end` is emitted BEFORE the assistant message is pushed, so the
@@ -258,17 +312,17 @@ describe('T4 - dirty tracking', () => {
       getWindowOverride: () => null,
     });
     const first = meter.current();
-    expect(systemPromptReads).toBe(1);
+    expect(systemPromptReads).toBe(3);
 
     // Clean: the cache is served, byte for byte the same object.
     expect(meter.current()).toBe(first);
-    expect(systemPromptReads).toBe(1);
+    expect(systemPromptReads).toBe(4);
 
     // Dirty: measured again. `scheduleTick` with no subscribers arms no timer
     // (I-11) but still marks dirty, which is exactly the state under test.
     meter.scheduleTick();
     expect(meter.current()).not.toBe(first);
-    expect(systemPromptReads).toBe(2);
+    expect(systemPromptReads).toBe(7);
   });
 
   it('lastPublished NEVER re-measures - it is the accounting read (I-10)', () => {
@@ -403,5 +457,27 @@ describe('toContextUsage', () => {
       windowKnown: true,
       windowOverridden: false,
     });
+  });
+});
+
+
+describe('stable gate cost', () => {
+  it('checks references without traversing a thousand-message history', () => {
+    let reads = 0;
+    const messages = Array.from({ length: 1000 }, () => new Proxy(user('x'.repeat(200)), {
+      get(target, key, receiver) { reads += 1; return Reflect.get(target, key, receiver); },
+    }));
+    const h = harness({ messages });
+    h.meter.current();
+    reads = 0;
+    const samples: number[] = [];
+    for (let i = 0; i < 100; i += 1) {
+      const start = performance.now();
+      h.meter.current();
+      samples.push(performance.now() - start);
+    }
+    expect(reads).toBe(0);
+    samples.sort((a, b) => a - b);
+    console.log(`stable gate: messages=1000, chars=200000, samples=100, P95=${samples[94]}ms`);
   });
 });

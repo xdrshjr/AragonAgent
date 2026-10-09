@@ -751,14 +751,14 @@ describe('App (wheel routing end to end)', () => {
     const { lastFrame, unmount } = mountApp(mouse.source);
     await delay(60);
     const before = stripAnsi(lastFrame() ?? '');
-    expect(before).toContain('\u8f93\u5165\u4efb\u52a1\u6216\u95ee\u9898');
+    expect(before).toContain('Ask a question or describe a task...');
 
     mouse.wheel('up', TRANSCRIPT_ROW);
     mouse.wheel('up', TRANSCRIPT_ROW);
     await delay(80);
 
     const after = stripAnsi(lastFrame() ?? '');
-    expect(after).toContain('\u8f93\u5165\u4efb\u52a1\u6216\u95ee\u9898'); // placeholder, i.e. empty buffer
+    expect(after).toContain('Ask a question or describe a task...'); // placeholder, i.e. empty buffer
     expect(after).not.toContain('newest prompt');
     expect(after).not.toContain('[<'); // I-1, belt and braces
     unmount();
@@ -778,7 +778,7 @@ describe('App (wheel routing end to end)', () => {
     mouse.wheel('up', COMPOSER_ROW);
     await delay(80);
     const afterWheel = stripAnsi(lastFrame() ?? '');
-    expect(afterWheel).toContain('\u8f93\u5165\u4efb\u52a1\u6216\u95ee\u9898'); // placeholder, i.e. empty buffer
+    expect(afterWheel).toContain('Ask a question or describe a task...'); // placeholder, i.e. empty buffer
     expect(afterWheel).not.toContain('newest prompt');
     expect(afterWheel).not.toContain('older prompt');
     expect(afterWheel).not.toContain('[<'); // no escape bytes typed into the draft

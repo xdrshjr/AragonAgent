@@ -14,6 +14,8 @@ export interface ScrollViewportProps {
   intent?: { kind: ScrollIntent; nonce: number; repeat?: number };
   pinToBottomNonce?: number;
   resetKey?: unknown;
+  geometryKey?: string;
+  onGeometryChange?: () => void;
   onScrolledLinesChange?: (lines: number) => void;
   onViewportShiftChange?: (shift: number) => void;
   tailRowsRef?: TailSink;
@@ -64,7 +66,7 @@ function elementVisible(element: DOMElement | null, clip: DOMElement | null): bo
     top + measureElement(element).height <= measureElement(clip).height;
 }
 
-/** One offset for messages, padding and editor; hidden trees keep their local state. */
+/** One offset for messages, padding and panels; hidden trees keep their local state. */
 export function ScrollViewport(props: ScrollViewportProps): React.ReactElement {
   const { stdout } = useStdout();
   const { active = true, hold = false, resumeMs = 0, scrollbar } = props;
@@ -93,6 +95,7 @@ export function ScrollViewport(props: ScrollViewportProps): React.ReactElement {
   const previousActive = useRef(active);
   const geometryRevision = useRef(0);
   const geometryBounds = useRef('');
+  const lastGeometryKey = useRef(props.geometryKey);
 
   const clearResume = useCallback(() => {
     if (resumeTimer.current) clearTimeout(resumeTimer.current);
@@ -161,6 +164,13 @@ export function ScrollViewport(props: ScrollViewportProps): React.ReactElement {
   useEffect(() => { armResume(); }, [hold, resumeMs, armResume]);
 
   useLayoutEffect(() => {
+    if (lastGeometryKey.current !== props.geometryKey) {
+      props.onGeometryChange?.();
+      scrollbar?.controller?.cancel();
+      scrollbar?.invalidate();
+      geometryRevision.current++;
+      lastGeometryKey.current = props.geometryKey;
+    }
     const reset = lastReset.current !== props.resetKey;
     lastReset.current = props.resetKey;
     const pin = lastPin.current !== props.pinToBottomNonce;
@@ -183,7 +193,7 @@ export function ScrollViewport(props: ScrollViewportProps): React.ReactElement {
     const viewport = clipRef.current ? measureElement(clipRef.current).height : 0;
     const body = bodyRef.current ? measureElement(bodyRef.current).height : 0;
     const footer = footerRef.current ? measureElement(footerRef.current).height : 0;
-    const layout = buildDocumentLayout({ rows: viewport + 4, bodyRows: body, footerRows: footer });
+    const layout = buildDocumentLayout({ viewportRows: viewport, bodyRows: body, footerRows: footer });
     const padding = props.footer === undefined ? 0 : layout.paddingRows;
     const content = body + footer + padding;
     const tail = props.tailRowsRef?.current.rows ?? 0;

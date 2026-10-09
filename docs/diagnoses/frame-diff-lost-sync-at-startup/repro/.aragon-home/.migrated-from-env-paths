@@ -1,0 +1,11 @@
+{
+  "migratedAt": "2026-10-07T16:44:08.363Z",
+  "mode": "copied",
+  "from": {
+    "config": "C:\\Users\\jdqqj\\AppData\\Roaming\\aragon-agent-nodejs\\Config",
+    "data": "C:\\Users\\jdqqj\\AppData\\Local\\aragon-agent-nodejs\\Data"
+  },
+  "moved": [
+    "config.json"
+  ]
+}

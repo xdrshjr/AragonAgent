@@ -27,7 +27,7 @@ import { Text, useInput } from 'ink';
 import type { Theme } from '../theme.js';
 import type { TermCapabilities } from '../capabilities.js';
 import { pickGlyphs } from '../glyphs.js';
-import { OverlayFrame } from '../layout/OverlayFrame.js';
+import { OverlayFrame, overlayBodyRows } from '../layout/OverlayFrame.js';
 import { wrapToRows } from '../layout/wrap-rows.js';
 import type { NormalizedPlan } from '../../tools/human-input.js';
 import { stripPasteFrames } from '../paste-frames.js';
@@ -36,6 +36,7 @@ import { stripEnterFrames } from '../enter-frames.js';
 export type PlanVerdict = { decision: 'approved' | 'revise'; feedback: string };
 
 interface PlanReviewOverlayProps {
+  isActive?: boolean;
   plan: NormalizedPlan;
   maxRows: number;
   cols: number;
@@ -50,6 +51,7 @@ interface PlanReviewOverlayProps {
 const FRAME_CHROME_COLS = 4;
 
 export function PlanReviewOverlay({
+  isActive = true,
   plan,
   maxRows,
   cols,
@@ -63,6 +65,7 @@ export function PlanReviewOverlay({
   const [feedback, setFeedback] = useState<string | null>(null);
 
   useInput((input, key) => {
+    if (!isActive) return;
     if (key.escape) return; // App owns dismiss.
 
     if (feedback !== null) {
@@ -122,17 +125,17 @@ export function PlanReviewOverlay({
         theme={theme}
         caps={caps}
       >
-        <Text wrap="truncate" color={theme.muted}>
+        {overlayBodyRows(maxRows, cols) >= 2 && <Text wrap="truncate" color={theme.muted}>
           The agent revises the plan and submits it again.
-        </Text>
+        </Text>}
         <Text wrap="truncate">
           <Text color={theme.primary} bold>
             {glyphs.caret}{' '}
           </Text>
           {feedback.length > 0 ? (
-            <Text>{feedback}</Text>
+            <Text>{wrapToRows(feedback, Math.max(1, cols - FRAME_CHROME_COLS - 3)).at(-1)}</Text>
           ) : (
-            <Text color={theme.muted}>e.g. use the existing session store instead</Text>
+            <Text color={theme.muted}>type feedback</Text>
           )}
           <Text inverse> </Text>
         </Text>
@@ -143,7 +146,8 @@ export function PlanReviewOverlay({
   return (
     <OverlayFrame
       title="Review plan"
-      hint={`a approve ${glyphs.midDot} r revise ${glyphs.midDot} esc dismiss ${glyphs.midDot} ${glyphs.arrowUp}${glyphs.arrowDown} scroll`}
+      hint={cols <= 48 ? "a approve r revise Esc cancel"
+        : `a approve ${glyphs.midDot} r revise ${glyphs.midDot} esc dismiss ${glyphs.midDot} ${glyphs.arrowUp}${glyphs.arrowDown} scroll`}
       maxRows={maxRows}
       cols={cols}
       rows={rows}

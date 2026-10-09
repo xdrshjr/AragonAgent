@@ -12,7 +12,7 @@
  *   - `Markdown` re-split and re-regexed the whole answer into one React element
  *     per line on every render.
  *
- * Everything cached here is a function of its INPUT STRING ALONE. Theme and
+ * Cached text depends on its input and, for highlighting, the color level. Theme and
  * glyphs are applied at render time and are never cached, because a themed
  * React element in a cache makes `/theme` a no-op until the entry evicts (K-5) —
  * exactly the class of silent bug this package writes comments to avoid.
@@ -23,6 +23,7 @@
  */
 
 import { highlight } from 'cli-highlight';
+import { syntaxColorLevel } from './color-runtime.js';
 import { parseMarkdownBlocks, type MdBlock } from './markdown-blocks.js';
 import { pickGlyphs, type Glyphs } from './glyphs.js';
 import type { TermCapabilities } from './capabilities.js';
@@ -141,7 +142,7 @@ const lineCache = new LruCache<readonly string[]>(
 );
 
 /**
- * Syntax-highlight `code`, memoised on `(lang, code)`.
+ * Syntax-highlight `code`, memoised on `(colorLevel, lang, code)`.
  *
  * `cli-highlight` emits chalk-level ANSI that does not depend on `theme.*`, so
  * unlike a rendered element this string IS safe to cache across a `/theme`
@@ -155,7 +156,7 @@ export function highlightCached(code: string, lang: string): string {
   // ripgrep, which silently hides every definition in it from the tool this
   // codebase navigates itself with. NUL rather than a space because a space
   // still lets ("a b", "ts") and ("b", "ts a") collide on one key.
-  const key = `${lang}\u0000${code}`;
+  const key = `${syntaxColorLevel()}\u0000${lang}\u0000${code}`;
   const hit = highlightCache.get(key);
   if (hit !== undefined) return hit;
   let rendered = code;

@@ -1,3 +1,5 @@
+import { graphemes, graphemeWidth } from '../editor-navigation.js';
+
 /**
  * `wrapToRows` — the prose wrapper for `OverlayFrame`'s controlled (mode A)
  * content (plan-mode §6.6).
@@ -19,6 +21,8 @@
  *
  * Prefers spaces; hard-breaks any single token longer than `width` (a URL or a
  * long path, which must not be dropped and cannot be wrapped politely).
+ * Width is measured in terminal cells and hard breaks preserve graphemes. A
+ * single grapheme wider than the limit stays intact on its own row.
  * Existing newlines are honoured as paragraph breaks. Returns `[]` for empty
  * input so callers can splice the result without an emptiness branch.
  */
@@ -42,32 +46,43 @@ export function wrapToRows(text: string, width: number): string[] {
 function wrapParagraph(paragraph: string, limit: number): string[] {
   const rows: string[] = [];
   let current = '';
+  let currentWidth = 0;
 
   for (const word of paragraph.split(/\s+/).filter((w) => w.length > 0)) {
-    if (word.length > limit) {
+    const parts = graphemes(word);
+    const wordWidth = parts.reduce((sum, part) => sum + graphemeWidth(part.text), 0);
+    if (wordWidth > limit) {
       // Flush what we have, then chop the over-long token into full-width
       // pieces. Its tail becomes the new `current` so the next word can still
       // join it.
       if (current.length > 0) {
         rows.push(current);
         current = '';
+        currentWidth = 0;
       }
-      let rest = word;
-      while (rest.length > limit) {
-        rows.push(rest.slice(0, limit));
-        rest = rest.slice(limit);
+      for (const part of parts) {
+        const cells = graphemeWidth(part.text);
+        if (current && currentWidth + cells > limit) {
+          rows.push(current);
+          current = '';
+          currentWidth = 0;
+        }
+        current += part.text;
+        currentWidth += cells;
       }
-      current = rest;
       continue;
     }
 
     if (current.length === 0) {
       current = word;
-    } else if (current.length + 1 + word.length <= limit) {
+      currentWidth = wordWidth;
+    } else if (currentWidth + 1 + wordWidth <= limit) {
       current = `${current} ${word}`;
+      currentWidth += 1 + wordWidth;
     } else {
       rows.push(current);
       current = word;
+      currentWidth = wordWidth;
     }
   }
 

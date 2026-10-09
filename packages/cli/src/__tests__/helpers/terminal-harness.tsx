@@ -12,9 +12,18 @@ export function createTerminalHarness(columns = 80, rows = 24, debug = true) {
     isTTY: true, setRawMode: () => stdin, ref: () => stdin, unref: () => stdin,
   }) as unknown as NodeJS.ReadStream;
   const frames: string[] = [];
-  output.on('data', (chunk: Buffer) => { frames.push(chunk.toString()); });
+  const layoutFrames: string[] = [];
+  output.on('data', (chunk: Buffer) => {
+    const raw = chunk.toString();
+    frames.push(raw);
+    // Ink debug emits each complete layout in one write. PassThrough preserves
+    // these writes; cursor-only control writes are not layout boundaries.
+    // Never filter by height: an undersized layout is a regression to expose.
+    const text = stripAnsi(raw);
+    if (debug && text.trim().length > 0) layoutFrames.push(text);
+  });
   let instance: ReturnType<typeof render> | undefined;
-  return { stdout, stdin, frames,
+  return { stdout, stdin, frames, layoutFrames,
     mount(node: React.ReactElement) {
       instance = render(node, { stdout, stdin, stderr: stdout, debug,
         exitOnCtrlC: false, patchConsole: false });

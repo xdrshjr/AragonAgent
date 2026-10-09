@@ -387,12 +387,12 @@ describe('caret integration and escape ownership', () => {
     const view = render(<CountedPromptInput {...props}
       onDraftChange={onDraftChange} onPopupRowsChange={onPopupRowsChange} />);
     await delay(10);
-    expect(view.lastFrame()).toContain('_\u5165\u4efb\u52a1\u6216\u95ee\u9898');
+    expect(view.lastFrame()).toContain('_sk a question or describe a task...');
     const renders = renderCount;
     const draftCalls = onDraftChange.mock.calls.length;
     const popupCalls = onPopupRowsChange.mock.calls.length;
     await vi.advanceTimersByTimeAsync(500);
-    expect(view.lastFrame()).toContain('\u8f93\u5165\u4efb\u52a1\u6216\u95ee\u9898');
+    expect(view.lastFrame()).toContain('Ask a question or describe a task...');
     await vi.advanceTimersByTimeAsync(1500);
     expect(renderCount).toBe(renders);
     expect(onDraftChange).toHaveBeenCalledTimes(draftCalls);
@@ -442,16 +442,16 @@ describe('caret integration and escape ownership', () => {
     await delay(10);
     await vi.advanceTimersByTimeAsync(500);
     view.rerender(<PromptInput {...props} running />);
-    expect(view.lastFrame()).toContain('\u8f93\u5165\u8865\u5145\u8bf4\u660e');
+    expect(view.lastFrame()).toContain('Add a follow-up...');
     expect(view.lastFrame()).not.toContain('Esc');
     Object.defineProperty(view.stdout, 'columns', { value: 50, configurable: true });
     view.rerender(<PromptInput {...props} running />);
-    expect(view.lastFrame()).toContain('_\u5165\u8865\u5145\u8bf4\u660e');
+    expect(view.lastFrame()).toContain('_dd a follow-up...');
     view.rerender(<PromptInput {...props} isActive={false} />);
-    expect(view.lastFrame()).toContain('\u8f93\u5165\u4efb\u52a1\u6216\u95ee\u9898');
+    expect(view.lastFrame()).toContain('Ask a question or describe a task...');
     expect(vi.getTimerCount()).toBe(0);
     view.rerender(<PromptInput {...props} reducedMotion />);
-    expect(view.lastFrame()).toContain('_\u5165\u4efb\u52a1\u6216\u95ee\u9898');
+    expect(view.lastFrame()).toContain('_sk a question or describe a task...');
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -678,6 +678,24 @@ describe('paste through the composer (section 5.4)', () => {
 });
 
 describe('editing returns to the unified document tail', () => {
+  it('preserves wrapped draft geometry when scrolling hides the caret', async () => {
+    const props = { isActive: true, cols: 39, running: false, history: [], commands: [],
+      cwd: process.cwd(), theme: THEME, caps: CAPS, onSubmit: vi.fn() };
+    const rows = vi.fn();
+    const view = render(<PromptInput {...props} cursorVisible onDraftChange={rows} />);
+    try {
+      await delay(20);
+      view.stdin.write('x'.repeat(33));
+      await delay(20);
+      const before = stripAnsi(view.lastFrame() ?? '');
+      const draftRows = rows.mock.calls.at(-1)?.[0].rows;
+      view.rerender(<PromptInput {...props} cursorVisible={false} onDraftChange={rows} />);
+      await delay(20);
+      expect(rows.mock.calls.at(-1)?.[0].rows).toBe(draftRows);
+      expect(stripAnsi(view.lastFrame() ?? '')).toBe(before);
+    } finally { view.unmount(); }
+  });
+
   it('excludes viewport keys before popup navigation and accepts one paste interaction', async () => {
     const interaction = vi.fn();
     const submit = vi.fn((_text: string) => ({ accepted: true }));

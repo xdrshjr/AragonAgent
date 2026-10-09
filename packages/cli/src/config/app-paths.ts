@@ -12,6 +12,7 @@
  *   ~/.aragon-agent/
  *   ├── config.json            persisted config (0600 on POSIX)
  *   ├── config.json.bak        `aragon config edit` pre-edit backup
+ *   ├── model-windows.json     per-model context windows, user-edited
  *   ├── prompt-history.jsonl   submitted prompts, append-only (0600 on POSIX)
  *   ├── state.json             UI bookkeeping scalars (0600 on POSIX)
  *   ├── update-state.json      auto-update coordination (0600 on POSIX)
@@ -144,6 +145,18 @@ export function getConfigPath(): string {
 /** Written by `aragon config edit` before spawning the editor. */
 export function getConfigBackupPath(): string {
   return join(resolution.root, 'config.json.bak');
+}
+
+/**
+ * `<home>/model-windows.json` — per-model context windows the user declares by
+ * hand for ids no table knows (`kimi-k3`, a gateway alias, a self-hosted model).
+ *
+ * READ-ONLY from the application's side: nothing ever writes or creates it, so
+ * a user's file cannot be clobbered by an upgrade and its absence is not an
+ * error. `config/model-windows.ts` owns the format and the lookup.
+ */
+export function getModelWindowsPath(): string {
+  return join(resolution.root, 'model-windows.json');
 }
 
 /**

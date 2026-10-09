@@ -37,6 +37,7 @@ function keyRows(times: string): [string, string][] {
     [`Ctrl+C ${times}2`, 'Exit'],
     ['Ctrl+L', 'Redraw the frame'],
     ['Ctrl+T', 'Show/hide thinking (off by default)'],
+    ['Ctrl+G', 'Expand/collapse status details; disabled while an overlay is open'],
     ['PgUp / PgDn', 'Scroll a page (transcript, or this overlay)'],
     ['Shift+Up / Shift+Down', 'Scroll the transcript a line (full-screen mode)'],
     ['Wheel', 'Scroll the transcript (or the open overlay)'],
@@ -44,8 +45,14 @@ function keyRows(times: string): [string, string][] {
     // Drag-select is the one affordance here a user cannot discover by pressing
     // a key, so it has to be named somewhere they can look it up. The one-shot
     // startup notice is the other place, and it scrolls away.
-    ['Drag right edge', 'Scroll messages and input together; type to return'],
-    ['Bottom rows', 'Input, fixed action hints, then global runtime / queue / context status'],
+    ['Drag right edge', 'Scroll messages; input stays fixed; type to return to newest output'],
+    ['Bottom rows', 'Fixed input, one status row; Ctrl+G adds one detail row'],
+    ['C / Th / t/s', 'Context percent / thinking level / run-average output tokens per second'],
+    ['O/N/L/M/H/X', 'Thinking: off/minimal/low/medium/high/xhigh'],
+    ['~ / ? / --', 'Estimated context / unknown context / unavailable output speed'],
+    ['Output speed', 'Main Agent reported output tokens / total run time, including tools and waits'],
+    ['Copy / Sent / E / F', 'Copying / unconfirmed copy sent / copy error / Esc force-stop'],
+    ['^N', 'Transcript line offset from the bottom, not a new-message count'],
     ['Drag text (left button)', 'Select text on screen; the highlight waits'],
     ['Ctrl+C (with a selection)', 'Copy the pending selection - does not arm exit'],
     ['Native terminal selection', 'Copy-on-select is controlled by your terminal settings'],

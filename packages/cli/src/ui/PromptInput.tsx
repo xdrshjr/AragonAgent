@@ -21,6 +21,7 @@
 
 import React, { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
+import { popupCapacity } from './layout/budget.js';
 import { glob as tinyGlob } from 'tinyglobby';
 import type { Theme } from './theme.js';
 import type { TermCapabilities } from './capabilities.js';
@@ -61,6 +62,8 @@ export interface CommandOption {
 
 interface PromptInputProps {
   cols?: number;
+  terminalRows?: number;
+  statusExpanded?: boolean;
   cursorVisible?: boolean;
   onInteraction?: () => void;
   isActive: boolean;
@@ -377,7 +380,7 @@ function isControlSeq(input: string): boolean {
 // ---------------------------------------------------------------------------
 
 export function PromptInput({
-  cols: colsProp, cursorVisible = true, onInteraction,
+  cols: colsProp, terminalRows: terminalRowsProp, statusExpanded = false, cursorVisible = true, onInteraction,
   isActive,
   running,
   history,
@@ -399,7 +402,6 @@ export function PromptInput({
   borderColor,
   onDraftChange,
   onNotice,
-  scrolledLines = 0,
 }: PromptInputProps): React.ReactElement {
   const { stdout } = useStdout();
   const [editor, dispatch] = useReducer(editorReducer, INITIAL_EDITOR_STATE);
@@ -420,30 +422,6 @@ export function PromptInput({
       ? fileMatches.map((p) => ({ label: p }))
       : [];
   const clampedSel = popupItems.length > 0 ? Math.min(sel, popupItems.length - 1) : 0;
-  const popupLayout = buildAutocompleteLayout({
-    itemCount: isActive ? popupItems.length : 0,
-    selected: clampedSel,
-    maxRows: popupMaxRows,
-    maxHeight: popupMaxHeight,
-  });
-  const popupVisible = isActive && popupLayout.rowCount > 0;
-  // Report on every mount, including zero. Cleanup belongs to a separate
-  // effect so changing height does not publish an intermediate zero budget.
-  useLayoutEffect(() => {
-    onPopupRowsChange?.(popupLayout.rowCount);
-  }, [onPopupRowsChange, popupLayout.rowCount]);
-  useLayoutEffect(() => () => onPopupRowsChange?.(0), [onPopupRowsChange]);
-  const completion = popupVisible ? popupKind ?? 'none' : 'none';
-  const completionCallback = useRef(onCompletionContextChange);
-  completionCallback.current = onCompletionContextChange;
-  const lastCompletion = useRef<typeof completion>();
-  useLayoutEffect(() => {
-    if (!onCompletionContextChange || lastCompletion.current === completion) return;
-    lastCompletion.current = completion;
-    onCompletionContextChange?.(completion);
-  }, [onCompletionContextChange, completion]);
-  useLayoutEffect(() => () => completionCallback.current?.('none'), []);
-
   // --- Debounced `@file` scan. ---------------------------------------------
   useEffect(() => {
     if (fileQuery === null || fileQuery.length < 1) {
@@ -481,20 +459,21 @@ export function PromptInput({
   // the trap `BottomStatusRow.tsx:5-27` documents.
   const glyphs = pickGlyphs(caps);
   const cols = colsProp ?? stdout?.columns ?? 80;
-  const terminalRows = stdout?.rows ?? 24;
-  const chip = scrollChip(scrolledLines, cols, glyphs);
+  const terminalRows = terminalRowsProp ?? stdout?.rows ?? 24;
   // Err NARROW. Wrapping wider than the box Ink gives us would make Ink wrap a
   // second time, and then `layout.rows.length` is a lie — which is the one thing
   // this module may not be.
   const chromeCols = 2 /* border */ + 2 /* paddingX */ + 2 /* marker */;
-  const baseCols = Math.max(8, cols - chromeCols - (chip ? chip.cells + 1 : 0));
+  const baseCols = Math.max(8, cols - chromeCols);
   const measure = (wrapCols: number) =>
     layoutComposer({
       buffer,
       cursor,
       cols: wrapCols,
       maxRows: draftMaxRows(terminalRows),
-      active: isActive && cursorVisible,
+      // Scrolling may hide the caret, but must not change the measured draft.
+      // Otherwise visibility can toggle wrapping and feed back into scrolling.
+      active: isActive,
     });
   // TWO PASSES, AND THE SECOND ONE IS LOAD-BEARING (I-8). The overflow indicator
   // rides the last rendered row INSIDE the box the draft wraps in, so its cells
@@ -514,6 +493,32 @@ export function PromptInput({
   const preferredColumnWidth = useRef<number>();
   useLayoutEffect(() => { preferredColumnWidth.current = undefined; }, [usableCols]);
   const draftRowCount = Math.max(1, layout.rows.length);
+  const menuCapacity = Math.min(popupMaxHeight ?? Infinity,
+    popupCapacity(terminalRows, draftRowCount, statusExpanded));
+  const popupLayout = buildAutocompleteLayout({
+    itemCount: isActive ? popupItems.length : 0,
+    selected: clampedSel,
+    maxRows: popupMaxRows,
+    maxHeight: menuCapacity,
+  });
+  const popupVisible = isActive && popupLayout.rowCount > 0;
+  // Report on every mount, including zero. Cleanup belongs to a separate
+  // effect so changing height does not publish an intermediate zero budget.
+  useLayoutEffect(() => {
+    onPopupRowsChange?.(popupLayout.rowCount);
+  }, [onPopupRowsChange, popupLayout.rowCount]);
+  useLayoutEffect(() => () => onPopupRowsChange?.(0), [onPopupRowsChange]);
+  const completion = popupVisible ? popupKind ?? 'none' : 'none';
+  const completionCallback = useRef(onCompletionContextChange);
+  completionCallback.current = onCompletionContextChange;
+  const lastCompletion = useRef<typeof completion>();
+  useLayoutEffect(() => {
+    if (!onCompletionContextChange || lastCompletion.current === completion) return;
+    lastCompletion.current = completion;
+    onCompletionContextChange?.(completion);
+  }, [onCompletionContextChange, completion]);
+  useLayoutEffect(() => () => completionCallback.current?.('none'), []);
+
   const caretResetKey = useMemo(() => ({}), [buffer, cursor, isActive, usableCols]);
 
   // --- Draft presence and height, reported only on a transition. -----------
@@ -522,7 +527,7 @@ export function PromptInput({
   // (R-6), so widening this callback does not widen how often it fires.
   const hasDraft = buffer.length > 0;
   const lastReportedDraft = useRef<{ hasDraft: boolean; rows: number } | null>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!onDraftChange) return;
     const last = lastReportedDraft.current;
     if (last && last.hasDraft === hasDraft && last.rows === draftRowCount) return;
@@ -544,7 +549,7 @@ export function PromptInput({
     const selectedIndex = Math.min(state.sel, (suggestions?.length ?? 0) - 1);
     const suggestionLayout = buildAutocompleteLayout({
       itemCount: isActive ? suggestions?.length ?? 0 : 0,
-      selected: selectedIndex, maxRows: popupMaxRows, maxHeight: popupMaxHeight,
+      selected: selectedIndex, maxRows: popupMaxRows, maxHeight: menuCapacity,
     });
     const selected = suggestionLayout.rowCount > 0 ? suggestions?.[selectedIndex] : undefined;
     const text = selected?.label ?? expandPastes(state.buffer, state.pastes);
@@ -783,11 +788,6 @@ export function PromptInput({
       <Text color={markerColor} bold>
         {marker}{' '}
       </Text>
-      {/*
-        `flexShrink={1}` here and `flexShrink={0}` on the chip: under pressure the
-        DRAFT wraps, never the chip. A half-truncated `↓ 12 new li` reads as a
-        rendering bug and cuts off the very number it exists to show (I-8).
-      */}
       <Box flexDirection="column" flexGrow={1} flexShrink={1}>
         {buffer.length === 0 ? (
           <Text wrap="truncate" color={theme.muted}>
@@ -818,28 +818,7 @@ export function PromptInput({
           )
         )}
       </Box>
-      {chip && (
-        // `alignSelf="flex-start"` pins the chip to the FIRST row of a multi-line
-        // draft. Yoga's default `stretch` sizes this box to the full height of the
-        // editor; it renders on the top row either way today, and relying on that
-        // is how a later `justifyContent` edit moves it without failing anything.
-        //
-        // `width={chip.cells}` is a FIXED cell, not the chip's natural width
-        // (P2-4). The chip is the only thing on this row whose width changes while
-        // the user is typing — `↓ 9` becomes `↓ 10` becomes `↓ 100` — and every
-        // change would otherwise re-wrap a draft that fills the line.
-        <Box
-          flexShrink={0}
-          alignSelf="flex-start"
-          marginLeft={1}
-          width={chip.cells}
-          justifyContent="flex-end"
-        >
-          <Text wrap="truncate" color={theme.hintFg ?? theme.muted}>
-            {chip.text}
-          </Text>
-        </Box>
-      )}
+
     </Box>
   );
 

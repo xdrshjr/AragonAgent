@@ -200,6 +200,8 @@ export function writeSession(input: WriteSessionInput): string {
   saveSession(path, {
     model: input.session.model,
     messages: input.session.messages,
+    ...(input.session.compactionIdentity
+      ? { compactionIdentity: input.session.compactionIdentity } : {}),
     entries: input.session.entries,
     todos: input.session.todos ?? [],
     meta: input.meta,

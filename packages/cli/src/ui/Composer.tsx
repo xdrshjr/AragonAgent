@@ -23,6 +23,8 @@ export interface ComposerProps {
   /** Compatibility prop; activity is now rendered by the global StatusBar. */
   runRow?: RunRowProps | null;
   cols?: number;
+  terminalRows?: number;
+  statusExpanded?: boolean;
   deleteDisambiguated?: boolean;
   onCompletionContextChange?: (context: 'none' | 'slash' | 'file') => void;
   cursorVisible?: boolean;
@@ -50,7 +52,7 @@ export interface ComposerProps {
   popupMaxRows?: number;
   popupMaxHeight?: number;
   onPopupRowsChange?: (rows: number) => void;
-  /** Rows of newer output below the viewport, forwarded to the input's scroll chip. */
+  /** Compatibility prop; history position is displayed by Header. */
   scrolledLines?: number;
   /** Compatibility prop; the global status and action rows show live services. */
   services?: number;
@@ -117,7 +119,7 @@ export const hintTextForTest = hintText;
 
 export function Composer({
   deleteDisambiguated, onCompletionContextChange,
-  cols, cursorVisible, onInteraction, measureRef,
+  cols, terminalRows, statusExpanded, cursorVisible, onInteraction, measureRef,
   isActive,
   reducedMotion,
   onEscape,
@@ -130,7 +132,6 @@ export function Composer({
   popupMaxRows,
   popupMaxHeight,
   onPopupRowsChange,
-  scrolledLines = 0,
   onDraftRows,
   onNotice,
   theme,
@@ -161,11 +162,13 @@ export function Composer({
     : theme.idleBorder ?? theme.border;
 
   return (
-    <Box ref={measureRef} flexDirection="column" flexShrink={0}>
+    <Box ref={measureRef} width={cols} flexDirection="column" flexShrink={0}>
       <PromptInput
         deleteDisambiguated={deleteDisambiguated}
         onCompletionContextChange={onCompletionContextChange}
         cols={cols}
+        terminalRows={terminalRows}
+        statusExpanded={statusExpanded}
         cursorVisible={cursorVisible}
         onInteraction={onInteraction}
         isActive={isActive}
@@ -187,7 +190,6 @@ export function Composer({
         borderColor={borderColor}
         onDraftChange={onDraftChange}
         onNotice={onNotice}
-        scrolledLines={scrolledLines}
       />
     </Box>
   );

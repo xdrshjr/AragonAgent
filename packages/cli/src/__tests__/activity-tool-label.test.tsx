@@ -62,20 +62,20 @@ describe('ActivityLine names the running tool', () => {
   it('真实执行事实映射已知工具，准备阶段不提前声称读取', () => {
     const base = { startedAt: STARTED, elapsedMs: 0, reducedMotion: true };
     const glyphs = pickGlyphs(RICH);
-    for (const [name, expected] of [['read_file', '正在读取文件'], ['write_file', '正在修改文件'],
-      ['edit_file', '正在修改文件'], ['bash', '正在执行命令']]) {
+    for (const [name, expected] of [['read_file', 'Running tool read_file'], ['write_file', 'Running tool write_file'],
+      ['edit_file', 'Running tool edit_file'], ['bash', 'Running tool bash']]) {
       expect(resolveActivityLabel({ ...base, phase: 'tool', activeTool: { name: name!, toolCallId: 't' } }, glyphs))
         .toBe(expected);
     }
     expect(resolveActivityLabel({ ...base, phase: 'preparing-tool', runningTool: 'read_file' }, glyphs))
-      .toBe('正在准备工具');
+      .toBe('Preparing tool');
   });
 
   it('真实未知工具名净化控制符，压缩优先于执行工具', () => {
     const base = { startedAt: STARTED, elapsedMs: 0, reducedMotion: true, phase: 'tool' as const,
       activeTool: { name: '\x1b[31mcustom\nname', toolCallId: 't' } };
-    expect(resolveActivityLabel(base, pickGlyphs(RICH))).toBe('正在运行工具 custom name');
-    expect(resolveActivityLabel({ ...base, compacting: true }, pickGlyphs(RICH))).toBe('正在压缩上下文');
+    expect(resolveActivityLabel(base, pickGlyphs(RICH))).toBe('Running tool custom name');
+    expect(resolveActivityLabel({ ...base, compacting: true }, pickGlyphs(RICH))).toBe('Compacting context');
   });
   it('reads `Running bash` while bash is in flight', () => {
     expect(frameOf(RICH, false, 'bash')).toContain('Running bash');

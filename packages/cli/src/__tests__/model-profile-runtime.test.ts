@@ -6,6 +6,11 @@ import { DEFAULT_CONFIG, type CliConfig } from '../config/schema.js';
 import { resolveFastTier } from '../fast/resolve.js';
 import { Compactor } from '../compaction/compactor.js';
 
+const COMPACTION_DELTA = JSON.stringify({ schemaVersion: 2, additions: [{
+  section: 'facts', text: 'The assistant supplied the earlier response.',
+  sources: [{ messageId: 'g1:m1', role: 'assistant', excerpt: 'aaaa' }],
+}] });
+
 const runtimeRoot = resolve('../../.agentmesh/profile-runtime-tests');
 mkdirSync(runtimeRoot, { recursive: true });
 const directory = mkdtempSync(`${runtimeRoot}/case-`);
@@ -74,12 +79,13 @@ describe('模型配置运行时角色隔离', () => {
       complete: async (_id, request) => {
         requests.push(request);
         if (requests.length === 1) throw new Error('temporary failure');
-        return { role: 'assistant', content: [{ type: 'text', text: '## Task\nSummary' }] };
+        return { role: 'assistant', content: [{ type: 'text', text: COMPACTION_DELTA }] };
       },
     });
-    await compactor.compact({ messages, messageCount: messages.length, turnIndex: 1,
+    const outcome = await compactor.compact({ messages, messageCount: messages.length, turnIndex: 1,
       trigger: 'overflow', systemPrompt: '', signal: new AbortController().signal,
       model: { providerId: cfg.provider, modelId: cfg.model, baseUrl: cfg.baseUrl } });
+    expect(outcome.action).toBe('replace');
     expect(requests).toHaveLength(2);
     expect(requests.map((request) => request.apiKey)).toEqual(['fast-secret', 'main-secret']);
     expect(requests.map((request) => request.baseUrl))
@@ -279,15 +285,14 @@ async function compactChild(cfg: CliConfig, model: ModelRef, role: ModelRole) {
     complete: async (_id, request) => {
       requests.push(request);
       if (requests.length === 1) throw new Error('首次压缩失败');
-      return { role: 'assistant', content: [{ type: 'text', text: '## Task\n摘要' }] };
+      return { role: 'assistant', content: [{ type: 'text', text: COMPACTION_DELTA }] };
     },
   });
   const outcome = await manager.compact({
     messages, messageCount: messages.length, turnIndex: 1, trigger: 'overflow',
     systemPrompt: '', model, signal: new AbortController().signal,
   });
-  expect(outcome.action).toBe('replace');
-  return requests;
+  return { requests, outcome };
 }
 
 describe('真实运行时请求使用角色对应账户', () => {
@@ -360,9 +365,10 @@ describe('真实运行时请求使用角色对应账户', () => {
   });
 
   it('快子任务压缩回退自身时保留 fast 角色和默认地址，不继承主网关', async () => {
-    const requests = await compactChild(config(), {
+    const { requests, outcome } = await compactChild(config(), {
       providerId: 'openai', modelId: 'same-model',
     }, 'fast');
+    expect(outcome.action).toBe('replace');
     expect(requests).toHaveLength(2);
     expect(requests.map((request) => request.apiKey)).toEqual(['fast-secret', 'fast-secret']);
     expect(requests.map((request) => request.baseUrl)).toEqual([undefined, undefined]);
@@ -373,9 +379,10 @@ describe('真实运行时请求使用角色对应账户', () => {
     cfg.modelProfiles = undefined;
     cfg.fast.provider = '';
     cfg.apiKeys.openai = 'shared-secret';
-    const requests = await compactChild(cfg, {
+    const { requests, outcome } = await compactChild(cfg, {
       providerId: 'openai', modelId: 'child-model', baseUrl: 'https://child.example/v1',
     }, 'main');
+    expect(outcome.action).toBe('replace');
     expect(requests).toHaveLength(2);
     expect(requests.map((request) => request.baseUrl))
       .toEqual(['https://main.example/v1', 'https://child.example/v1']);
@@ -387,9 +394,10 @@ describe('真实运行时请求使用角色对应账户', () => {
     const cfg = config();
     cfg.modelProfiles!.entries[0]!.apiKey = null;
     cfg.apiKeys = {};
-    const requests = await compactChild(cfg, {
+    const { requests, outcome } = await compactChild(cfg, {
       providerId: 'openai', modelId: cfg.model, baseUrl: cfg.baseUrl,
     }, 'main');
+    expect(outcome.action).toBe('keep');
     expect(requests).toHaveLength(1);
     expect(requests[0]!.apiKey).toBe('fast-secret');
     expect(requests[0]!.baseUrl).toBeUndefined();

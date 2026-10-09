@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import { SessionOpener } from '../ui/SessionOpener.js';
-import { pickOpenerVariant } from '../ui/Logo.js';
+import { LOGO_ART, pickOpenerVariant } from '../ui/Logo.js';
 import { getTheme } from '../ui/theme.js';
 import type { TermCapabilities } from '../ui/capabilities.js';
 
@@ -85,13 +85,16 @@ describe('SessionOpener', () => {
 });
 
 describe('pickOpenerVariant + SessionOpener agree', () => {
-  it('never selects `art` on a terminal that cannot render it', () => {
-    expect(pickOpenerVariant(40, 200, ASCII)).not.toBe('art');
-    expect(pickOpenerVariant(40, 200, { colorLevel: 1, unicode: true })).not.toBe('art');
+  it('keeps the full wordmark when color is explicitly disabled', () => {
+    const variant = pickOpenerVariant(40, 200);
+    expect(variant).toBe('art');
+    const { lastFrame, unmount } = open({ variant }, { colorLevel: 0, unicode: true });
+    expect(stripAnsi(lastFrame() ?? '')).toContain(LOGO_ART[0]);
+    unmount();
   });
 
   it('drops to `none` when the terminal is too narrow even for the banner', () => {
-    expect(pickOpenerVariant(40, 47, RICH)).toBe('none');
+    expect(pickOpenerVariant(40, 47)).toBe('none');
     const { lastFrame, unmount } = open({ variant: 'none' });
     expect(stripAnsi(lastFrame() ?? '')).not.toContain('AragonAgent');
     unmount();

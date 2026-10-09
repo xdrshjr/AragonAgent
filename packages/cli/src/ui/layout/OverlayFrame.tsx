@@ -1,5 +1,6 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { Box, Text } from 'ink';
+import stringWidth from 'string-width';
 import type { Theme } from '../theme.js';
 import type { TermCapabilities } from '../capabilities.js';
 import { pickGlyphs } from '../glyphs.js';
@@ -60,7 +61,15 @@ const MARGIN_ROWS = 1;
 export function OverlayFrame(props: OverlayFrameProps): React.ReactElement {
   const { title, hint, maxRows, cols = 80, theme, caps } = props;
   const glyphs = pickGlyphs(caps);
-  const bordered = cols >= BORDERLESS_COLS;
+  // Ink applies changed style keys alone. Recreating this object resets the
+  // unchanged borderTop/borderBottom=false edges to one cell on a later render.
+  const railBorderStyle = useMemo(() => ({
+    topLeft: glyphs.railVertical, top: '', topRight: '', right: '',
+    bottomRight: '', bottom: '', bottomLeft: glyphs.railVertical,
+    left: glyphs.railVertical,
+  }), [glyphs.railVertical]);
+  const compact = Number.isFinite(maxRows) && maxRows < (cols >= BORDERLESS_COLS ? 6 : 4);
+  const bordered = !compact && cols >= BORDERLESS_COLS;
   const unbounded = !Number.isFinite(maxRows);
 
   let body: React.ReactNode;
@@ -69,7 +78,7 @@ export function OverlayFrame(props: OverlayFrameProps): React.ReactElement {
   let overflowOffset: number | null = null;
 
   if (props.rows) {
-    const chrome = MARGIN_ROWS + (bordered ? CHROME_ROWS : CHROME_ROWS - 2);
+    const chrome = compact ? 2 : MARGIN_ROWS + (bordered ? CHROME_ROWS : CHROME_ROWS - 2);
     const height = unbounded ? props.rows.length : Math.max(1, Math.floor(maxRows) - chrome);
     const win = sliceWindow(props.rows.length, props.scrollOffset, height);
     body = props.rows.slice(win.start, win.start + win.visible);
@@ -93,16 +102,25 @@ export function OverlayFrame(props: OverlayFrameProps): React.ReactElement {
 
   const inner = (
     <>
-      <Text wrap="truncate" color={theme.primary} bold>
-        {title}
-      </Text>
-      {body}
+      <Box flexDirection="row" height={1} flexShrink={0}>
+        <Box flexGrow={1} flexShrink={1}><Text wrap="truncate" color={theme.primary} bold>
+          {title}
+        </Text></Box>
+        {position && <Box width={stringWidth(position)} flexShrink={0}>
+          <Text color={theme.muted}>{position}</Text>
+        </Box>}
+      </Box>
+      <Box flexDirection="column" flexShrink={0}
+        height={unbounded ? undefined : Math.max(1, maxRows - (compact ? 2 : bordered ? 5 : 3))}
+        overflowY="hidden">{body}</Box>
       <Text wrap="truncate" color={theme.hintFg ?? theme.muted}>
         {hint}
-        {position}
       </Text>
     </>
   );
+
+  if (compact) return <Box width={cols} height={Math.max(0, maxRows)}
+    flexDirection="column" flexShrink={0} overflowY="hidden">{inner}</Box>;
 
   if (!bordered) {
     // Narrow terminals trade the box for a rail: same grouping, 2 fewer rows
@@ -112,16 +130,7 @@ export function OverlayFrame(props: OverlayFrameProps): React.ReactElement {
         <Box
           flexDirection="column"
           flexShrink={0}
-          borderStyle={{
-            topLeft: glyphs.railVertical,
-            top: '',
-            topRight: '',
-            right: '',
-            bottomRight: '',
-            bottom: '',
-            bottomLeft: glyphs.railVertical,
-            left: glyphs.railVertical,
-          }}
+          borderStyle={railBorderStyle}
           borderTop={false}
           borderBottom={false}
           borderRight={false}
@@ -146,4 +155,11 @@ export function OverlayFrame(props: OverlayFrameProps): React.ReactElement {
       {inner}
     </Box>
   );
+}
+
+/** Body rows shared by controlled overlays and self-managed focused lists. */
+export function overlayBodyRows(maxRows: number, cols: number): number {
+  if (!Number.isFinite(maxRows)) return 20;
+  const compact = maxRows < (cols >= BORDERLESS_COLS ? 6 : 4);
+  return Math.max(1, Math.floor(maxRows) - (compact ? 2 : cols >= BORDERLESS_COLS ? 5 : 3));
 }

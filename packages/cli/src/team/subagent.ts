@@ -492,6 +492,14 @@ export function createSubagent(
         }
         break;
       }
+      case 'compaction_end':
+        contextManager?.onCompactionEnd({
+          applied: event.applied,
+          ...(event.reason !== undefined ? { reason: event.reason } : {}),
+          tokensBefore: event.estimatedTokensBefore,
+          tokensAfter: event.estimatedTokensAfter,
+        });
+        break;
       case 'tool_execution_start':
         run.phase = event.toolName === 'team_wait' ? 'waiting' : 'tool';
         run.lastTool = event.toolName;

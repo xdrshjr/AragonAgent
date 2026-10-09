@@ -44,6 +44,9 @@ import type { CliConfig } from '../config/schema.js';
 import { getLogger } from '../logging/logger.js';
 import { Compactor } from './compactor.js';
 import { COMPACTION_LIMITS } from './limits.js';
+import { ContextMeter } from './meter.js';
+import { shouldCompactAt } from './pressure.js';
+import type { CompactionBilling } from './types.js';
 
 export interface ChildCompactionDeps {
   /** Read LIVE on every call - see `childConfig` below. */
@@ -55,7 +58,7 @@ export interface ChildCompactionDeps {
   /** The lead wiring's own transport, reused (D-10 stays true). */
   complete: (providerId: string, request: LLMRequest) => Promise<AssistantMessage>;
   /** Child compaction spend joins the session totals through the lead's sink. */
-  onUsage: (usage: TokenUsage) => void;
+  onUsage: (usage: TokenUsage, billing?: CompactionBilling) => void;
 }
 
 /**
@@ -98,6 +101,10 @@ export interface ChildContextManagerRequest {
  */
 export interface ChildContextManager extends ContextManager {
   onTurnEnd(usage: TokenUsage, messages: readonly Message[], systemPrompt: string): void;
+  /** Settle only after Core has accepted or rejected the proposed history. */
+  onCompactionEnd(verdict: {
+    applied: boolean; reason?: string; tokensBefore: number; tokensAfter: number;
+  }): void;
 }
 
 export type ChildContextManagerFactory = (
@@ -138,20 +145,23 @@ export function createChildContextManager(
    * lead does - to its OWN model, because `provider` / `model` are overlaid here
    * too.
    *
-   * `onFailure: 'truncate'` IS FORCED because a child that stops is a failed
-   * dispatch and the user is not there to intervene.
+   * Failed summaries preserve the child's task just as they preserve the lead's.
    */
   const childConfig = (): CliConfig => {
     const base = deps.getConfig();
+    const sameConnection = base.provider === req.model.providerId &&
+      base.model === req.model.modelId && base.baseUrl === req.model.baseUrl;
     return {
       ...base,
       provider: req.model.providerId,
       model: req.model.modelId,
       baseUrl: req.model.baseUrl,
+      // The lead's manual limit describes its connection, not every worker.
+      contextWindow: sameConnection ? base.contextWindow : null,
       compaction: {
         ...base.compaction,
         keepRecentTurns: COMPACTION_LIMITS.childKeepRecentTurns,
-        onFailure: 'truncate',
+        onFailure: 'stop',
         useFastTier: true,
         // ONE ARCHIVE PER LEAD COMPACTION IS AUDITABLE; TWENTY PER DISPATCH IS
         // NOISE. The child's dropped slice is therefore never retained either -
@@ -161,9 +171,22 @@ export function createChildContextManager(
     };
   };
 
+  const meter = new ContextMeter({
+    getMessages: req.getMessages,
+    getSystemPrompt: req.getSystemPrompt,
+    getModelInfo: () => deps.getModelInfoFor(req.model),
+    isWindowKnown: () => {
+      const source = deps.getModelInfoFor(req.model).contextWindowSource;
+      return source === undefined ? deps.isPricedModel(req.model) : source !== 'fallback';
+    },
+    getWindowOverride: () => childConfig().contextWindow,
+  });
+  let overflowNotified = false;
+
   const compactor = new Compactor(
     {
       getConfig: childConfig,
+      meter,
       mainRole: req.role ?? 'main',
       resolveFastCandidate: () => resolveFastTier(deps.getConfig(), deps.hasKey),
       hasKey: deps.hasKey,
@@ -175,23 +198,19 @@ export function createChildContextManager(
       complete: deps.complete,
       emit: (event) => {
         if (event.type === 'usage') {
-          deps.onUsage(event.usage);
+          deps.onUsage(event.usage, { modelRef: event.modelRef,
+            costUsd: event.costUsd, pricingUnknown: event.pricingUnknown });
           return;
         }
         if (event.type !== 'compaction_end') return;
-        // DEFENCE IN DEPTH SINCE quiet-noop D-8: a child compaction that declines
-        // before committing to work no longer emits this event at all, so this
-        // filter is now unreachable on that path. It is retained deliberately -
-        // it is this tree's own record that a no-op compaction is a non-event, and
-        // deleting it would make the child depend on that rule holding forever.
-        if (!event.record.applied && event.record.mode === 'none') return;
-        req.onCompacted();
         // W3 HAS NO CARD, so this line is the whole record of a child compaction.
         log.info('compaction_child', {
           label: req.label,
           index: event.record.index,
           tokensBefore: event.record.tokensBefore,
           tokensAfter: event.record.tokensAfter,
+          applied: event.record.applied,
+          reason: event.record.reason,
         });
       },
       // A CHILD HAS NO TRANSCRIPT AND NOBODY WATCHING IT. `notify` on the lead's
@@ -206,9 +225,26 @@ export function createChildContextManager(
   return {
     // THERE IS NO `/compact` FOR A CHILD, so nothing is ever queued and the
     // manual branch of `shouldCompact` is unreachable by construction.
-    shouldCompact: (probe) => compactor.shouldCompact(probe),
+    shouldCompact: (probe) => {
+      const should = compactor.shouldCompact(probe);
+      if (!should && probe.trigger === 'overflow' && !overflowNotified && childConfig().compaction.enabled) {
+        const pressure = meter.current();
+        if (Number.isFinite(pressure.occupied) && pressure.occupied >= 0 &&
+            Number.isFinite(pressure.contextWindow) && pressure.contextWindow > 0 &&
+            !shouldCompactAt(pressure, childConfig().compaction.threshold)) {
+          overflowNotified = true;
+          log.info('compaction_child', { label: req.label, reason: 'below_threshold' });
+        }
+      }
+      return should;
+    },
     compact: (ctx) => compactor.compact(ctx),
     onTurnEnd: (usage, messages, systemPrompt) =>
       compactor.onTurnEnd(usage, messages, systemPrompt),
+    onCompactionEnd: (verdict) => {
+      if (!compactor.settleOperation(verdict) || !verdict.applied) return;
+      meter.onHistorySpliced();
+      req.onCompacted();
+    },
   };
 }

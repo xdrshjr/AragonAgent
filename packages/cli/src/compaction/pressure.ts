@@ -75,6 +75,7 @@ export function computeEstimateOffset(
 }
 
 export interface PressureInput {
+  windowSource?: Pressure['windowSource'];
   /** Authoritative usage of the last completed turn, or `undefined` (§3.4.2). */
   lastUsage?: TokenUsage;
   messages: readonly Message[];
@@ -171,9 +172,8 @@ export function computePressure(input: PressureInput): Pressure {
     occupied = base + deltaTokens;
     source = 'usage';
   } else {
-    // Before the first `turn_end` there is nothing to calibrate against and the
-    // raw estimate is used - still under-reporting, but `requiredHeadroom` below
-    // is the belt for that case and it does not depend on the ratio being right.
+    // Before the first turn_end there is no calibration. Keep the estimate
+    // explicit: output reservations never authorize automatic compaction.
     const raw = estimatePromptTokens(input.messages as Message[], input.systemPrompt);
     occupied = raw + (input.estimateOffset ?? 0);
     source = 'estimate';
@@ -182,6 +182,7 @@ export function computePressure(input: PressureInput): Pressure {
   const ratio = window > 0 ? Math.max(0, Math.min(1, occupied / window)) : 0;
   return {
     occupied,
+    ...(input.windowSource ? { windowSource: input.windowSource } : {}),
     contextWindow: window,
     ratio,
     headroom: Math.max(0, window - occupied),
@@ -196,35 +197,15 @@ export function computePressure(input: PressureInput): Pressure {
   };
 }
 
-export interface HeadroomRequirement {
-  /** The session's effective output cap for one call. */
-  maxOutputTokens: number;
+/** Only actual occupancy authorizes automatic compaction. */
+export function shouldCompactAt(p: Pressure, threshold: number): boolean {
+  if (!Number.isFinite(p.occupied) || p.occupied < 0) return false;
+  if (!Number.isFinite(p.contextWindow) || p.contextWindow <= 0) return false;
+  if (!Number.isFinite(threshold) || threshold < 0.5 || threshold > 0.95) return false;
+  return p.occupied / p.contextWindow >= threshold;
 }
 
-/**
- * The tokens the NEXT request needs on top of the history.
- *
- * `THINKING_HEADROOM_TOKENS` (4096) and `CONTEXT_SAFETY_MARGIN_TOKENS` (1024) are
- * existing core exports and are reused rather than re-spelled.
- */
-export function requiredHeadroom(req: HeadroomRequirement): number {
+/** Capacity helper retained for the standalone tail-budget API, never a trigger. */
+export function requiredHeadroom(req: { maxOutputTokens: number }): number {
   return req.maxOutputTokens + THINKING_HEADROOM_TOKENS + CONTEXT_SAFETY_MARGIN_TOKENS;
-}
-
-/**
- * The trigger, and the second term is not belt-and-braces (D-12).
- *
- * 90 % OF A 200 k WINDOW LEAVES 20 k, WHICH IS PLENTY. 90 % OF A 32 k WINDOW
- * LEAVES 3.2 k, WHICH IS LESS THAN A SINGLE `max_tokens` OF 8192 - the request is
- * already impossible. A pure ratio trigger is therefore correct for the models
- * most users run and quietly wrong for the small ones, and "quietly wrong on the
- * cheap models" is not a property this product ships.
- */
-export function shouldCompactAt(
-  p: Pressure,
-  threshold: number,
-  req: HeadroomRequirement,
-): boolean {
-  if (p.contextWindow <= 0) return false;
-  return p.ratio >= threshold || p.headroom < requiredHeadroom(req);
 }

@@ -15,8 +15,9 @@
  * everything below.
  */
 
-import { describe, expect, it } from 'vitest';
-import type { AgentEvent, Message, ModelInfo, ModelRef } from '@aragon-agent/core';
+import { describe, expect, it, vi } from 'vitest';
+import type { AgentEvent, Message, ModelInfo, ModelRef, ProviderRegistry,
+  AssistantMessage } from '@aragon-agent/core';
 import { CompactionWiring } from '../compaction/wiring.js';
 import type { CompactionEvent } from '../compaction/types.js';
 import {
@@ -56,20 +57,26 @@ function conversation(turns: number): Message[] {
   return out;
 }
 
-function harness(messages: Message[]) {
+function harness(messages: Message[], complete?: () => Promise<AssistantMessage>) {
   const config = {
     provider: 'anthropic',
     model: 'claude-sonnet-4-5',
     maxTokens: 8192,
     fast: { ...DEFAULT_FAST_CONFIG },
-    compaction: { ...DEFAULT_COMPACTION_CONFIG },
+    compaction: { ...DEFAULT_COMPACTION_CONFIG, archive: false },
   } as unknown as CliConfig;
 
   const events: CompactionEvent[] = [];
   const wiring = new CompactionWiring({
     getConfig: () => config,
-    hasKey: () => false,
-    getApiKey: () => undefined,
+    hasKey: () => true,
+    getApiKey: () => 'k',
+    createRegistry: () => ({ complete: complete ?? (async () => ({ role: 'assistant', content: [
+      { type: 'text', text: JSON.stringify({ schemaVersion: 2, additions: [
+        { section: 'facts', text: 'Recorded answer', sources: [
+          { messageId: 'g1:m1', role: 'assistant', excerpt: 'answer 0' }],
+        }], }) }], usage: { inputTokens: 10, outputTokens: 10 },
+    })) }) as unknown as ProviderRegistry,
     getModelInfoFor: () => MODEL,
     isPricedModel: () => true,
     getMessages: () => messages,
@@ -116,6 +123,8 @@ describe('the idle /compact path (§4.4 / D-25)', () => {
       systemPrompt: 'sys',
       model: REF,
       signal: new AbortController().signal,
+      isCurrent: () => true,
+      adopt: (next) => { messages.splice(0, messages.length, ...next); },
     });
     expect(outcome.ok).toBe(true);
 
@@ -143,12 +152,13 @@ describe('the idle /compact path (§4.4 / D-25)', () => {
       systemPrompt: 'sys',
       model: REF,
       signal: new AbortController().signal,
+      isCurrent: () => true,
+      adopt: (next) => { messages.splice(0, messages.length, ...next); },
     });
     expect(outcome.ok).toBe(false);
 
-    const settled = ends().at(-1)!.record;
-    expect(settled.applied).toBe(false);
-    expect(settled.tokensAfter).toBe(settled.tokensBefore);
+    expect(ends()).toHaveLength(0); // Declined before any paid call.
+    expect(outcome).toMatchObject({ ok: false, reason: 'nothing_to_drop' });
     expect(wiring.snapshot().tokensReclaimed).toBe(0);
   });
 });
@@ -301,5 +311,57 @@ describe('AC-Q13: a declined checkpoint settles without a card (quiet-noop §3.6
     expect(events.filter((e) => e.type === 'snapshot')).toHaveLength(1);
     // And the count that survives the silence reached the snapshot.
     expect(wiring.snapshot().declined).toBe(1);
+  });
+});
+
+
+describe('adoption ownership and local cancellation', () => {
+  it.each(['stale', 'throw'])('never publishes success when adoption is %s', async (mode) => {
+    const messages = conversation(6);
+    const before = JSON.stringify(messages);
+    const h = harness(messages);
+    const adopt = vi.fn(() => { throw new Error('replacement rejected'); });
+    const result = await h.wiring.compactNow({ messages, model: REF, systemPrompt: 'sys',
+      signal: new AbortController().signal, isCurrent: () => mode !== 'stale', adopt });
+    expect(result.ok).toBe(false);
+    expect(h.ends().at(-1)?.record.applied).toBe(false);
+    expect(h.wiring.getIdentity()).toBeUndefined();
+    expect(h.wiring.snapshot().generation).toBe(0);
+    expect(JSON.stringify(messages)).toBe(before);
+    expect(adopt).toHaveBeenCalledTimes(mode === 'stale' ? 0 : 1);
+    h.wiring.dispose();
+  });
+
+  it('releases an ignored abort, then isolates late usage from the next operation', async () => {
+    let release!: (value: AssistantMessage) => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const remote = new Promise<AssistantMessage>((resolve) => { release = resolve; });
+    const messages = conversation(6);
+    const complete = vi.fn(() => { entered(); return remote; });
+    const h = harness(messages, complete);
+    const parent = new AbortController();
+    const adopt = vi.fn();
+    const first = h.wiring.compactNow({ messages, model: REF, systemPrompt: 'sys',
+      signal: parent.signal, isCurrent: () => true, adopt });
+    await started;
+    parent.abort();
+    expect((await first).ok).toBe(false);
+    expect(h.wiring.snapshot().inFlight).toBe(false);
+    const secondAbort = new AbortController();
+    const second = h.wiring.compactNow({ messages, model: REF, systemPrompt: 'sys',
+      signal: secondAbort.signal, isCurrent: () => true, adopt });
+    expect(h.wiring.snapshot().inFlight).toBe(true);
+    secondAbort.abort();
+    await second;
+    release({ role: 'assistant', content: [{ type: 'text', text: '{}' }],
+      usage: { inputTokens: 30, outputTokens: 4 } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(adopt).not.toHaveBeenCalled();
+    expect(h.wiring.snapshot().generation).toBe(0);
+    expect(h.events.filter((event) => event.type === 'usage')).toHaveLength(1);
+    expect(h.wiring.snapshot().usage).toEqual({ inputTokens: 30, outputTokens: 4 });
+    expect(h.ends().every((event) => !event.record.applied)).toBe(true);
+    h.wiring.dispose();
   });
 });

@@ -5,9 +5,13 @@ import { Text } from 'ink';
 import stripAnsi from 'strip-ansi';
 import { OverlayFrame } from '../ui/layout/OverlayFrame.js';
 import { overlayListLimit } from '../ui/layout/overlay-window.js';
-import { viewportRows } from '../ui/layout/budget.js';
+import { buildFrameBudget } from '../ui/layout/budget.js';
+const viewportRows = (rows: number) => buildFrameBudget({ rows, cols: 80, draftRows: 1, popupRows: 0, statusExpanded: false }).viewportRows;
 import { getTheme } from '../ui/theme.js';
 import type { TermCapabilities } from '../ui/capabilities.js';
+import type { ModelRegistry } from '@aragon-agent/core';
+import { ModelPicker } from '../ui/overlays/ModelPicker.js';
+import { createTerminalHarness, settleTerminal } from './helpers/terminal-harness.js';
 
 const RICH: TermCapabilities = { colorLevel: 3, unicode: true };
 const THEME = getTheme('warm', RICH);
@@ -147,5 +151,79 @@ describe('OverlayFrame scroll clamping', () => {
     expect(frame).toContain('ROW20'); // nothing was cut
     expect(frame).not.toMatch(/\d+-\d+\/\d+/); // and no position indicator
     unmount();
+  });
+});
+
+
+describe('three-row overlay', () => {
+  it.each([40, 80])('keeps title, current body and action visible at %i columns', cols => {
+    const { lastFrame, unmount } = render(<OverlayFrame title="Confirm" hint="y approve / n reject"
+      maxRows={3} cols={cols} rows={rowsOf(12)} scrollOffset={7} theme={THEME} caps={RICH} />);
+    const lines = stripAnsi(lastFrame() ?? '').split('\n');
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toContain('Confirm');
+    expect(lines[1]).toContain('ROW8');
+    expect(lines[2]).toContain('y approve');
+    unmount();
+  });
+});
+
+describe('model picker keeps logical selection across viewport changes', () => {
+  const registry = { getModels: (provider: string) => provider === 'anthropic'
+    ? Array.from({ length: 10 }, (_, index) => ({ id: `model-${index}`,
+      name: `CHOICE${index} ${'long model label '.repeat(8)}` })) : [] } as unknown as ModelRegistry;
+
+  it('shrinks the real terminal to three rows and confirms the same selected model', async () => {
+    const terminal = createTerminalHarness(100, 24);
+    const onSelect = vi.fn();
+    const node = (cols: number, maxRows: number, isActive = true) => <ModelPicker
+      registry={registry} currentProvider="anthropic" currentModel="model-0"
+      cols={cols} maxRows={maxRows} isActive={isActive}
+      onSelect={onSelect} theme={THEME} caps={RICH} />;
+    try {
+      terminal.mount(node(100, 12));
+      await settleTerminal();
+      for (let i = 0; i < 4; i++) {
+        terminal.input('\x1b[B');
+        await settleTerminal();
+      }
+      terminal.resize(40, 12);
+      terminal.rerender(node(40, 3));
+      await settleTerminal();
+      const lines = terminal.lastFrame().trimEnd().split('\n');
+      expect(lines).toHaveLength(3);
+      expect(lines[1]).toContain('CHOICE4');
+      expect(lines[2]).toContain('Enter choose');
+      terminal.input('\r');
+      await settleTerminal();
+      expect(onSelect).toHaveBeenCalledExactlyOnceWith('anthropic', 'model-4');
+    } finally { terminal.dispose(); }
+  });
+
+  it('ignores hidden navigation and Enter, then restores selection and input', async () => {
+    const terminal = createTerminalHarness(80, 24);
+    const onSelect = vi.fn();
+    const node = (active: boolean, cols = 80, maxRows = 12) => <ModelPicker
+      registry={registry} currentProvider="anthropic" currentModel="model-5"
+      cols={cols} maxRows={maxRows} isActive={active}
+      onSelect={onSelect} theme={THEME} caps={RICH} />;
+    try {
+      terminal.mount(node(true));
+      await settleTerminal();
+      terminal.resize(39, 11);
+      terminal.rerender(node(false, 39, 0));
+      await settleTerminal();
+      terminal.input('\x1b[B');
+      terminal.input('\r');
+      await settleTerminal();
+      expect(onSelect).not.toHaveBeenCalled();
+      terminal.resize(40, 12);
+      terminal.rerender(node(true, 40, 3));
+      await settleTerminal();
+      expect(terminal.lastFrame()).toContain('CHOICE5');
+      terminal.input('\r');
+      await settleTerminal();
+      expect(onSelect).toHaveBeenCalledExactlyOnceWith('anthropic', 'model-5');
+    } finally { terminal.dispose(); }
   });
 });

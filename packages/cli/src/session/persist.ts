@@ -13,6 +13,10 @@ import type { Entry } from '../agent/reducer.js';
 import type { TodoItem } from '../todo/types.js';
 import { getSessionsDir } from '../config/store.js';
 import { validateSession } from './validate-session.js';
+import {
+  validateCompactionIdentity, verifyCompactionIdentity, type CompactionIdentity,
+} from '../compaction/memory-identity.js';
+import { getLogger } from '../logging/logger.js';
 
 /**
  * Bookkeeping `aragon exec` attaches to the sessions it owns
@@ -45,6 +49,7 @@ export interface SavedSession {
   savedAt: number;
   model?: ModelRef;
   messages: Message[];
+  compactionIdentity?: CompactionIdentity;
   entries: Entry[];
   /**
    * The live todo list at save time (todo-plan-execution §3.13).
@@ -159,11 +164,18 @@ export function saveSession(
   data: {
     model: ModelRef;
     messages: Message[];
+    compactionIdentity?: CompactionIdentity;
     entries: Entry[];
     todos: TodoItem[];
     meta?: SessionMeta;
   },
 ): void {
+  if (data.compactionIdentity) {
+    validateCompactionIdentity(data.compactionIdentity);
+    if (!verifyCompactionIdentity(data.messages, data.compactionIdentity)) {
+      getLogger().debug('agent', 'invalid_compaction_session_identity');
+    }
+  }
   const dir = dirname(filePath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const payload: SavedSession = {
@@ -171,6 +183,7 @@ export function saveSession(
     savedAt: Date.now(),
     model: data.model,
     messages: data.messages,
+    ...(data.compactionIdentity ? { compactionIdentity: data.compactionIdentity } : {}),
     entries: stripServiceTail(stripLiveToolOutput(data.entries)),
     todos: data.todos,
     ...(data.meta ? { meta: data.meta } : {}),

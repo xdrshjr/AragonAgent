@@ -40,15 +40,20 @@ describe('unified document in real Ink layout', () => {
         caps={caps} windowSize={20000} cols={79} />;
     }
     const frame = (nonce: number, kind: 'toTop' | 'toBottom' = 'toTop') =>
-      <Box height={196} width={80}>
-        <ScrollViewport theme={theme} caps={caps} intent={{ kind, nonce }}>
+      <AppShell rows={200} cols={80} header={<Text>Header</Text>}
+        statusRows={1} composerSlotRows={3} viewportRows={194}
+        composer={<Text>fixed-editor</Text>} status={<Text>Status</Text>}
+        viewport={<ScrollViewport theme={theme} caps={caps} intent={{ kind, nonce }}>
           <Body />
-        </ScrollViewport>
-      </Box>;
+        </ScrollViewport>} />;
     try {
       terminal.mount(frame(0));
       await settleTerminal();
       expect(terminal.lastFrame()).toContain('结果 399');
+      for (const frame of terminal.layoutFrames) {
+        expect(frame.trimEnd().split('\n')).toHaveLength(199);
+        expect(frame.split('\n')[197]).toContain('fixed-editor');
+      }
       terminal.rerender(frame(1));
       await settleTerminal();
       expect(terminal.lastFrame()).toContain('结果 0');
@@ -59,6 +64,10 @@ describe('unified document in real Ink layout', () => {
       terminal.rerender(frame(2, 'toBottom'));
       await settleTerminal();
       expect(terminal.lastFrame()).toContain('结果 399');
+      for (const frame of terminal.layoutFrames) {
+        expect(frame.trimEnd().split('\n')).toHaveLength(199);
+        expect(frame.split('\n')[197]).toContain('fixed-editor');
+      }
     } finally { terminal.dispose(); }
   }, 120000);
 
@@ -76,9 +85,11 @@ describe('unified document in real Ink layout', () => {
         thinkingVisible reducedMotion density="compact" theme={theme}
         caps={caps} windowSize={20000} cols={79} />;
     }
-    const frame = (rows: number) => <Box height={rows - 4} width={80}>
-      <ScrollViewport theme={theme} caps={caps}><Body /></ScrollViewport>
-    </Box>;
+    const frame = (rows: number) => <AppShell rows={rows} cols={80}
+      header={<Text>Header</Text>} statusRows={1} composerSlotRows={3}
+      viewportRows={rows - 6} composer={<Text>fixed-editor</Text>}
+      status={<Text>Status</Text>}
+      viewport={<ScrollViewport theme={theme} caps={caps}><Body /></ScrollViewport>} />;
     try {
       terminal.mount(frame(200));
       await settleTerminal();
@@ -101,16 +112,17 @@ describe('unified document in real Ink layout', () => {
     function EditorFrame({ active, nonce }: { active: boolean; nonce: number }) {
       useInput(() => {}); // App's global handler also drains input while the editor is inactive.
       const [pin, setPin] = React.useState(0);
-      return <Box height={20} width={80}>
-        <ScrollViewport active={active} theme={theme} caps={caps}
-          pinToBottomNonce={pin} intent={{ kind: 'lineUp', nonce, repeat: 15 }}
-          footer={<PromptInput isActive={active} cols={79} history={[]} commands={[]}
+      return <AppShell rows={24} cols={80} header={<Text>Header</Text>}
+        statusRows={1} composerSlotRows={3} viewportRows={18}
+        status={<Text>Status</Text>}
+        composer={<PromptInput isActive={active} cols={79} history={[]} commands={[]}
             running={false} cwd={process.cwd()} theme={theme} caps={caps}
             onInteraction={() => { interactions++; setPin((n) => n + 1); }}
-            onSubmit={(text) => { submissions.push(text); return { accepted: true }; }} />}>
+            onSubmit={(text) => { submissions.push(text); return { accepted: true }; }} />}
+        viewport={<ScrollViewport active={active} theme={theme} caps={caps}
+          pinToBottomNonce={pin} intent={{ kind: 'lineUp', nonce, repeat: 15 }}>
           <Text>{'history\n'.repeat(100)}</Text>
-        </ScrollViewport>
-      </Box>;
+        </ScrollViewport>} />;
     }
     try {
       terminal.mount(<EditorFrame active nonce={0} />); await settleTerminal();
@@ -118,7 +130,7 @@ describe('unified document in real Ink layout', () => {
       terminal.input('\x1b[D'); await settleTerminal();
       terminal.input(`${PASTE_OPEN}pasted\ntext${PASTE_CLOSE}`); await settleTerminal();
       terminal.rerender(<EditorFrame active nonce={1} />); await settleTerminal();
-      expect(terminal.lastFrame()).not.toContain('中文');
+      expect(terminal.lastFrame()).toContain('中文');
       terminal.rerender(<EditorFrame active={false} nonce={2} />); await settleTerminal();
       terminal.resize(39, 11);
       terminal.input('ignored'); await settleTerminal();
@@ -148,11 +160,12 @@ describe('unified document in real Ink layout', () => {
     const { render } = await import('ink');
     const offsets: number[] = [];
     const node = (redraw: number) => <AppShell rows={24} cols={80}
-      header={<Text>Header</Text>} toast={<Text>Activity</Text>}
+      header={<Text>Header</Text>} statusRows={1} composerSlotRows={3} viewportRows={18}
+      composer={<Text>EDITOR</Text>}
       status={<Text>Status {redraw}</Text>}
       viewport={<ScrollViewport showScrollIndicator scrollbar={bridge}
         cols={79} theme={theme} caps={caps} onScrolledLinesChange={(n) => offsets.push(n)}
-        footer={<Text>EDITOR</Text>}><Text>{'history\n'.repeat(100)}</Text></ScrollViewport>} />;
+        ><Text>{'history\n'.repeat(100)}</Text></ScrollViewport>} />;
     const instance = render(node(0),
     { stdout: observer.stdout, stdin: terminal.stdin, stderr: terminal.stdout,
       patchConsole: false, exitOnCtrlC: false });
@@ -185,10 +198,11 @@ describe('unified document in real Ink layout', () => {
     'draws the last-column track at %i x %i', async (cols, rows) => {
       const terminal = createTerminalHarness(cols, rows);
       const node = (nonce: number) => <AppShell rows={rows} cols={cols}
-        header={<Text>Header</Text>} toast={<Text>Activity</Text>} status={<Text>Status</Text>}
+        header={<Text>Header</Text>} statusRows={1} composerSlotRows={4} viewportRows={rows - 7}
+        composer={<Text>{"EDITOR1\nEDITOR2\nEDITOR3\nEDITOR4"}</Text>} status={<Text>Status</Text>}
         viewport={<ScrollViewport cols={cols - 1} theme={theme} caps={caps}
           showScrollIndicator intent={{ kind: 'lineUp', nonce, repeat: 4 }}
-          footer={<Text>{'EDITOR1\nEDITOR2\nEDITOR3\nEDITOR4'}</Text>}>
+          >
           <Text>{Array.from({ length: 100 }, (_, i) => `message ${i}`).join('\n')}</Text>
         </ScrollViewport>} />;
       try {
@@ -196,13 +210,13 @@ describe('unified document in real Ink layout', () => {
         await settleTerminal();
         const lines = terminal.lastFrame().trimEnd().split('\n');
         expect(lines).toHaveLength(rows - 1);
-        expect(lines.slice(1, rows - 3).every((line) =>
+        expect(lines.slice(1, rows - 6).every((line) =>
           stringWidth(line) === cols && /[|#]$/.test(line))).toBe(true);
         expect(terminal.lastFrame()).toContain('EDITOR4');
         terminal.rerender(node(1));
         await settleTerminal();
-        expect(terminal.lastFrame()).not.toContain('EDITOR');
-        expect(terminal.lastFrame()).toContain('message 99');
+        expect(terminal.lastFrame()).toContain('EDITOR4');
+        expect(terminal.lastFrame()).toContain('message 95');
       } finally { terminal.dispose(); }
     });
   it('preserves the footer instance across overlay and restores its scroll position', async () => {
@@ -231,7 +245,7 @@ describe('unified document in real Ink layout', () => {
   });
 });
 
-describe('fixed run status while the editor scrolls (real Ink)', () => {
+describe('fixed run status and editor (real Ink)', () => {
   const rich = { unicode: true, colorLevel: 0 } as const;
   const richTheme = getTheme('cool', rich);
   const state = initialViewState();
@@ -242,16 +256,16 @@ describe('fixed run status while the editor scrolls (real Ink)', () => {
   }) {
     useInput(() => {});
     return <AppShell rows={24} cols={80} header={<Text>Header</Text>}
+      statusRows={2} viewportRows={17} composerSlotRows={3} composer={<Composer cols={79} cursorVisible={false} isActive running history={[]} commands={[]}
+          cwd={process.cwd()} showHint submitCount={0} hintsEnabled agentMode="build"
+          theme={richTheme} caps={rich} onSubmit={() => ({ accepted: true })} />}
       viewport={<ScrollViewport theme={richTheme} caps={rich} cols={79}
         intent={nonce === 0 ? undefined : { kind, nonce, repeat }}
-        footer={<Composer cols={79} cursorVisible={false} isActive running history={[]} commands={[]}
-          cwd={process.cwd()} showHint submitCount={0} hintsEnabled agentMode="build"
-          theme={richTheme} caps={rich} onSubmit={() => ({ accepted: true })} />}>
+        >
         <Text>{Array.from({ length: 100 }, (_, i) => `message ${i}`).join('\n')}</Text>
       </ScrollViewport>}
-      toast={<BottomStatusRow theme={richTheme} toasts={[]}
-        hints={{ cols: 80, interactionPhase: 'running' }} />}
-      status={<StatusBar status="running" runPhase="generating" model="test" provider="test"
+      details={<Text>{interactionCopy.interrupt}</Text>}
+      status={<StatusBar columns={80} speedKnown status="running" runPhase="generating" model="test" provider="test"
         usageTotal={state.usageTotal} context={state.context} elapsedMs={1000}
         thinkingLevel="xhigh" tokPerSec={10} theme={richTheme} caps={rich} />} />;
   }
@@ -263,11 +277,11 @@ describe('fixed run status while the editor scrolls (real Ink)', () => {
       await settleTerminal();
       const rows = terminal.lastFrame().trimEnd().split('\n');
       expect(rows).toHaveLength(23);
-      expect(rows.at(-2)).toContain(interactionCopy.interrupt);
-      expect(rows.at(-1)).toContain(interactionCopy.generating[0]);
+      expect(rows.at(-1)).toContain(interactionCopy.interrupt);
+      expect(rows.at(-2)).toContain(interactionCopy.generating[1]);
       expect(rows.slice(0, -2).join('\n')).not.toContain('Esc');
       expect(braille(terminal.lastFrame())).toBe(1);
-      expect(braille(rows.at(-1)!)).toBe(1);
+      expect(braille(rows.at(-2)!)).toBe(1);
     } finally { terminal.dispose(); }
   });
 
@@ -285,17 +299,17 @@ describe('fixed run status while the editor scrolls (real Ink)', () => {
         const rows = frame.trimEnd().split('\n');
         expect(rows).toHaveLength(23);
         expect(braille(frame), `step ${step}`).toBe(1);
-        expect(braille(rows.at(-1)!)).toBe(1);
-        expect(rows.at(-2)).toContain(interactionCopy.interrupt);
+        expect(braille(rows.at(-2)!)).toBe(1);
+        expect(rows.at(-1)).toContain(interactionCopy.interrupt);
         if (!frame.includes(interactionCopy.runningPlaceholder)) sawEditorOut = true;
       }
-      expect(sawEditorOut).toBe(true);
+      expect(sawEditorOut).toBe(false);
       terminal.rerender(<Frame nonce={20} kind="toBottom" />);
       await settleTerminal();
       const back = terminal.lastFrame();
       expect(back).toContain(interactionCopy.runningPlaceholder);
       expect(braille(back)).toBe(1);
-      expect(braille(back.trimEnd().split('\n').at(-1)!)).toBe(1);
+      expect(braille(back.trimEnd().split('\n').at(-2)!)).toBe(1);
     } finally { terminal.dispose(); }
   });
 });

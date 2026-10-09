@@ -48,21 +48,16 @@ export function pickHeaderVariant(cols: number): HeaderVariant {
  * now spends the viewport's budget, not the frame's: the test has to be against
  * the account being charged.
  *
- * No hand-drawn ASCII fallback for `art`: figlet-style art is hard to keep
- * column-aligned, and a terminal without Unicode should not be paying six rows
- * for a wordmark in the first place. `banner` still carries the brand there, and
- * the always-present header bar carries it even at `none` (R1).
+ * Color preferences must not change geometry: a monochrome TUI gets the same
+ * wordmark as a colored one when there is room for it.
  */
 export function pickOpenerVariant(
   viewportRows: number,
   cols: number,
-  caps: TermCapabilities,
 ): OpenerVariant {
   if (
     viewportRows >= ART_MIN_VIEWPORT_ROWS &&
-    cols >= ART_MIN_COLS &&
-    caps.unicode &&
-    caps.colorLevel >= 2
+    cols >= ART_MIN_COLS
   ) {
     return 'art';
   }

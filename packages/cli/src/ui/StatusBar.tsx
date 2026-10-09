@@ -1,6 +1,6 @@
 /** A single row of complete, measured status fields. */
 import React from 'react';
-import { Box, Text, useStdout } from 'ink';
+import { Box, Text } from 'ink';
 import type { Theme } from './theme.js';
 import type { TermCapabilities } from './capabilities.js';
 import { pickGlyphs } from './glyphs.js';
@@ -9,9 +9,15 @@ import type { ContextUsageSnapshot } from '../compaction/types.js';
 import type { AgentMode } from '../agent/agent-mode.js';
 import type { PendingSteering } from '../agent/queued-messages.js';
 import { liveSpinner } from './ActivityLine.js';
-import { planStatusFields, type RunPhase } from './layout/status-layout.js';
+import { planPrimaryStatusFields, type RunPhase } from './layout/status-layout.js';
+import type { EscapeAction, StatusFeedback } from './status-feedback.js';
 
 export interface StatusBarProps {
+  columns: number;
+  speedKnown: boolean;
+  feedback?: StatusFeedback;
+  escapeAction?: EscapeAction;
+  interruptPhase?: 'ready' | 'armed' | 'stopping';
   runPhase?: RunPhase;
   activeTool?: { name: string; toolCallId: string } | null;
   runOutcome?: "none" | "ended" | "interrupted" | "failed";
@@ -50,17 +56,18 @@ export interface StatusBarProps {
 const redrawChar = (nonce: number): string => nonce % 2 ? String.fromCharCode(0x00a0) : ' ';
 
 export function StatusBar(props: StatusBarProps): React.ReactElement {
-  const { stdout } = useStdout();
-  const cols = stdout?.columns ?? 80;
+  const cols = props.columns;
   const phase = props.runPhase ?? (props.status === 'running' ? 'waiting' : 'idle');
   const active = phase !== 'idle' || !!props.compactionActive?.inFlight;
   const glyph = pickGlyphs(props.caps).spinnerStill;
   const spinner = active ? liveSpinner(props.reducedMotion ?? false, props.caps) : null;
-  const fields = planStatusFields({
+  const plan = planPrimaryStatusFields({
     columns: cols, phase, pendingCount: props.pendingSteering?.length ?? 0,
     context: props.context, usageTotal: props.usageTotal,
     thinkingLevel: props.thinkingLevel, elapsedMs: props.elapsedMs, tokPerSec: props.tokPerSec,
-    activeTool: props.activeTool, runOutcome: props.runOutcome, spinner: active ? glyph : '',
+    activeTool: props.activeTool, runOutcome: props.runOutcome, spinner: glyph,
+    speedKnown: props.speedKnown, feedback: props.feedback, escapeAction: props.escapeAction,
+    interruptPhase: props.interruptPhase,
     waitingForConfirmation: props.waitingForConfirmation, stopping: props.stopping,
     compacting: props.compactionActive?.inFlight, retryActive: props.retryActive,
     mode: props.agentMode, pendingMode: props.pendingAgentMode, servicesActive: props.servicesActive,
@@ -69,12 +76,12 @@ export function StatusBar(props: StatusBarProps): React.ReactElement {
   });
   const tones = { normal: props.theme.primary, muted: props.theme.muted,
     warning: props.theme.noticeWarn, error: props.theme.noticeError };
-  return <Box width={cols} height={1} flexShrink={0} flexDirection="row">
+  return <Box width={cols} height={1} flexShrink={0} flexDirection="row" overflow="hidden">
     <Box width={1} flexShrink={0}><Text>{redrawChar(props.redrawNonce ?? 0)}</Text></Box>
-    {fields.map((item, index) => <React.Fragment key={item.id}>
-      {index > 0 && <Box width={3} flexShrink={0}><Text color={props.theme.muted}> | </Text></Box>}
+    {plan.fields.map((item, index) => <React.Fragment key={item.id}>
+      {index > 0 && <Box width={plan.separatorCells} flexShrink={0}><Text color={props.theme.muted}>{plan.separator}</Text></Box>}
       <Box width={item.cells} flexShrink={0}>
-        <Text color={tones[item.tone]}>
+        <Text color={tones[item.tone]} wrap="truncate">
           {item.id === 'phase' && active
             ? <>{spinner ?? glyph}{item.text.slice(glyph.length)}</>
             : item.text}

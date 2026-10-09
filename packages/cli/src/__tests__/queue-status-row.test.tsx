@@ -12,9 +12,9 @@ describe('fixed queue status', () => {
   ('preserves queue, required state and redraw at $cols cells (unicode=$unicode)', async ({ cols, unicode }) => {
     const terminal = createTerminalHarness(cols, 12);
     const frame = () => terminal.frames.map((chunk) => stripAnsi(chunk))
-      .filter((chunk) => chunk.includes('上下文')).at(-1) ?? '';
+      .filter((chunk) => chunk.includes('0%')).at(-1) ?? '';
     const caps = { unicode, colorLevel: 0 } as const;
-    const node = (nonce: number) => <StatusBar
+    const node = (nonce: number) => <StatusBar columns={cols} speedKnown={false}
       model="model" provider="provider" status="idle" thinkingLevel="off"
       usageTotal={{ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
         cacheWriteTokens: 0, costUsd: 0 }}
@@ -30,12 +30,12 @@ describe('fixed queue status', () => {
     try {
       terminal.mount(node(0)); await settleTerminal();
       const before = frame();
-      expect(before).toMatch(/(?:队|待处理) 102/);
-      expect(before).toMatch(/上下文 0\/1(?:\.0)?k tok/);
-      expect(before).toContain('空闲');
+      expect(before).not.toContain('102');
+      expect(before).toContain('0%');
+      expect(before).toContain('Idle');
       expect(before).not.toContain('Esc');
-      if (cols >= 60) expect(before).toContain('plan>build');
-      if (cols >= 80) expect(before).toContain('服务 12345');
+      expect(before).not.toContain('plan>build');
+      expect(before).not.toContain('12345');
       expect(before).not.toContain('second line');
       expect(before.trimEnd().split('\n')).toHaveLength(1);
       expect(stringWidth(before.trimEnd())).toBeLessThanOrEqual(cols);

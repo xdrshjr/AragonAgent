@@ -61,24 +61,24 @@ export function formatCompactionStatus(ctx: CommandContext): string {
   lines.push(`Auto-compaction: ${state}`);
 
   const p = snapshot.pressure;
-  const pct = Math.round(p.ratio * 100);
-  const approx = p.source === 'estimate' || !p.windowKnown ? '~' : '';
+  const pct = (p.occupied / p.contextWindow * 100).toFixed(2);
+  const approx = p.source === 'estimate' || p.deltaTokens > 0 || !p.windowKnown ? '~' : '';
   lines.push(
-    `  Occupancy: ${approx}${pct}% (${formatTokens(p.occupied)} of ` +
-      `${formatTokens(p.contextWindow)}${p.windowKnown ? '' : ', window unknown'}) ` +
+    `  Occupancy: ${approx}${pct}% (${p.occupied} / ` +
+      `${p.contextWindow} tokens${p.windowKnown ? '' : ', window unknown'}) ` +
       `[${p.source === 'usage' ? 'measured' : 'estimated'}]`,
   );
   lines.push(
-    `  Triggers at: ${Math.round(config.threshold * 100)}% ` +
-      `(amber at ${Math.round(config.warnThreshold * 100)}%), ` +
-      `or when headroom drops below one full response`,
+    `  Automatic trigger: occupancy >= ${(config.threshold * 100).toFixed(2)}%; ` +
+      `manual: /compact (${Math.ceil(p.contextWindow * config.threshold)} tokens)`,
   );
   lines.push(`  Keeps: the original task + ${config.keepRecentTurns} recent turns, verbatim`);
   lines.push(
     `  Summarizer: ${snapshot.model || '(none)'}` +
       (config.useFastTier ? ' (fast tier preferred)' : ' (fast tier not used)'),
   );
-  lines.push(`  On summarize failure: ${config.onFailure}`);
+  lines.push('  On summarize failure: ' + (config.onFailure === 'truncate'
+    ? 'legacy truncate configured; preserving history' : 'stop; preserving history'));
 
   // THE PARENTHETICAL IS BUILT FROM WHATEVER APPLIES, AND OMITTED WHEN NOTHING
   // DOES (quiet-noop D-9). `declined` counts checkpoints that fired and chose to
@@ -144,6 +144,7 @@ export function formatCompactionStatus(ctx: CommandContext): string {
  */
 function compactionCost(ctx: CommandContext): number {
   const snapshot = ctx.controller.getCompactionSnapshot();
+  if (snapshot.costUsd !== undefined) return snapshot.costUsd;
   const ref = ctx.controller.getCompactionSummarizerRef();
   if (!ref) return 0;
   return computeCost(snapshot.usage, ctx.controller.getModelInfoFor(ref).cost);
@@ -379,7 +380,16 @@ export async function runCompactCommand(ctx: CommandContext): Promise<void> {
     return;
   }
 
-  const instructions = arg.length > 0 ? arg.slice(0, COMPACTION_LIMITS.summaryMaxChars) : undefined;
+  if (arg.length > COMPACTION_LIMITS.instructionsChars) {
+    ctx.notify('warn',
+      `Compaction instructions must be at most ${COMPACTION_LIMITS.instructionsChars} characters.`);
+    return;
+  }
+  const instructions = arg.length > 0 ? arg : undefined;
+  if (controller.isCompactionBusy?.() || controller.getCompactionSnapshot().inFlight) {
+    ctx.notify('info', 'Compaction is already running.');
+    return;
+  }
 
   if (ctx.state.status === 'running') {
     // QUEUED, NOT RACED (D-17). Replacing `messages` under a live loop is a race;
@@ -400,5 +410,5 @@ export async function runCompactCommand(ctx: CommandContext): Promise<void> {
   // THE SAME `invalid_history: <reason>` VOCABULARY THE ENGINE PRODUCES (D-25 /
   // P1-7), so the card, the log and `/compact status` cannot tell the idle path
   // apart from the in-loop one.
-  ctx.notify('warn', `Compaction did not run: ${outcome.reason ?? 'unknown'}`);
+  ctx.notify('warn', `History preserved: ${outcome.reason ?? 'unknown'}.`);
 }

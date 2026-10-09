@@ -3,26 +3,22 @@
  * providers only (R5) so it never offers a model whose provider would fail at
  * run with `Unknown LLM provider`. Lists each provider's builtin models.
  *
- * Uses `OverlayFrame`'s SELF-MANAGED mode (§4.4 / R-12). `ink-select-input`
- * windows itself via `limit` and registers its own `useInput` with `isFocused`
- * defaulting to true; Ink delivers every key to every mounted handler, so a
- * frame that also claimed the arrow keys would move the selection twice per
- * press. Slicing it by element would be worse still — it is one component, not
- * a list of rows. So the frame draws chrome only, and `App` registers no arrow
- * keys while this overlay is open.
+ * Selection belongs to a model ID, independently of the visible row window.
+ * Resizing or hiding the overlay never resets it. Each item occupies one row;
+ * this component owns navigation while App owns Escape.
  */
 
-import React from 'react';
-import SelectInput from 'ink-select-input';
+import React, { useState } from 'react';
+import { Text, useInput } from 'ink';
 import type { ModelRegistry } from '@aragon-agent/core';
 import { ADAPTER_PROVIDERS } from '../../config/schema.js';
 import type { Theme } from '../theme.js';
 import type { TermCapabilities } from '../capabilities.js';
 import { pickGlyphs } from '../glyphs.js';
-import { OverlayFrame } from '../layout/OverlayFrame.js';
-import { overlayListLimit } from '../layout/overlay-window.js';
+import { OverlayFrame, overlayBodyRows } from '../layout/OverlayFrame.js';
 
 interface ModelPickerProps {
+  isActive?: boolean;
   registry: ModelRegistry;
   currentProvider: string;
   currentModel: string;
@@ -39,6 +35,7 @@ interface Item {
 }
 
 export function ModelPicker({
+  isActive = true,
   registry,
   currentProvider,
   currentModel,
@@ -65,10 +62,29 @@ export function ModelPicker({
     }
   }
 
-  const initialIndex = Math.max(
-    0,
-    items.findIndex((it) => it.value === `${currentProvider}:${currentModel}`),
-  );
+  const [selectedValue, setSelectedValue] = useState(`${currentProvider}:${currentModel}`);
+  const selectedIndex = Math.max(0, items.findIndex(item => item.value === selectedValue));
+  const visibleRows = overlayBodyRows(maxRows, cols);
+  const offset = Math.max(0, Math.min(selectedIndex - visibleRows + 1, items.length - visibleRows));
+  const choose = (item: Item | undefined): void => {
+    if (!item) return;
+    const [provider, ...rest] = item.value.split(':');
+    onSelect(provider!, rest.join(':'));
+  };
+  useInput((input, key) => {
+    // Consume hidden input without changing selection, including when this is
+    // the only mounted input handler; otherwise buffered keys can replay later.
+    if (!isActive || !items.length) return;
+    if (key.upArrow || input === 'k') {
+      setSelectedValue(items[(selectedIndex - 1 + items.length) % items.length]!.value);
+    } else if (key.downArrow || input === 'j') {
+      setSelectedValue(items[(selectedIndex + 1) % items.length]!.value);
+    } else if (key.return) choose(items[selectedIndex]);
+    else if (/^[1-9]$/.test(input)) {
+      const visibleIndex = Number(input) - 1;
+      if (visibleIndex < visibleRows) choose(items[offset + visibleIndex]);
+    }
+  });
 
   return (
     <OverlayFrame
@@ -78,22 +94,11 @@ export function ModelPicker({
       cols={cols}
       theme={theme}
       caps={caps}
-    >
-      {/*
-        `limit` was previously not passed at all. Nine models happen to fit
-        today, which made it a latent bug rather than a visible one: adding a
-        few more would have reproduced exactly the silent clipping this round
-        exists to remove (P2-10).
-      */}
-      <SelectInput
-        items={items}
-        limit={overlayListLimit(maxRows)}
-        initialIndex={initialIndex >= 0 ? initialIndex : 0}
-        onSelect={(item: Item) => {
-          const [provider, ...rest] = item.value.split(':');
-          onSelect(provider!, rest.join(':'));
-        }}
-      />
-    </OverlayFrame>
+      scrollOffset={offset}
+      rows={items.length ? items.map((item, index) => <Text key={item.value}
+        wrap="truncate" color={index === selectedIndex ? theme.accent : theme.primary}>
+        {index === selectedIndex ? `${glyphs.caret} ` : '  '}{item.label}
+      </Text>) : [<Text key="empty" wrap="truncate">No models available</Text>]}
+    />
   );
 }

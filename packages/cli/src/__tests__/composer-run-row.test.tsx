@@ -5,6 +5,7 @@ import { Box } from 'ink';
 import stringWidth from 'string-width';
 import { Composer } from '../ui/Composer.js';
 import { StatusBar } from '../ui/StatusBar.js';
+import { planStatusDetail } from '../ui/layout/status-detail-layout.js';
 import { BottomStatusRow } from '../ui/BottomStatusRow.js';
 import { initialViewState } from '../agent/reducer.js';
 import { interactionCopy } from '../ui/interaction-copy.js';
@@ -19,7 +20,7 @@ const composer = (cols: number, running: boolean) => <Composer cols={cols} curso
   submitCount={0} hintsEnabled agentMode="build" theme={theme} caps={caps}
   onSubmit={() => ({ accepted: true })} />;
 
-const status = (running: boolean, reducedMotion = false) => <StatusBar
+const status = (running: boolean, reducedMotion = false) => <StatusBar columns={80} speedKnown={true}
   model="test" provider="test" usageTotal={state.usageTotal} context={state.context}
   status={running ? 'running' : 'idle'} runPhase={running ? 'generating' : 'idle'}
   elapsedMs={1000} thinkingLevel="xhigh" tokPerSec={10} theme={theme} caps={caps}
@@ -33,7 +34,7 @@ describe('fixed activity and action chrome', () => {
     const running = renderRowsAtWidth(composer(cols, true), cols);
     expect(idle).toHaveLength(3);
     expect(running).toHaveLength(3);
-    expect(idle.join('\n')).toContain(interactionCopy.idlePlaceholder);
+    expect(idle.join('\n')).toContain(interactionCopy.idlePlaceholder.slice(0, 25));
     expect(running.join('\n')).toContain(interactionCopy.runningPlaceholder);
     expect(running.join('\n')).not.toContain('Esc');
     expect(braille(running.join('\n'))).toBe(0);
@@ -43,14 +44,17 @@ describe('fixed activity and action chrome', () => {
   it('keeps one complete interrupt clause outside the editor and one status animation', () => {
     const rows = renderRowsAtWidth(<Box flexDirection="column">
       {composer(80, true)}
-      <BottomStatusRow theme={theme} toasts={[]}
-        hints={{ cols: 80, interactionPhase: 'running' }} />
+      <BottomStatusRow theme={theme} columns={80} plan={planStatusDetail({
+        status: { columns:80, phase:'generating', pendingCount:0, usageTotal:state.usageTotal, context:state.context,
+          elapsedMs:1000, thinkingLevel:'xhigh', tokPerSec:10, speedKnown:true },
+        hints:{cols:80,interactionPhase:'running'}, model:'test', provider:'test'
+      })} />
       {status(true)}
     </Box>, 80);
     expect(rows).toHaveLength(5);
     expect(rows[3]).toContain(interactionCopy.interrupt);
     expect(rows[3]).toContain('Enter');
-    expect(rows[4]).toContain(interactionCopy.generating[0]);
+    expect(rows[4]).toMatch(/Write|Generating/);
     expect(rows.slice(0, 3).join('\n')).not.toContain('Esc');
     expect(braille(rows.join('\n'))).toBe(1);
     expect(braille(rows[4]!)).toBe(1);

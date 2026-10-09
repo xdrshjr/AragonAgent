@@ -40,6 +40,9 @@ import { consumeStream } from '../stream-utils.js';
 // Constants
 // ---------------------------------------------------------------------------
 
+import { reportedContextWindow } from '../context-window.js';
+import { createModelDiscoverySignal } from '../model-discovery.js';
+
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 
 export const OPENAI_TERMINAL_DRAIN_MS = 750;
@@ -149,22 +152,25 @@ export class OpenAIProvider implements LLMProvider {
   // listModels
   // -----------------------------------------------------------------------
 
-  async listModels(apiKey: string, baseUrl?: string): Promise<ModelInfo[]> {
+  async listModels(apiKey: string, baseUrl?: string, signal?: AbortSignal): Promise<ModelInfo[]> {
     const base = (baseUrl || this.defaultBaseUrl).replace(/\/+$/, '');
     const url = `${base}/models`;
+    const scope = createModelDiscoverySignal(signal);
 
     try {
+      if (scope.signal.aborted) return [];
       const res = await fetch(url, {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${apiKey}`,
         },
-        signal: AbortSignal.timeout(15_000),
+        signal: scope.signal,
       });
 
       if (!res.ok) return [];
 
       const data = await res.json() as { data?: Array<Record<string, unknown>> };
+      if (signal?.aborted) return [];
       // The OpenAI models endpoint does NOT report an output ceiling, so this
       // maps through the static table and deliberately does NOT call
       // `learnModelCeiling` — claiming knowledge we do not have would outrank
@@ -175,7 +181,7 @@ export class OpenAIProvider implements LLMProvider {
           id: String(m.id || ''),
           name: String(m.id || ''),
           provider: this.id,
-          contextWindow: 128_000,
+          ...reportedContextWindow(m),
           maxOutputTokens: staticCeilingFor(this.id, String(m.id || '')) ?? DEFAULT_MAX_OUTPUT_TOKENS,
           supportsThinking: false,
           supportsTools: true,
@@ -184,6 +190,8 @@ export class OpenAIProvider implements LLMProvider {
         }));
     } catch {
       return [];
+    } finally {
+      scope.dispose();
     }
   }
 }

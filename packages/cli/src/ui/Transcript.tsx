@@ -265,6 +265,8 @@ function EntryViewImpl({
         compactionCardColor(entry, theme),
         <CompactionCard
           index={entry.index}
+          decision={entry.decision}
+          memoryVersion={entry.memoryVersion}
           trigger={entry.trigger}
           mode={entry.mode}
           applied={entry.applied}

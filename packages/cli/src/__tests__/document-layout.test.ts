@@ -4,15 +4,15 @@ import { reduceFollow } from '../ui/layout/follow-state.js';
 import { thumbRange } from '../ui/layout/scroll-indicator.js';
 
 describe('unified document', () => {
-  it('reserves only three fixed rows and fills before the footer', () => {
-    expect(buildDocumentLayout({ rows: 24, bodyRows: 12, footerRows: 6 })).toEqual({
+  it('uses the explicit message viewport and fills before the footer', () => {
+    expect(buildDocumentLayout({ viewportRows: 20, bodyRows: 12, footerRows: 6 })).toEqual({
       viewportRows: 20, paddingRows: 2, contentRows: 20, trailingContentRows: 8,
     });
-    expect(buildDocumentLayout({ rows: 12, bodyRows: 100, footerRows: 4 }))
+    expect(buildDocumentLayout({ viewportRows: 8, bodyRows: 100, footerRows: 4 }))
       .toMatchObject({ viewportRows: 8, paddingRows: 0, contentRows: 104 });
   });
   it('normalizes invalid row counts', () => {
-    expect(buildDocumentLayout({ rows: NaN, bodyRows: Infinity, footerRows: -4 }))
+    expect(buildDocumentLayout({ viewportRows: NaN, bodyRows: Infinity, footerRows: -4 }))
       .toEqual({ viewportRows: 0, paddingRows: 0, contentRows: 0, trailingContentRows: 0 });
   });
   it('combines shrinking footer and output before clamping', () => {

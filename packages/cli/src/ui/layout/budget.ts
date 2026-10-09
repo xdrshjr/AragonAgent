@@ -1,50 +1,62 @@
-/** Fullscreen reserves three fixed rows; composer height is a footer layout input. */
-
+/** One height budget for the transcript, fixed editor and status slots. */
 import { draftMaxRows } from '../composer-limits.js';
-import { frameHeight, MIN_FULLSCREEN_ROWS } from './frame.js';
+import { MIN_FULLSCREEN_ROWS, MIN_FULLSCREEN_COLS } from './frame.js';
 
-/** Below this many rows the composer's hint line is dropped to buy back a row. */
 export const HINT_MIN_ROWS = 20;
-
-export interface ChromeBudget {
-  /** Brand bar. Constant 1 in full-screen — this is what makes A-3 hold. */
-  header: number;
-  toast: number;
-  /**
-   * Round border (2) + the DRAFT's own rows, plus the hint row when it fits.
-   *
-   * The draft term used to be the constant 1 that the `3` / `4` below encode.
-   * That constant is what made a pasted 200-line draft draw the transcript 197
-   * rows shorter than every consumer of `viewportRows` believed -- the trap
-   * `BottomStatusRow.tsx:5-27` already documents at 1/200th the magnitude.
-   */
-  composer: number;
-  status: number;
+export interface FrameBudgetInput {
+  rows?: number;
+  cols?: number;
+  draftRows: number;
+  popupRows: number;
+  statusExpanded: boolean;
 }
+export interface FrameBudget {
+  rows: number;
+  cols: number;
+  inactive: boolean;
+  frameRows: number;
+  headerRows: number;
+  statusRows: 0 | 1 | 2;
+  composerRows: number;
+  composerSlotRows: number;
+  popupRows: number;
+  popupMaxHeight: number;
+  viewportRows: number;
+  composerCols: number;
+}
+const dimension = (value: number | undefined, fallback: number): number =>
+  value !== undefined && Number.isFinite(value) && value >= 1 ? Math.floor(value) : fallback;
 
-/**
- * The composer's draft rows, clamped to what this terminal height allows.
- *
- * Exported so the reporter and the budget clamp with ONE function: I-8 requires
- * the rendered row count and the number handed to `viewportRows` to be the same
- * number, and two clamps are how they stop being.
- */
+/** Clamp the displayed draft, independently of any transcript or panel content. */
 export function clampDraftRows(rows: number, draftRows: number): number {
   const wanted = Number.isFinite(draftRows) ? Math.floor(draftRows) : 1;
   return Math.max(1, Math.min(wanted, draftMaxRows(rows)));
 }
 
-export function chromeBudget(rows: number, draftRows = 1): ChromeBudget {
-  return {
-    header: 1,
-    toast: 1,
-    composer: 2 + clampDraftRows(rows, draftRows),
-    status: 1,
-  };
+/** Total menu capacity, including its borders; reserve at least one message row. */
+export function popupCapacity(rows: number, draftRows: number, statusExpanded: boolean): number {
+  return Math.max(0, rows - 1 - 1 - (statusExpanded ? 2 : 1)
+    - 2 - clampDraftRows(rows, draftRows) - 1);
 }
 
-/** Shared document height; the legacy draft argument remains source-compatible. */
-export function viewportRows(rows: number, _draftRows = 1): number {
-  if (!Number.isFinite(rows) || rows < MIN_FULLSCREEN_ROWS) return 0;
-  return Math.max(0, frameHeight(rows) - 3);
+/** Normalize terminal dimensions once and conserve every visible frame row. */
+export function buildFrameBudget(input: FrameBudgetInput): FrameBudget {
+  const rows = dimension(input.rows, 24);
+  const cols = dimension(input.cols, 80);
+  const frameRows = rows - 1;
+  const composerCols = Math.max(0, cols - 1);
+  const inactive = rows < MIN_FULLSCREEN_ROWS || cols < MIN_FULLSCREEN_COLS;
+  if (inactive) return { rows, cols, inactive, frameRows, composerCols, headerRows: 0,
+    statusRows: 0, composerRows: 0, composerSlotRows: 0, popupRows: 0,
+    popupMaxHeight: 0, viewportRows: 0 };
+  const statusRows = input.statusExpanded ? 2 : 1;
+  const composerRows = 2 + clampDraftRows(rows, input.draftRows);
+  const popupMaxHeight = popupCapacity(rows, input.draftRows, input.statusExpanded);
+  const requested = Number.isFinite(input.popupRows) ? Math.floor(input.popupRows) : 0;
+  const candidate = Math.max(0, Math.min(requested, popupMaxHeight));
+  const popupRows = candidate >= 3 ? candidate : 0;
+  const composerSlotRows = composerRows + popupRows;
+  return { rows, cols, inactive, frameRows, composerCols, headerRows: 1, statusRows,
+    composerRows, composerSlotRows, popupRows, popupMaxHeight,
+    viewportRows: frameRows - 1 - statusRows - composerSlotRows };
 }

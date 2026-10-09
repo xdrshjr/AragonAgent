@@ -174,18 +174,20 @@ const UNICODE_GLYPHS: Glyphs = {
   thinking: '✱',
   toolPending: '◦',
   toolRunning: '◍',
-  toolDone: '✔',
-  toolError: '✖',
-  info: 'ℹ',
+  // U+2714 has conflicting emoji widths in Ink and string-width. U+2713 is
+  // consistently one cell, including beside the right-edge scrollbar.
+  toolDone: '✓',
+  toolError: '×',
+  info: 'ⓘ',
   warn: '▲',
-  error: '✖',
+  error: '×',
   bullet: '•',
   spinnerStill: '·',
   gaugeFull: '█',
   gaugeEmpty: '░',
   keyOn: '●',
   keyOff: '○',
-  boxChecked: '☑',
+  boxChecked: '☒',
   boxEmpty: '☐',
   wordmark: '◇',
 
@@ -215,11 +217,11 @@ const UNICODE_GLYPHS: Glyphs = {
   boxStyle: 'round',
 
   teamAgent: '◆',
-  teamMail: '✉',
+  teamMail: '⇄',
 
   todoPending: '○',
   todoActive: '▸',
-  todoDone: '✔',
+  todoDone: '✓',
 
   retry: '↻',
   compaction: '⤓',
@@ -236,7 +238,7 @@ const UNICODE_GLYPHS: Glyphs = {
     ask_user: '?',
     submit_plan: '◈',
     task: '◆',
-    todo_write: '☰',
+    todo_write: '≡',
   },
   toolDefault: '•',
 };

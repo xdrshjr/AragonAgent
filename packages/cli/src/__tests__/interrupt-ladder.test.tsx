@@ -408,7 +408,7 @@ describe.each([true, false])('the interrupt ladder (bash.background: %s)', (back
     await delay(40);
     expect(controller.abortCalls).toBe(0);
     expect(controller.forceStopCalls).toBe(0);
-    expect(lastFrame() ?? '').toContain('\u518d\u6309 Esc \u4e2d\u65ad');
+    expect(lastFrame() ?? '').toContain('Esc stop');
     unmount();
   });
 
@@ -430,7 +430,8 @@ describe.each([true, false])('the interrupt ladder (bash.background: %s)', (back
     await delay(60);
 
     expect(controller.forceStopCalls).toBe(1);
-    expect(lastFrame() ?? '').toContain('中断');
+    expect(lastFrame() ?? '').toContain('Ask a question or describe a task...');
+    expect(lastFrame() ?? '').not.toContain('Add a follow-up...');
     unmount();
   });
 
@@ -511,7 +512,8 @@ describe.each([true, false])('the interrupt ladder (bash.background: %s)', (back
     controller.emit({ type: 'agent_end', messages: [] } as unknown as AgentEvent);
     await delay(60);
 
-    expect(lastFrame() ?? '').toContain('中断');
+    expect(lastFrame() ?? '').toContain('Ask a question or describe a task...');
+    expect(lastFrame() ?? '').not.toContain('Add a follow-up...');
     unmount();
   });
 
@@ -529,7 +531,7 @@ describe.each([true, false])('the interrupt ladder (bash.background: %s)', (back
     expect(controller.stopAllCalls[0]).toEqual({});
     // Stopping a server and quitting the app are different intentions, and the
     // hint row still names an exit clause so quitting stays discoverable (P1-4).
-    expect(lastFrame() ?? '').not.toContain('Press Ctrl+C again to exit');
+    expect(lastFrame() ?? '').not.toContain('^C exit');
     unmount();
   });
 
@@ -540,7 +542,7 @@ describe.each([true, false])('the interrupt ladder (bash.background: %s)', (back
     stdin.write(CTRL_C);
     await delay(40);
     expect(controller.stopAllCalls).toHaveLength(0);
-    expect(lastFrame() ?? '').toContain('Press Ctrl+C again to exit');
+    expect(lastFrame() ?? '').toContain('^C exit');
     unmount();
   });
 });

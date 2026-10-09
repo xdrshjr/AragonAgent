@@ -21,7 +21,6 @@ import {
   estimateAppendedTokens,
   isApproximate,
   occupiedTokens,
-  requiredHeadroom,
   shouldCompactAt,
 } from '../compaction/pressure.js';
 import {
@@ -185,32 +184,27 @@ describe('the trigger has TWO terms (§3.4.3 / D-12)', () => {
   }
 
   it('fires on the ratio alone at a large window', () => {
-    expect(shouldCompactAt(pressureAt(180_000, 200_000), 0.9, { maxOutputTokens: 8192 })).toBe(true);
-    expect(shouldCompactAt(pressureAt(170_000, 200_000), 0.9, { maxOutputTokens: 8192 })).toBe(false);
+    expect(shouldCompactAt(pressureAt(180_000, 200_000), 0.9)).toBe(true);
+    expect(shouldCompactAt(pressureAt(170_000, 200_000), 0.9)).toBe(false);
   });
 
-  it('fires on HEADROOM at a small window, below the ratio threshold', () => {
+  it('does not fire on headroom below the ratio threshold', () => {
     // 90 % of a 32 k window leaves 3.2 k, which is less than a single
     // `max_tokens` of 8192 — the request is already impossible. A pure-ratio
     // trigger is correct for 200 k windows and quietly wrong for this one.
     const small = pressureAt(Math.round(32_000 * 0.88), 32_000);
     expect(small.ratio).toBeLessThan(0.9);
-    expect(shouldCompactAt(small, 0.9, { maxOutputTokens: 8192 })).toBe(true);
+    expect(shouldCompactAt(small, 0.9)).toBe(false);
 
     // The SAME ratio on a 200 k window does not fire, which is what proves the
     // second term is doing the work rather than the first.
     const large = pressureAt(Math.round(200_000 * 0.88), 200_000);
     expect(large.ratio).toBeCloseTo(0.88);
-    expect(shouldCompactAt(large, 0.9, { maxOutputTokens: 8192 })).toBe(false);
-  });
-
-  it('requiredHeadroom is the output cap plus both core margins', () => {
-    // 8192 + THINKING_HEADROOM_TOKENS (4096) + CONTEXT_SAFETY_MARGIN_TOKENS (1024)
-    expect(requiredHeadroom({ maxOutputTokens: 8192 })).toBe(13_312);
+    expect(shouldCompactAt(large, 0.9)).toBe(false);
   });
 
   it('never fires when the window is unknown-as-zero', () => {
-    expect(shouldCompactAt(pressureAt(1000, 0), 0.9, { maxOutputTokens: 8192 })).toBe(false);
+    expect(shouldCompactAt(pressureAt(1000, 0), 0.9)).toBe(false);
   });
 });
 
@@ -260,7 +254,7 @@ describe('clampCompactionConfig (§4.2 / P2-5)', () => {
     expect(clampCompactionConfig({ keepRecentTurns: 0 }).keepRecentTurns).toBe(
       DEFAULT_COMPACTION_CONFIG.keepRecentTurns,
     );
-    expect(clampCompactionConfig({ onFailure: 'garbage' }).onFailure).toBe('truncate');
+    expect(clampCompactionConfig({ onFailure: 'garbage' }).onFailure).toBe('stop');
     expect(clampCompactionConfig({ onFailure: 'stop' }).onFailure).toBe('stop');
   });
 
@@ -386,8 +380,8 @@ describe('computePressure with a delta (hardening §3.2.2 / W1)', () => {
     const before = computePressure({ ...input, lastUsage: measured });
     const after = computePressure({ ...input, lastUsage: measured, measuredPrefixLength: 1 });
 
-    expect(shouldCompactAt(before, 0.9, { maxOutputTokens: 8_192 })).toBe(false);
-    expect(shouldCompactAt(after, 0.9, { maxOutputTokens: 8_192 })).toBe(true);
+    expect(shouldCompactAt(before, 0.9)).toBe(false);
+    expect(shouldCompactAt(after, 0.9)).toBe(true);
   });
 });
 

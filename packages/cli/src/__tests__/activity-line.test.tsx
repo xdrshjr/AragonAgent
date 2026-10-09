@@ -145,15 +145,15 @@ describe('ActivityLabel / resolveActivityLabel (T15)', () => {
   const base = { startedAt: STARTED, elapsedMs: 0, reducedMotion: true };
 
   it('显式运行阶段保持真实标签，不再随趣味短语轮换', () => {
-    for (const [phase, label] of [['starting', '启动中'], ['waiting', '等待模型'],
-      ['thinking', '正在思考'], ['generating', '正在生成内容']] as const) {
+    for (const [phase, label] of [['starting', 'Starting'], ['waiting', 'Waiting for model'],
+      ['thinking', 'Thinking'], ['generating', 'Generating']] as const) {
       expect(resolveActivityLabel({ ...base, phase, reducedMotion: false }, glyphs)).toBe(label);
       expect(resolveActivityLabel({ ...base, phase, elapsedMs: 120000, reducedMotion: false }, glyphs)).toBe(label);
     }
   });
 
   it('显式结束结局没有活动spinner', () => {
-    for (const [outcome, label] of [['ended', '已结束'], ['interrupted', '已中断'], ['failed', '运行失败']] as const) {
+    for (const [outcome, label] of [['ended', 'Done'], ['interrupted', 'Interrupted'], ['failed', 'Failed']] as const) {
       const view = render(<ActivityLine {...base} reducedMotion={false} phase="idle" outcome={outcome}
         theme={getTheme('cool', RICH)} caps={RICH} />);
       const frame = stripAnsi(view.lastFrame() ?? '');

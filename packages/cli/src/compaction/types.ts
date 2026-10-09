@@ -20,7 +20,14 @@
  * possible change.
  */
 
-import type { TokenUsage } from '@aragon-agent/core';
+import type { ModelRef, TokenUsage } from '@aragon-agent/core';
+
+/** Billing belongs to the actual call, including fallback and late responses. */
+export interface CompactionBilling {
+  modelRef?: ModelRef;
+  costUsd?: number;
+  pricingUnknown?: boolean;
+}
 
 /**
  * `relieved` MEANS THE TAIL WAS CLIPPED AND NOTHING WAS DROPPED (hardening
@@ -54,7 +61,22 @@ export type CompactionUiTrigger = 'pressure' | 'overflow' | 'manual';
 /** Whether a figure was measured by the provider or estimated by us. */
 export type PressureSource = 'usage' | 'estimate';
 
+/** The exact occupancy evidence at the compaction checkpoint. */
+export interface CompactionDecision {
+  occupied: number;
+  contextWindow: number;
+  threshold: number;
+  source: PressureSource;
+  deltaTokens: number;
+}
+
 export interface Pressure {
+  /**
+   * `user` means the CLI's model-windows.json supplied the denominator - a
+   * hand-typed window for a model no table knows. It outranks `api` and
+   * `catalog` in `getModelInfoFor` precisely because the user asserted it.
+   */
+  windowSource?: 'api' | 'catalog' | 'fallback' | 'user';
   occupied: number;
   contextWindow: number;
   /** `occupied / contextWindow`, clamped to [0, 1]. */
@@ -120,6 +142,7 @@ export interface Pressure {
  * view state, and `toContextUsage` in `meter.ts` is the ONLY converter.
  */
 export interface ContextUsageSnapshot {
+  windowSource?: Pressure['windowSource'];
   /** Occupied tokens (measured, plus an estimate of anything appended since). */
   occupied: number;
   /** The denominator actually used. */
@@ -138,6 +161,8 @@ export interface ContextUsageSnapshot {
 
 /** One compaction, in whatever state it reached. Rendered by `CompactionCard`. */
 export interface CompactionRecord {
+  decision?: CompactionDecision;
+  memoryVersion?: 2;
   /** 1-based within the session, so the card can name itself. */
   index: number;
   trigger: CompactionUiTrigger;
@@ -185,6 +210,8 @@ export interface CompactionRecord {
 
 /** Everything `/compact status`, the chip and the settings row read. */
 export interface CompactionSnapshot {
+  /** Sum of known per-call costs; never reprice accumulated usage with a new model. */
+  costUsd?: number;
   /** Registered AND enabled AND a summarizer model resolves. */
   live: boolean;
   /** The summarizer's model id, or `''`. */
@@ -247,7 +274,7 @@ export interface CompactionSnapshot {
 export type CompactionEvent =
   | { type: 'compaction_start'; index: number; trigger: CompactionUiTrigger; model: string }
   | { type: 'compaction_end'; record: CompactionRecord }
-  | { type: 'usage'; usage: TokenUsage }
+  | ({ type: 'usage'; usage: TokenUsage } & CompactionBilling)
   | { type: 'snapshot'; snapshot: CompactionSnapshot };
 
 export type CompactionEventListener = (event: CompactionEvent) => void;

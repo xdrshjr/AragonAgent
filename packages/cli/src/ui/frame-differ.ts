@@ -67,6 +67,18 @@ const ERASE_DOWN = `${CSI}J`;
 /** DEC private mode 2026 — begin/end synchronized update (F2, §3.3). */
 const SYNC_BEGIN = `${CSI}?2026h`;
 const SYNC_END = `${CSI}?2026l`;
+/**
+ * `ansiEscapes.clearTerminal` — Ink's tall-frame write (`ink.js:121`).
+ *
+ * When `outputHeight >= stdout.rows` Ink abandons log-update and writes
+ * `clearTerminal + frame` in one chunk: no erase-lines prefix, no trailing
+ * `\n`. That happens on ANY height shrink, because Ink re-renders
+ * synchronously from its own `'resize'` handler while the React tree still
+ * holds the pre-resize height (`useTerminalSize` debounces 50 ms). Without
+ * recognition the chunk lands in the prefix-less branch and counts as a
+ * foreign write — the same §5.6 notice, one ordinary window-drag later.
+ */
+const CLEAR_TERMINAL = `${CSI}2J${CSI}3J${CSI}H`;
 
 function cursorTo(row: number): string {
   return `${CSI}${row};1H`;
@@ -421,6 +433,21 @@ export function createFrameDiffer(options: FrameDifferOptions): FrameDiffer {
   };
 
   const transform = (chunk: string): string | null => {
+    // A+ · Ink's tall-frame write (see CLEAR_TERMINAL above): a shrink makes
+    // `outputHeight >= stdout.rows` while the tree still holds the old height,
+    // so Ink bypasses log-update and writes clearTerminal + frame in one chunk.
+    // The chunk paints the whole frame by itself, so it needs no parsing: pass
+    // it through, drop the cache (the screen it described is gone), and do NOT
+    // count it — this is Ink's own write at a moment absolute addressing cannot
+    // cover, not something behind Ink's back. The next log-update frame lands
+    // on an empty cache and is a full repaint, exactly what a cleared screen
+    // needs. Checked BEFORE the seed bookkeeping — and it must be, because the
+    // tall-frame write bypasses `this.log`: log-update's own
+    // `previousLineCount` stays 0, so the first log-update frame after it still
+    // carries no erase prefix. THAT write is the session's genuine seed frame
+    // (P1-1), and a control write arriving first must not spend its exemption.
+    if (chunk.startsWith(CLEAR_TERMINAL)) return passThrough(false);
+
     const firstChunk = !seenAnyChunk;
     seenAnyChunk = true;
 

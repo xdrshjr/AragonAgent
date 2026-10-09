@@ -73,7 +73,7 @@ describe('queue panel measured output in real Ink', () => {
           expect(panelRows.slice(1).map((row) => row.trimEnd()))
             .toEqual(layout.items.map((item) => item.label));
           expect(panelRows[1]).toContain('1. FIRST');
-          expect(panelRows[1]).toContain('(+1\u884c)');
+          expect(panelRows[1]).toContain('(+1 lines)');
           if (availableRows === 4) {
             expect(panelRows[2]).toContain('2. SECOND');
             expect(panelRows[3]).toContain('3. THIRD');

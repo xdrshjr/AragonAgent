@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -12,6 +12,8 @@ const TMP = mkdtempSync(join(tmpdir(), 'aragon-cli-cfg-'));
 process.env.ARAGON_HOME = TMP;
 
 const { loadConfig, makeGetApiKey } = await import('../config/load.js');
+const { reloadModelSettings } = await import('../agent/model-profile-settings.js');
+import type { ModelSettingsController } from '../agent/model-profile-settings.js';
 const { updatePersistedConfig, loadPersistedConfig, getConfigPath, readConfigFile } = await import(
   '../config/store.js'
 );
@@ -28,6 +30,64 @@ const { Logger, setActiveLogger, resetLoggerForTest } = await import('../logging
 const { currentLogFileName } = await import('../logging/file-sink.js');
 
 const CWD = TMP; // has no .env
+
+afterEach(() => vi.unstubAllEnvs());
+
+describe('interactive display policy', () => {
+  function clearTerminalMarkers(): void {
+    for (const key of ['WT_SESSION', 'TERM_PROGRAM', 'LANG', 'LC_ALL', 'LC_CTYPE',
+      'NO_COLOR', 'FORCE_COLOR', 'COLORTERM']) vi.stubEnv(key, undefined);
+    vi.stubEnv('TERM', 'dumb');
+    vi.stubEnv('CI', '1');
+  }
+
+  it('keeps the full TUI without terminal markers while headless retains detection', () => {
+    clearTerminalMarkers();
+    const interactive = loadConfig({ cwd: CWD }, { interactive: true });
+    expect(interactive.unicode).toBe(true);
+    expect(interactive.colorLevel).toBe(3);
+    expect(interactive.reducedMotion).toBe(false);
+    const headless = loadConfig({ cwd: CWD });
+    expect(headless.unicode).toBe(false);
+    expect(headless.colorLevel).toBe(0);
+  });
+
+  it.each([['NO_COLOR', ''], ['NO_COLOR', '1'], ['FORCE_COLOR', '0'],
+    ['FORCE_COLOR', 'false']])('honors %s=%s without losing Unicode', (key, value) => {
+    clearTerminalMarkers();
+    vi.stubEnv(key, value);
+    const config = loadConfig({ cwd: CWD }, { interactive: true });
+    expect(config.color).toBe(false);
+    expect(config.colorLevel).toBe(0);
+    expect(config.unicode).toBe(true);
+  });
+
+  it('honors --no-color and an explicit reduced-motion preference', () => {
+    clearTerminalMarkers();
+    writeFileSync(getConfigPath(), JSON.stringify({ reducedMotion: true }));
+    const config = loadConfig({ cwd: CWD, color: false }, { interactive: true });
+    expect(config.colorLevel).toBe(0);
+    expect(config.unicode).toBe(true);
+    expect(config.reducedMotion).toBe(true);
+  });
+
+  it.each([true, false])('preserves the live display policy across /reload, color=%s', (color) => {
+    clearTerminalMarkers();
+    let live = loadConfig({ cwd: CWD, color }, { interactive: true });
+    const before = { color: live.color, colorLevel: live.colorLevel, unicode: live.unicode };
+    const controller: ModelSettingsController = {
+      getConfig: () => live, getSettingsRevision: () => 0,
+      isModelSettingsBusy: () => false, isFastRegistered: () => false,
+      prepareModelSettingsSnapshot: config => ({ config, systemPrompt: '',
+        model: { providerId: config.provider, modelId: config.model } }),
+      applyModelSettingsSnapshot: snapshot => { live = snapshot.config; },
+      applyModelSettingsEffects: () => {}, blockModelSettingsRequests: () => {},
+    };
+    expect(reloadModelSettings(controller).ok).toBe(true);
+    expect(live).toMatchObject(before);
+    if (!color) expect(live.reducedMotion).toBe(true);
+  });
+});
 
 function clearEnv(): void {
   for (const key of Object.keys(process.env)) {

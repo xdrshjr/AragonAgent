@@ -23,6 +23,7 @@ import process from 'node:process';
 import type { AgentController } from '../agent/controller.js';
 import { runHeadless } from '../agent/headless.js';
 import { computeCost } from '../agent/usage.js';
+import type { TokenUsage } from '@aragon-agent/core';
 import { loadConfig, type CliFlags } from '../config/load.js';
 import {
   latestSessionForCwd,
@@ -39,7 +40,7 @@ import { createEmitter, type ExecEmitter } from './emitter.js';
 import type { ExecPermissionMode, ExecResultParams } from './events.js';
 import { resolveExecOptions, type ExecOptions, type RawExecOptions } from './options.js';
 import { resolvePermission, type ToolPermission } from './permission.js';
-import { ExecRunner, singlePrompt, type ExecPromptSource } from './runner.js';
+import { ExecRunner, singlePrompt, type ExecPromptSource, type ExecCompactionBilling } from './runner.js';
 import { createStdinPromptSource, prefixSource } from './stdin-stream.js';
 
 /**
@@ -188,7 +189,7 @@ async function execute(input: ExecuteInput): Promise<number> {
   });
 
   if (plan.saved) {
-    controller.replaceMessages(plan.saved.messages);
+    controller.replaceMessages(plan.saved.messages, plan.saved.compactionIdentity);
     controller.restoreTodos(plan.saved.todos);
   }
 
@@ -270,7 +271,7 @@ async function execute(input: ExecuteInput): Promise<number> {
       outputTokens: stats.usage.outputTokens,
       totalTokens: stats.usage.inputTokens + stats.usage.outputTokens,
     },
-    cost: buildCost(controller, stats.usage),
+    cost: buildCost(controller, stats.usage, stats.compactionBilling),
     model: { provider: config.provider, id: config.model },
     todos: todo ? { total: todo.total, done: todo.doneCount } : null,
     error:
@@ -346,18 +347,26 @@ function withPermissionMode(flags: CliFlags, mode: ExecPermissionMode): CliFlags
 
 function buildCost(
   controller: AgentController,
-  usage: { inputTokens: number; outputTokens: number },
+  usage: TokenUsage,
+  compaction?: ExecCompactionBilling,
 ): { amount: number; currency: 'USD'; known: boolean } {
   const config = controller.getConfig();
-  const known = controller.isPricedModel({
+  const known = !compaction?.pricingUnknown && controller.isPricedModel({
     providerId: config.provider,
     modelId: config.model,
   });
+  const mainUsage: TokenUsage = {
+    inputTokens: usage.inputTokens - (compaction?.usage.inputTokens ?? 0),
+    outputTokens: usage.outputTokens - (compaction?.usage.outputTokens ?? 0),
+    cacheReadTokens: (usage.cacheReadTokens ?? 0) - (compaction?.usage.cacheReadTokens ?? 0),
+    cacheWriteTokens: (usage.cacheWriteTokens ?? 0) - (compaction?.usage.cacheWriteTokens ?? 0),
+  };
   // `amount` is `0` when the price is unknown, mirroring the fast tier's rule
   // that a feature which looks free while it is spending money is worse than one
   // that admits it does not know.
   return {
-    amount: known ? computeCost(usage, controller.getModelInfo().cost) : 0,
+    amount: known ? computeCost(mainUsage, controller.getModelInfo().cost) +
+      (compaction?.costUsd ?? 0) : 0,
     currency: 'USD',
     known,
   };
@@ -604,7 +613,7 @@ function persist(
           modelId: config.model,
           ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
         },
-        messages: controller.getMessages(),
+        ...(controller.getSessionSnapshot?.() ?? { messages: controller.getMessages() }),
         entries: [],
         todos: controller.getTodoSnapshot?.()?.items ?? [],
       },

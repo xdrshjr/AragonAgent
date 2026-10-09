@@ -77,11 +77,14 @@ function occupancyLine(usage: ContextUsageSnapshot): string {
       : usage.deltaTokens > 0
       ? `[measured ${formatTokens(measured)} + ${formatTokens(usage.deltaTokens)} estimated]`
       : `[measured ${formatTokens(measured)}]`;
+  if (!usage.windowKnown) return `${formatTokens(usage.occupied)} of ?   ${breakdown}`;
   return `${pct}   ${formatTokens(usage.occupied)} of ${formatTokens(usage.window)}   ${breakdown}`;
 }
 
 /**
- * Where the denominator came from. THREE SOURCES, ALL NAMED.
+ * Where the denominator came from. FOUR SOURCES, ALL NAMED - the fourth
+ * being the user's own model-windows.json, which exists precisely because
+ * the other three cannot know a gateway alias released last week.
  *
  * THE PLACEHOLDER BRANCH IS THE ONE THAT MATTERS. `buildRuntimeModel` returns a
  * flat 128000 for any model the static table has never seen - a custom
@@ -92,15 +95,24 @@ function occupancyLine(usage: ContextUsageSnapshot): string {
  */
 function windowLine(usage: ContextUsageSnapshot): string {
   if (usage.windowOverridden) {
-    return `${usage.window}   from contextWindow in config.json (overrides the model table)`;
+    return `${usage.window}   from contextWindow configuration (overrides API, model table, and model-windows.json)`;
   }
   if (!usage.windowKnown) {
     return (
-      `${usage.window}   PLACEHOLDER - this model is not in the table; ` +
-      'set contextWindow to correct it'
+      `UNKNOWN - no verified model limit; internal fallback budget ${usage.window}; ` +
+      'set contextWindow or list the model in model-windows.json to correct it'
     );
   }
-  return `${usage.window}   from the model table`;
+  if (usage.windowSource === 'user') {
+    return `${usage.window}   from model-windows.json (your per-model table)`;
+  }
+  if (usage.windowSource === undefined) {
+    // A child agent can be windowKnown through the pricing-table heuristic
+    // without naming a source; claiming 'the model table' there would be an
+    // evidence-free assertion in the one report that exists to be checked.
+    return `${usage.window}   source unverified`;
+  }
+  return `${usage.window}   from ${usage.windowSource === 'api' ? 'the model API' : 'the model table'}`;
 }
 
 /**

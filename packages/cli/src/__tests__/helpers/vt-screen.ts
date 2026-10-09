@@ -26,6 +26,8 @@ export interface VtScreen {
   /** 0-based cursor row. */
   cursorRow(): number;
   write(data: string): void;
+  touchedRows(): number[];
+  resetTouchedRows(): void;
 }
 
 export function createVtScreen(rows: number, cols: number, model: PendingWrapModel): VtScreen {
@@ -33,8 +35,10 @@ export function createVtScreen(rows: number, cols: number, model: PendingWrapMod
   let r = 0;
   let c = 0;
   let pending = false;
+  const touched = new Set<number>();
 
   const scrollUp = (): void => {
+    for (let row = 0; row < rows; row++) touched.add(row);
     grid.shift();
     grid.push(new Array<string>(cols).fill(' '));
   };
@@ -55,6 +59,7 @@ export function createVtScreen(rows: number, cols: number, model: PendingWrapMod
       c = 0;
       lineFeed();
     }
+    touched.add(r);
     grid[r]![c] = glyph;
     for (let k = 1; k < width; k += 1) grid[r]![c + k] = '';
     c += width;
@@ -67,6 +72,7 @@ export function createVtScreen(rows: number, cols: number, model: PendingWrapMod
 
   const eraseToEol = (): void => {
     const from = model === 'virtual-column' && pending ? cols : c;
+    if (from < cols) touched.add(r);
     for (let k = from; k < cols; k += 1) grid[r]![k] = ' ';
   };
 
@@ -89,12 +95,12 @@ export function createVtScreen(rows: number, cols: number, model: PendingWrapMod
         r = clamp(r - (first ?? 1), rows - 1);
         break;
       case 'K':
-        if (first === 2) grid[r]!.fill(' ');
+        if (first === 2) { touched.add(r); grid[r]!.fill(' '); }
         else eraseToEol();
         break;
       case 'J':
         eraseToEol();
-        for (let row = r + 1; row < rows; row += 1) grid[row]!.fill(' ');
+        for (let row = r + 1; row < rows; row += 1) { touched.add(row); grid[row]!.fill(' '); }
         break;
       default:
         break; // SGR ('m') and anything else: no cell effect
@@ -116,6 +122,8 @@ export function createVtScreen(rows: number, cols: number, model: PendingWrapMod
         c = 0;
         pending = false;
       } else if (ch === '\n') {
+        // TTY output translates LF to CRLF (ONLCR), including Ink's first full frame.
+        c = 0;
         lineFeed();
         pending = false;
       } else if (ch >= ' ') {
@@ -129,5 +137,7 @@ export function createVtScreen(rows: number, cols: number, model: PendingWrapMod
     cell: (row, col) => grid[row]![col] ?? ' ',
     cursorRow: () => r,
     write,
+    touchedRows: () => [...touched].sort((a, b) => a - b),
+    resetTouchedRows: () => touched.clear(),
   };
 }

@@ -17,6 +17,7 @@ import type { AgentEvent, ModelInfo } from '@aragon-agent/core';
 import { runHeadless } from '../agent/headless.js';
 import { runExec } from '../exec/index.js';
 import type { AgentController } from '../agent/controller.js';
+import type { CompactionEvent } from '../compaction/types.js';
 import { getSessionsDir } from '../config/app-paths.js';
 
 const MODEL: ModelInfo = {
@@ -124,6 +125,26 @@ afterEach(() => {
 });
 
 describe('AC-1: --output-format text is byte-identical to runHeadless', () => {
+  it.each([false, true])('does not reprice billed compaction in the final result: unknown=%s', async (unknown) => {
+    const controller = makeStub();
+    let publish!: (event: CompactionEvent) => void;
+    controller.subscribeCompaction = (listener) => { publish = listener; return () => {}; };
+    const original = controller.prompt;
+    controller.prompt = async (...args) => {
+      const outcome = await original(...args);
+      publish({ type: 'usage', usage: { inputTokens: 1000, outputTokens: 100 },
+        costUsd: unknown ? 0 : 1.25, pricingUnknown: unknown,
+        modelRef: { providerId: 'anthropic', modelId: 'different-summary-model' } });
+      return outcome;
+    };
+    const out = sink();
+    await runExec({}, { outputFormat: 'json', saveSession: false, quiet: true }, 'x', {
+      version: 'test', makeController: () => controller, stdout: out.stream, stderr: sink().stream,
+    });
+    const result = JSON.parse(out.text());
+    expect(result.cost.known).toBe(!unknown);
+    expect(result.cost.amount).toBeCloseTo(unknown ? 0 : 1.25096);
+  });
   it('on stdout AND on stderr, for the same script', async () => {
     const headlessOut = sink();
     const headlessErr = sink();

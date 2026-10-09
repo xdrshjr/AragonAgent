@@ -57,6 +57,12 @@ import {
   trailingPastePrefixLength,
 } from './paste-parse.js';
 import { splitEnterSequences, trailingEnterPrefixLength } from './enter-sequences.js';
+import { splitCsiUKeys, trailingCsiUPrefixLength, translateCsiUKey } from './csiu-keys.js';
+import {
+  splitWin32KeySequences,
+  trailingWin32PrefixLength,
+  translateWin32Key,
+} from './win32-input-mode.js';
 
 export interface MouseSource {
   /**
@@ -86,6 +92,15 @@ export interface StdinFilterFeatures {
   readonly mouse: boolean;
   /** Recognise pastes and deliver them framed. */
   readonly paste: boolean;
+  /**
+   * Translate keyboard-enhancement encodings (win32-input-mode records on
+   * Windows, CSI-u sequences from kitty/modifyOtherKeys elsewhere) back to
+   * legacy bytes BEFORE Ink parses them. TOLD, never derived: `cli.tsx`
+   * resolves config, TTY state and `vtInputSupported`, and passes the same
+   * boolean to `enableKeyboardEnhancement`, so the filter only ever
+   * translates for a session whose mode push actually happened.
+   */
+  readonly enhancedKeys?: boolean;
 }
 
 export interface StdinFilter {
@@ -159,6 +174,8 @@ export function createStdinFilter(
   bridge?: PasteBridge,
   onWarn?: (reason: string) => void,
 ): StdinFilter {
+  const enhancedKeys = features.enhancedKeys === true;
+
   const wrapper = new PassThrough();
   const listeners = new Set<(event: MouseEvent) => void>();
 
@@ -326,17 +343,50 @@ export function createStdinFilter(
     else writeInput(split.pending);
   };
 
+  /**
+   * THE ENHANCED-KEY WALK, OUTSIDE PASTES ONLY. win32-input-mode records are
+   * split first (their bodies are digits/semicolons, so no paste marker or
+   * CSI-u sequence can live inside one), then CSI-u sequences in the
+   * remaining text, and only then the legacy Enter family. Each translated
+   * key terminates a heuristic burst exactly like an Enter frame does -- a
+   * keystroke mid-burst is the definition of "not a paste".
+   */
+  const writeEnhancedKey = (legacy: string): void => {
+    if (legacy.length === 0) return;
+    flushBurst();
+    writeInput(legacy);
+  };
+
   const handleOutsidePaste = (text: string, holdTail: boolean): void => {
-    const segments = splitEnterSequences(text);
-    for (let index = 0; index < segments.length; index += 1) {
-      const segment = segments[index]!;
-      if (segment.kind === 'text') {
-        handleText(segment.text, holdTail && index === segments.length - 1);
+    const win32 = enhancedKeys ? splitWin32KeySequences(text)
+      : [{ kind: 'text', text } as const];
+    for (let w = 0; w < win32.length; w += 1) {
+      const wSeg = win32[w]!;
+      const wLast = holdTail && w === win32.length - 1;
+      if (wSeg.kind === 'key') {
+        writeEnhancedKey(translateWin32Key(wSeg.record));
         continue;
       }
-      // A key terminates the heuristic paste before its internal frame is written.
-      flushBurst();
-      writeInput(segment.kind === 'submit' ? '\r' : ENTER_NEWLINE_FRAME);
+      const csiu = enhancedKeys ? splitCsiUKeys(wSeg.text)
+        : [{ kind: 'text', text: wSeg.text } as const];
+      for (let c = 0; c < csiu.length; c += 1) {
+        const cSeg = csiu[c]!;
+        if (cSeg.kind === 'key') {
+          writeEnhancedKey(translateCsiUKey(cSeg.key));
+          continue;
+        }
+        const segments = splitEnterSequences(cSeg.text);
+        for (let index = 0; index < segments.length; index += 1) {
+          const segment = segments[index]!;
+          if (segment.kind === 'text') {
+            handleText(segment.text, wLast && c === csiu.length - 1
+              && index === segments.length - 1);
+            continue;
+          }
+          // A key terminates the heuristic paste before its internal frame is written.
+          writeEnhancedKey(segment.kind === 'submit' ? '\r' : ENTER_NEWLINE_FRAME);
+        }
+      }
     }
   };
 
@@ -393,6 +443,8 @@ export function createStdinFilter(
           trailingPastePrefixLength(rest),
           features.mouse ? trailingMousePrefixLength(rest) : 0,
           trailingEnterPrefixLength(rest),
+          enhancedKeys ? trailingWin32PrefixLength(rest) : 0,
+          enhancedKeys ? trailingCsiUPrefixLength(rest) : 0,
         );
         const tail = rest.slice(rest.length - keep);
         handleOutsidePaste(rest.slice(0, rest.length - keep), true);

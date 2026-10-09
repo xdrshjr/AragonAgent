@@ -12,6 +12,7 @@ import process from 'node:process';
 import type { AgentTool } from '@aragon-agent/core';
 import type { AgentMode } from './agent-mode.js';
 import { buildPlanModeBlock } from './plan-prompt.js';
+import { buildProjectGuidanceBlock } from './project-guidance-prompt.js';
 
 export interface SystemPromptParams {
   cwd: string;
@@ -162,6 +163,9 @@ export function buildSystemPrompt(params: SystemPromptParams): string {
     '',
     'Available tools:',
     toolList,
+    // Base-prompt upgrade; optional blocks still preserve empty/absent equivalence.
+    '',
+    buildProjectGuidanceBlock(),
     ...(hasSkills ? ['', skillsBlock] : []),
     ...(planBlock ? ['', planBlock] : []),
     ...(teamBlock ? ['', teamBlock] : []),

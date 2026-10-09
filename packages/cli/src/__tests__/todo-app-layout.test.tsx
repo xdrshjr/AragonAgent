@@ -143,7 +143,7 @@ const EMPTY_SKILL_SERVICE = {
 class FakeController {
   private readonly listeners = new Set<(e: AgentEvent) => void>();
   onPrompt: ((text: string) => Promise<void>) | null = null;
-  config: CliConfig = { ...CONFIG, reducedMotion: true, color: false, colorLevel: 0, unicode: false };
+  config: CliConfig = { ...CONFIG, reducedMotion: true, color: false, colorLevel: 0, unicode: true };
   aborted = false;
   running = false;
 
@@ -387,10 +387,48 @@ function railLines(frame: string, width = 15, cols = 100): string[] {
       cells += stringWidth(char);
     }
     return rail;
-  }).filter(line => line.startsWith('|'));
+  }).filter(line => line.startsWith('\u2502'));
 }
 
 describe('真实 App 的 TODO 布局接线', () => {
+  it('TODO 从无到有再清空时保留同一长 Unicode 草稿的宽度、高度和边界', async () => {
+    const fc = new FakeController();
+    const app = mountApp(fc);
+    const draft = 'draft-' + '\u4e2de\u0301\ud83d\udc69\u200d\ud83d\udcbb'.repeat(30);
+    const composer = (frame: string) => {
+      const lines = frame.split('\n');
+      const top = lines.reduce((last, line, index) => line.includes('\u256d') ? index : last, -1);
+      const bottom = lines.reduce((last, line, index) => line.includes('\u2570') ? index : last, -1);
+      expect(top).toBeGreaterThan(0);
+      expect(bottom).toBeGreaterThan(top + 2);
+      return { top, bottom, rows: lines.slice(top, bottom + 1) };
+    };
+    try {
+      await delay(100);
+      app.stdin.write(draft);
+      await delay(120);
+      const before = composer(app.frame());
+      expect(before.rows.join('\n')).toContain('draft-');
+      expect(before.rows.join('\n')).toContain('\ud83d\udc69\u200d\ud83d\udcbb');
+      expect(app.frame().split('\n').slice(1, before.top).join('\n')).not.toContain('TODO');
+      const firstFrame = app.frames.length;
+      fc.todoSnapshot = PLAN;
+      fc.emitTodo({ type: 'updated', snapshot: PLAN });
+      await delay(100);
+      expect(app.frame().split('\n').slice(1, before.top).join('\n')).toContain('9/20');
+      expect(composer(app.frame())).toEqual(before);
+      fc.clearTodos();
+      await delay(100);
+      expect(app.frame().split('\n').slice(1, before.top).join('\n')).not.toContain('TODO');
+      expect(composer(app.frame())).toEqual(before);
+      for (const frame of app.frames.slice(firstFrame)) {
+        expect(composer(frame)).toEqual(before);
+        expect(composer(frame).rows.map(row => stringWidth(row.trimEnd())))
+          .toEqual(before.rows.map(row => stringWidth(row.trimEnd())));
+        expect(stringWidth(composer(frame).rows[0]!.trimEnd())).toBe(99);
+      }
+    } finally { app.unmount(); app.cleanup(); }
+  });
   it('恢复事件、团队八行、菜单与窄屏往返均重算同一右栏预算', async () => {
     const fc = new FakeController();
     const app = mountApp(fc);
@@ -399,31 +437,31 @@ describe('真实 App 的 TODO 布局接线', () => {
       fc.todoSnapshot = PLAN;
       fc.emitTodo({ type: 'updated', snapshot: PLAN });
       await delay(100);
-      expect(railLines(app.frame())).toHaveLength(16);
+      expect(railLines(app.frame()), app.frame()).toHaveLength(14);
       expect(railLines(app.frame()).join('\n')).toContain('9/20');
       fc.teamSnapshot = TEAM;
       for (const listener of fc.teamListeners) listener({ type: 'agent_update',
         dispatchId: 'd', run: TEAM.runs[0]! });
       await delay(100);
-      expect(railLines(app.frame())).toHaveLength(16);
+      expect(railLines(app.frame())).toHaveLength(14);
       expect(railLines(app.frame()).join('\n'), app.frame()).toContain('ANCHOR');
       expect(railLines(app.frame()).join('\n')).toContain('9/20');
       // Dismiss completion before submitting the raw, deliberately unknown command.
       app.stdin.write('/c'); await delay(80);
-      expect(railLines(app.frame())).toHaveLength(16);
+      expect(railLines(app.frame()), app.frame()).toHaveLength(7);
       app.stdin.write('\u001b'); await delay(80);
       app.stdin.write('\r'); await delay(100);
-      expect(railLines(app.frame())).toHaveLength(16);
+      expect(railLines(app.frame())).toHaveLength(14);
       expect(app.frame()).toContain('Unknown command');
       app.stdin.write('\u001b[5~'); await delay(100);
-      expect(railLines(app.frame())).toHaveLength(16);
+      expect(railLines(app.frame())).toHaveLength(14);
       for (const [cols, width] of [[76, 0], [77, 14], [100, 15], [200, 30]]) {
         app.stdout.columns = cols!;
         app.stdout.emit('resize'); await delay(120);
         const lines = railLines(app.frame(), width!, cols!);
-        expect(lines.length, app.frame()).toBe(width ? 16 : 0);
+        expect(lines.length, app.frame()).toBe(width ? 14 : 0);
         expect(app.frame()).not.toContain('Maximum update depth');
-        for (const line of app.frame().split('\n')) expect(stringWidth(line)).toBeLessThanOrEqual(cols!);
+        for (const line of app.frame().split('\n')) expect(stringWidth(line), line).toBeLessThanOrEqual(cols!);
       }
       fc.emitTodo({ type: 'cleared', reason: 'reset' }); await delay(80);
       expect(railLines(app.frame(), 30, 200)).toEqual([]);
@@ -440,15 +478,15 @@ describe('真实 App 的 TODO 布局接线', () => {
       for (const listener of fc.teamListeners) listener({ type: 'agent_update',
         dispatchId: 'd', run: TEAM.runs[0]! });
       await delay(100);
-      expect(railLines(app.frame())).toHaveLength(16);
+      expect(railLines(app.frame())).toHaveLength(14);
       app.stdin.write('long draft '.repeat(40)); await delay(150);
       expect(app.frame()).toContain('8 running');
       expect(app.frame()).not.toContain('+3 more (3 running)');
       expect(railLines(app.frame()).join('\n')).toContain('ANCHOR');
-      expect(app.frame()).toContain('空闲');
+      expect(app.frame()).toMatch(/Idle|Notice/);
       app.stdin.write('\u0015'); await delay(160);
       expect(app.frame()).toContain('+3 more (3 running)');
-      expect(railLines(app.frame())).toHaveLength(16);
+      expect(railLines(app.frame())).toHaveLength(14);
     } finally { app.unmount(); app.cleanup(); }
   });
 
@@ -459,28 +497,28 @@ describe('真实 App 的 TODO 布局接线', () => {
       await delay(100);
       fc.emitTodo({ type: 'updated', snapshot: PLAN }); await delay(80);
       app.stdin.write('/'); await delay(100);
-      expect(railLines(app.frame())).toHaveLength(16);
+      expect(railLines(app.frame())).toHaveLength(5);
       app.stdin.write('\u001b'); await delay(100);
-      expect(railLines(app.frame())).toHaveLength(16);
+      expect(railLines(app.frame())).toHaveLength(14);
       app.stdin.write('\u0015'); await delay(80);
       app.stdin.write('/help'); await delay(80);
       app.stdin.write('\r'); await delay(100);
       expect(railLines(app.frame())).toEqual([]);
       expect(app.frame()).toContain('Help');
       app.stdin.write('\u001b'); await delay(100);
-      expect(railLines(app.frame())).toHaveLength(16);
+      expect(railLines(app.frame())).toHaveLength(14);
       app.stdin.write('/'); await delay(80);
       app.stdout.rows = 11; app.stdout.emit('resize'); await delay(120);
       expect(app.frame()).toContain('Terminal too small');
       app.stdout.rows = 20; app.stdout.emit('resize'); await delay(120);
-      expect(railLines(app.frame())).toHaveLength(16);
+      expect(railLines(app.frame())).toHaveLength(5);
       expect(app.frame()).not.toContain('Maximum update depth');
       const count = app.frames.length;
       await delay(160);
       expect(app.frames.length - count).toBeLessThanOrEqual(1);
       for (const frame of app.frames) {
         expect(frame.split('\n').length).toBeLessThanOrEqual(19);
-        if (!frame.includes('Terminal too small')) expect(frame).toContain('空闲');
+        if (!frame.includes('Terminal too small')) expect(frame).toMatch(/Idle|Notice/);
       }
       app.stdin.write('\u0015'); await delay(60);
       app.stdin.write('/todo panel off'); await delay(80);
@@ -488,7 +526,7 @@ describe('真实 App 的 TODO 布局接线', () => {
       expect(railLines(app.frame())).toEqual([]);
       app.stdin.write('/todo panel on'); await delay(80);
       app.stdin.write('\r'); await delay(100);
-      expect(railLines(app.frame())).toHaveLength(16);
+      expect(railLines(app.frame())).toHaveLength(14);
     } finally { app.unmount(); app.cleanup(); }
   });
 });

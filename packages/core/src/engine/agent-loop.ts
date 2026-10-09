@@ -407,7 +407,9 @@ export async function runAgentLoop(ctx: AgentLoopContext): Promise<void> {
     //   3. INSIDE the `while`, not before it. A run that starts under the
     //      threshold and crosses it at turn 12 is the normal case, and it is the
     //      case an `agent_end`-based design cannot serve at all (D-1).
-    await runCompaction(ctx, { trigger: 'pressure', lastUsage, turnIndex });
+    if (await runCompaction(ctx, { trigger: 'pressure', lastUsage, turnIndex })) {
+      lastUsage = undefined;
+    }
     if (ctx.signal.aborted) break;
 
     // ----- Turn start -----
@@ -471,6 +473,7 @@ export async function runAgentLoop(ctx: AgentLoopContext): Promise<void> {
       if (errorType !== 'context_overflow' || overflowRecovered || !ctx.contextManager) throw err;
       overflowRecovered = true;
       const recovered = await runCompaction(ctx, { trigger: 'overflow', lastUsage, turnIndex });
+      if (recovered) lastUsage = undefined;
       if (!recovered) throw err;
       if (ctx.signal.aborted) break;
       continue; // re-send this turn against the compacted history

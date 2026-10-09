@@ -315,7 +315,7 @@ describe('StatusBar todo cluster (§6.3)', () => {
     };
 
     const instance = inkRender(
-      <StatusBar
+      <StatusBar columns={cols} speedKnown={false}
         model="m"
         provider="anthropic"
         usageTotal={{ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 }}
@@ -344,8 +344,8 @@ describe('StatusBar todo cluster (§6.3)', () => {
   }
 
   it('preserves complete context and never truncates the optional todo field', () => {
-    expect(bar(120, { done: 2, total: 7 })).toContain('todo 2/7');
-    expect(bar(80, { done: 2, total: 7 })).toMatch(/1(?:\.0)?k\/200(?:\.0)?k tok/);
+    expect(bar(120, { done: 2, total: 7 })).not.toContain('todo 2/7');
+    expect(bar(80, { done: 2, total: 7 })).toContain('1%');
     expect(bar(80, { done: 2, total: 7 })).not.toContain('[2/7]');
   });
 

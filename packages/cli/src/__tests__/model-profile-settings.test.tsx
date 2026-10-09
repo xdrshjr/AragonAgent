@@ -206,3 +206,19 @@ describe('profile settings real input', () => {
     expect(view.frame()).toContain('aragon config edit');
   });
 });
+
+
+describe('short inactive settings', () => {
+  it('does not save or navigate while hidden', async () => {
+    const view = await mount({ maxRows: 3, cols: 40, isActive: false });
+    await view.send('\x1b[B'); await view.send('\x13'); await view.send('\r');
+    expect(view.onProfileSave).not.toHaveBeenCalled();
+    expect(view.frame()).not.toContain('Save failed');
+  });
+  it('retains an action row while focused fields move through the one-row body', async () => {
+    const view = await mount({ maxRows: 3, cols: 40 });
+    await view.send('\x1b[B'); await view.send('\x1b[B');
+    expect(view.frame()).toContain('Manage profiles');
+    expect(view.frame()).toContain('Esc');
+  });
+});

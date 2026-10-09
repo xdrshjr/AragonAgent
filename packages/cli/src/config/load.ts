@@ -59,7 +59,7 @@ import { setEntryRetain } from '../agent/entry-limits.js';
 import { readSubmitCount } from './ui-state.js';
 import { getLogger } from '../logging/logger.js';
 import { registerSecret, registerSecretsFrom } from '../logging/secret-registry.js';
-import { detectCapabilities } from '../ui/capabilities.js';
+import { detectCapabilities, resolveTuiCapabilities } from '../ui/capabilities.js';
 
 /** Interpret a boolean-ish env value (`1/true/on/yes`) as `true`. */
 function envFlagTrue(value: string | undefined): boolean {
@@ -124,6 +124,15 @@ export interface CliFlags {
    * `false` on every run that passed no flag at all.
    */
   paste?: boolean;
+  /**
+   * `--keyboard-enhancement` ⇒ true, `--no-keyboard-enhancement` ⇒ false,
+   * absent ⇒ undefined.
+   *
+   * DECLARED AS A PAIR and carried through `toFlags`, for the reason the
+   * `paste` note above records: the key is persisted and defaults to
+   * `true`, so a lone negative flag must not read as silence.
+   */
+  keyboardEnhancement?: boolean;
   /** `--no-skills` ⇒ false. Turns the whole skill subsystem off (§7.5). */
   skills?: boolean;
   /** `--skill <name>` ×N — force Level 2 injection for this run. */
@@ -361,6 +370,21 @@ function resolvePaste(
   if (env.paste !== undefined) return env.paste;
   if (file.paste !== undefined) return file.paste;
   return DEFAULT_CONFIG.paste;
+}
+
+/**
+ * Keyboard enhancement: flag > env > file > default `true`. Shaped exactly
+ * like `resolvePaste` above, for the reason its own note gives.
+ */
+function resolveKeyboardEnhancement(
+  flags: CliFlags,
+  env: Partial<PersistedConfig>,
+  file: Partial<PersistedConfig>,
+): boolean {
+  if (flags.keyboardEnhancement !== undefined) return flags.keyboardEnhancement;
+  if (env.keyboardEnhancement !== undefined) return env.keyboardEnhancement;
+  if (file.keyboardEnhancement !== undefined) return file.keyboardEnhancement;
+  return DEFAULT_CONFIG.keyboardEnhancement;
 }
 
 /**
@@ -780,7 +804,10 @@ function resolveContextWindow(
  * Resolve the effective config by merging all layers, then derive the runtime
  * (non-persisted) fields and enforce the timeout invariant.
  */
-export function loadConfig(flags: CliFlags = {}): CliConfig {
+export function loadConfig(
+  flags: CliFlags = {},
+  options: { interactive?: boolean } = {},
+): CliConfig {
   const cwd = flags.cwd ? flags.cwd : process.cwd();
 
   // `.env` must be loaded before reading env overrides.
@@ -912,7 +939,12 @@ export function loadConfig(flags: CliFlags = {}): CliConfig {
   registerSecretsFrom(apiKeys);
   registerSecret(flags.apiKey);
 
-  const color = flags.color !== undefined ? flags.color : !process.env.NO_COLOR;
+  const caps = options.interactive
+    ? resolveTuiCapabilities(process.env, flags.color)
+    : detectCapabilities(process.env, process.stdout);
+  const color = options.interactive
+    ? caps.colorLevel !== 0
+    : flags.color !== undefined ? flags.color : !process.env.NO_COLOR;
 
   // `--no-color` implies calmer chrome; env / file may also opt in explicitly.
   const reducedMotion =
@@ -921,7 +953,6 @@ export function loadConfig(flags: CliFlags = {}): CliConfig {
     !color;
 
   // Detect terminal capabilities once; force monochrome when color is disabled.
-  const caps = detectCapabilities(process.env, process.stdout);
   const colorLevel: 0 | 1 | 2 | 3 = color ? caps.colorLevel : 0;
 
   // No flag and no env var: a privacy switch you set once, not a per-run knob.
@@ -990,6 +1021,7 @@ export function loadConfig(flags: CliFlags = {}): CliConfig {
     mouse: resolveMouse(flags, env.partial, file),
     mouseSelect: resolveMouseSelect(flags, env.partial, file),
     paste: resolvePaste(flags, env.partial, file),
+    keyboardEnhancement: resolveKeyboardEnhancement(flags, env.partial, file),
     scrollResumeMs: resolveScrollResumeMs(env.partial, file),
     // From `<home>/state.json`, not the config file — see `ui-state.ts`.
     submitCount: readSubmitCount(),

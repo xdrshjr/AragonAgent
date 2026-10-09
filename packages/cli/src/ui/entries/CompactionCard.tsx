@@ -29,9 +29,11 @@ import { pickGlyphs } from '../glyphs.js';
 import { railBorderProps } from '../layout/Gutter.js';
 import { formatDuration, formatTokens } from '../../agent/usage.js';
 import { COMPACTION_LIMITS } from '../../compaction/limits.js';
-import type { CompactionMode, CompactionUiTrigger } from '../../compaction/types.js';
+import type { CompactionDecision, CompactionMode, CompactionUiTrigger } from '../../compaction/types.js';
 
 export interface CompactionCardProps {
+  decision?: CompactionDecision;
+  memoryVersion?: 2;
   index: number;
   trigger: CompactionUiTrigger;
   mode: CompactionMode;
@@ -96,7 +98,7 @@ function headline(props: CompactionCardProps, arrow: string, dot: string): strin
       : `compacting context #${index}${elapsed}`;
   }
 
-  if (!props.applied) {
+  if (!props.applied || props.tokensAfter >= props.tokensBefore) {
     const why = props.reason ? `: ${props.reason}` : '';
     return `context not compacted #${index}${why}`;
   }
@@ -128,7 +130,7 @@ function detailLine(props: CompactionCardProps): string {
     if (!props.model) return '';
     return `summarizing with ${props.model} - esc to cancel`;
   }
-  if (!props.applied) return props.mode === 'none' && !props.reason ? 'nothing was changed' : '';
+  if (!props.applied || props.tokensAfter >= props.tokensBefore) return 'History preserved.';
   const dropped = Math.max(0, props.messagesBefore - props.messagesAfter);
   if (props.mode === 'relieved') {
     const n = props.tailRelief?.messages ?? 0;
@@ -180,7 +182,8 @@ function CompactionCardImpl(props: CompactionCardProps): React.ReactElement {
   const detail = detailLine(props);
   const relief = reliefLine(props);
 
-  const rows = summary ? summaryRows(summary, expanded === true) : [];
+  const showMemory = props.memoryVersion !== 2 || expanded === true;
+  const rows = summary && showMemory ? summaryRows(summary, expanded === true) : [];
   const totalRows = summary ? summary.split('\n').filter((l) => l.trim().length > 0).length : 0;
   const hidden = Math.max(0, totalRows - rows.length);
 
@@ -193,12 +196,12 @@ function CompactionCardImpl(props: CompactionCardProps): React.ReactElement {
 
   return (
     <Box flexDirection="column">
-      <Box flexDirection="row">
+      <Box flexDirection="column">
         <Text color={theme.accent} bold>
-          compact
+          {props.trigger === 'manual' ? 'Manual compaction' : props.trigger === 'overflow'
+            ? 'Overflow: threshold reached' : 'Automatic: threshold reached'}
         </Text>
-        <Text color={live ? color : theme.muted} wrap="truncate">
-          {'  '}
+        <Text color={live ? color : theme.muted} wrap={caps.unicode ? 'truncate' : 'wrap'}>
           {animate ? (
             <>
               <Spinner type="dots" />{' '}
@@ -212,9 +215,15 @@ function CompactionCardImpl(props: CompactionCardProps): React.ReactElement {
         </Text>
       </Box>
 
+      {props.memoryVersion === 2 && (
+        <Text color={theme.muted}>
+          Task memory v2{expanded ? '' : ' (ctrl+o to expand)'}
+        </Text>
+      )}
+
       {detail.length > 0 && (
         <Box flexDirection="column" flexShrink={0} paddingLeft={1}>
-          <Text color={color} wrap="truncate">
+          <Text color={color} wrap={caps.unicode ? 'truncate' : 'wrap'}>
             {detail}
           </Text>
         </Box>

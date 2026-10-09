@@ -8,14 +8,15 @@ import { selectTranscriptEntries, mergePendingEntries } from '../agent/queued-me
  * input / toast stack / status bar / overlays.
  */
 
-import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import process from 'node:process';
-import { Box, Text, useApp, useInput, useStdout, type DOMElement } from 'ink';
+import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import type { ScrollbarBridge } from './scrollbar-controller.js';
 import type { AgentController } from '../agent/controller.js';
 import type { SubmitMessageOptions } from '../agent/prompt-options.js';
 import {
   advanceInterruptGesture,
+  INTERRUPT_CONFIRM_MS,
   cancelInterruptConfirmation,
   type InterruptGestureState,
 } from '../input/interrupt-gesture.js';
@@ -50,7 +51,7 @@ import { isTerminalStatus, type ServiceSnapshot } from '../proc/types.js';
 import { getSecrets } from '../logging/secret-registry.js';
 import { redactText } from '../logging/redact.js';
 import type { ComposerSubmitResult } from './composer-input.js';
-import { detectCapabilities, type TermCapabilities } from './capabilities.js';
+import { resolveTuiCapabilities, type TermCapabilities } from './capabilities.js';
 import {
   useStartupNotices,
   MOUSE_NOTICE_VERSION,
@@ -70,15 +71,8 @@ import { TodoPanel } from './TodoPanel.js';
 import { ActivityLine, liveSpinner } from './ActivityLine.js';
 import type { RunActivity } from './run-status-row.js';
 import { BottomStatusRow } from './BottomStatusRow.js';
-import { UpdateLine } from './UpdateLine.js';
-// The updater's two PURE modules. `shouldRenderUpdateLine` decides the row's
-// presence AT THE CALL SITE (C-15), and `UPDATE_LIMITS` owns the width
-// threshold - both are values, and both are resolved here rather than inside
-// `UpdateLine` so that component's only edge into `update/` stays erasable by
-// tsc (cli-auto-update section 3.1 rule 1 / IF-1). Neither module opens a
-// socket, spawns a process or creates a timer.
+// Only the updater's pure visibility predicate enters the status detail plan.
 import { shouldRenderUpdateLine } from '../update/types.js';
-import { UPDATE_LIMITS } from '../update/limits.js';
 import type { UpdateBridge, UpdateSnapshot } from '../update/types.js';
 import { AppShell } from './layout/AppShell.js';
 import { ScrollViewport } from './layout/ScrollViewport.js';
@@ -96,8 +90,8 @@ import { useRenderGovernor } from './use-render-governor.js';
 import {
   readScrollbarPerf, setPerfResetHook, setPerfSnapshotProvider, type PerfSnapshot,
 } from '../commands/perf.js';
-import { frameHeight, MIN_FULLSCREEN_ROWS, MIN_FULLSCREEN_COLS } from './layout/frame.js';
-import { HINT_MIN_ROWS, clampDraftRows, viewportRows as computeViewportRows } from './layout/budget.js';
+import { frameHeight } from './layout/frame.js';
+import { buildFrameBudget } from './layout/budget.js';
 import type { ScrollIntent } from './layout/scroll.js';
 import { OVERLAY_PAGE, useWheelRouting } from './use-wheel-routing.js';
 import type { MouseSource } from '../input/stdin-filter.js';
@@ -125,6 +119,10 @@ import { QueuePanel } from './QueuePanel.js';
 import { QueueOverlay } from './overlays/QueueOverlay.js';
 import { buildQueueLayout } from './layout/queue-layout.js';
 import { interactionCopy } from './interaction-copy.js';
+import { createRunMetrics, updateRunMetrics, freezeRunMetrics, projectRunMetrics } from './run-metrics.js';
+import { projectStatusFeedback, type StatusFeedbackInput } from './status-feedback.js';
+import { planStatusDetail } from './layout/status-detail-layout.js';
+import type { StatusPrimaryInput } from './layout/status-layout.js';
 import { emptyTailState, type TailSink } from './layout/follow-state.js';
 import type {
   HumanInputBridge,
@@ -285,16 +283,13 @@ export function App({
 }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
-  const { rows, cols } = useTerminalSize();
-  const tooSmall = (rows < MIN_FULLSCREEN_ROWS || cols < MIN_FULLSCREEN_COLS);
-  const composerRef = useRef<DOMElement>(null);
-  const activityRef = useRef<DOMElement>(null);
-  const [cursorVisible, setCursorVisible] = useState(true);
-  // Whether the run status row above the input is inside the viewport. It is
-  // `true` while the row is not mounted (`elementVisible(null)`), so it is NEVER
-  // a decision on its own - always AND it with `runRowEnabled` (`runRowShown`).
-  const [activityRowVisible, setActivityRowVisible] = useState(true);
-
+  const size = useTerminalSize();
+  const [draftRows, setDraftRows] = useState(1);
+  const [popupRows, setPopupRows] = useState(0);
+  const [statusExpanded, setStatusExpanded] = useState(false);
+  const dimensions = buildFrameBudget({ ...size, draftRows, popupRows, statusExpanded });
+  const { rows, cols } = dimensions;
+  const tooSmall = dimensions.inactive;
   // --- Render governor (tui-render-performance L4). ------------------------
   //
   // FIRST, BEFORE ANY OTHER WORK IN THIS BODY. The hook stamps
@@ -313,7 +308,11 @@ export function App({
   // frame 1. `seedViewState` is module-scope so the lazy initializer is a stable
   // function reference.
   const [state, dispatch] = useReducer(viewReducer, cfg.showThinking, seedViewState);
-  const [elapsedMs, setElapsedMs] = useState(0);
+  const metrics = useRef(createRunMetrics());
+  const manualMetrics = useRef(createRunMetrics());
+  const [, setMetricsClock] = useState(0);
+  const copyFeedback = useRef<{ result: NonNullable<StatusFeedbackInput['copyResult']>;
+    toastId?: string; previousIds: Set<string> } | null>(null);
   /**
    * Forces the render that re-reads `Date.now()` for the live compaction card
    * while the run is IDLE (hardening W5). The value itself is never read - the
@@ -368,13 +367,9 @@ export function App({
   // gets its `/<name>` command and its autocomplete entry immediately.
   const [skillsNonce, setSkillsNonce] = useState(0);
 
-  const caps = useMemo<TermCapabilities>(() => {
-    const detected = detectCapabilities(process.env, stdout);
-    return {
-      colorLevel: cfg.color === false ? 0 : cfg.colorLevel ?? detected.colorLevel,
-      unicode: cfg.unicode ?? detected.unicode,
-    };
-  }, [cfg.color, cfg.colorLevel, cfg.unicode, stdout]);
+  const caps = useMemo<TermCapabilities>(
+    () => resolveTuiCapabilities({}, cfg.color), [cfg.color],
+  );
   const theme = useMemo(() => getTheme(cfg.theme, caps), [cfg.theme, caps]);
   const glyphs = useMemo(() => pickGlyphs(caps), [caps]);
   const reducedMotion = cfg.reducedMotion ?? false;
@@ -392,6 +387,8 @@ export function App({
   );
   const submissionSequence = useRef(0);
   const mounted = useRef(true);
+  const switchingConversation = useRef(false);
+  const drainCompactionQueue = useRef<() => void>(() => {});
   /**
    * Live service snapshots, keyed by id, for the status chip and the Ctrl+C rung.
    *
@@ -411,7 +408,6 @@ export function App({
    */
   const servicesRef = useRef(services);
   servicesRef.current = services;
-  const runBaselineOut = useRef(0);
 
   const runStartedAt = useRef(0);
   const toastTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
@@ -488,11 +484,18 @@ export function App({
     errored: false,
   });
 
+  const interruptTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resetInterrupt = useCallback(() => {
+    if (interruptTimer.current) clearTimeout(interruptTimer.current);
+    interruptTimer.current = null;
     interruptGesture.current = { phase: 'ready' };
   }, []);
   const cancelConfirmation = useCallback(() => {
+    if (interruptGesture.current.phase !== 'armed') return;
     interruptGesture.current = cancelInterruptConfirmation(interruptGesture.current);
+    if (interruptTimer.current) clearTimeout(interruptTimer.current);
+    interruptTimer.current = null;
+    setMetricsClock(Date.now());
   }, []);
   useEffect(() => {
     if (state.overlay) cancelConfirmation();
@@ -502,11 +505,36 @@ export function App({
     return () => {
       mounted.current = false;
       submissionSequence.current += 1;
-      if (interactionPhase.current === 'starting') controller.abort();
+      if (interactionPhase.current === 'starting' || controller.isCompactionBusy?.()) controller.abort();
       interactionPhase.current = 'idle';
       resetInterrupt();
     };
   }, [controller, resetInterrupt]);
+
+  useEffect(() => {
+    drainCompactionQueue.current = () => {
+      // A conversation switch owns the queue until its command has committed.
+      void Promise.resolve().then(async () => {
+        if (!mounted.current || switchingConversation.current
+          || controller.isCompactionBusy() || controller.isRunning()
+          || interactionPhase.current !== 'idle' || !controller.hasPendingUserMessages()
+          || controller.areModelSettingsBlocked()) return;
+        const preflight = controller.preflight();
+        if (!preflight.ok) {
+          dispatch({ type: 'notice', level: 'error', text: preflight.message ?? 'Configuration error.' });
+          return;
+        }
+        interactionPhase.current = 'starting';
+        try { await controller.continue(); }
+        finally {
+          if (interactionPhase.current === 'starting') interactionPhase.current = 'idle';
+        }
+      });
+    };
+    return controller.subscribeCompactionBusy?.((busy) => {
+      if (!busy) drainCompactionQueue.current();
+    });
+  }, [controller]);
 
   /**
    * Disarm an armed continuation. Idempotent; NEVER touches the budget — a
@@ -632,7 +660,11 @@ export function App({
         if (event.type === 'agent_end') generation = controller.runGeneration;
         return;
       }
-      if (event.type === 'agent_start') interactionPhase.current = 'running';
+      metrics.current = updateRunMetrics(metrics.current, event, Date.now());
+      if (event.type === 'agent_start') {
+        interactionPhase.current = 'running';
+        manualMetrics.current = createRunMetrics();
+      }
       if (event.type === 'agent_end') {
         interactionPhase.current = 'idle';
         resetInterrupt();
@@ -707,7 +739,7 @@ export function App({
           // a fired continuation would either be swallowed into
           // `controller.steer()` (the quiet failure) or reach
           // `controller.prompt()`, which REJECTS while running.
-          if (controller.isRunning()) return;
+          if (controller.isRunning() || controller.isCompactionBusy?.()) return;
           const live = controller.getTodoSnapshot();
           if (!live || live.doneCount >= live.total) return; // the list moved
           budgetRef.current = { ...budgetRef.current, used: budgetRef.current.used + 1 };
@@ -960,6 +992,10 @@ export function App({
     return controller.subscribeCompaction((event) => {
       switch (event.type) {
         case 'compaction_start':
+          if (interactionPhase.current === 'idle') {
+            manualMetrics.current = updateRunMetrics(createRunMetrics(),
+              { type: 'agent_start' }, Date.now());
+          }
           dispatch({
             type: 'compactionStart',
             index: event.index,
@@ -968,6 +1004,7 @@ export function App({
           });
           break;
         case 'compaction_end':
+          manualMetrics.current = freezeRunMetrics(manualMetrics.current, Date.now());
           // THE CARD, AND NOTHING ELSE (context-usage-gauge-accuracy §3.3).
           //
           // A `contextTokensEstimated` dispatch used to live here, hand-building
@@ -989,11 +1026,12 @@ export function App({
           // same class of lie as the `$0.00` `pricingUnknown` exists to prevent,
           // just in the other direction.
           const snapshot = controller.getCompactionSnapshot();
-          const ref = controller.getCompactionSummarizerRef();
+          const ref = event.modelRef ?? controller.getCompactionSummarizerRef();
           const costDelta =
-            snapshot.pricingUnknown || !ref
+            (event.pricingUnknown ?? snapshot.pricingUnknown)
               ? 0
-              : computeCost(event.usage, controller.getModelInfoFor(ref).cost);
+              : event.costUsd ?? (ref
+                ? computeCost(event.usage, controller.getModelInfoFor(ref).cost) : 0);
           dispatch({ type: 'compactionUsage', usage: event.usage, costDelta });
           break;
         }
@@ -1041,18 +1079,20 @@ export function App({
     });
   }, [controller, flushPending, governorInterval]);
 
-  // --- Elapsed timer + tokens/sec baseline while running. ----------------
+  // Event boundaries own start/end; ticks only refresh the live projection.
   useEffect(() => {
-    if (state.status !== 'running') {
-      setElapsedMs(0);
-      return;
-    }
-    runBaselineOut.current = stateRef.current.usageTotal.outputTokens;
-    const startedAt = Date.now();
-    setElapsedMs(0);
-    const id = setInterval(() => setElapsedMs(Date.now() - startedAt), 200);
+    if (state.status !== 'running') return;
+    const id = setInterval(() => setMetricsClock(Date.now()), 200);
     return () => clearInterval(id);
   }, [state.status]);
+
+  useLayoutEffect(() => {
+    if (manualMetrics.current.startedAt === null || !state.compactionEntryId) return;
+    const entry = state.entries.find(item => item.id === state.compactionEntryId);
+    if (entry?.kind === 'compaction' && entry.startedAt !== undefined) {
+      manualMetrics.current = { ...manualMetrics.current, startedAt: entry.startedAt };
+    }
+  }, [state.compactionEntryId, state.entries]);
 
   // --- Live compaction elapsed tick (hardening §3.6 / W5). ---------------
   //
@@ -1101,6 +1141,8 @@ export function App({
     () => () => {
       for (const timer of toastTimers.current.values()) clearTimeout(timer);
       toastTimers.current.clear();
+      if (ctrlCTimer.current) clearTimeout(ctrlCTimer.current);
+      if (interruptTimer.current) clearTimeout(interruptTimer.current);
     },
     [],
   );
@@ -1295,47 +1337,13 @@ export function App({
     };
   }, [pasteBridge]);
 
-  // --- The composer's height (tui-paste-handling section 5.5 / D-12). ------
-  //
-  // GROWTH IS IMMEDIATE, SHRINK IS DEFERRED BY ONE TICK (R-12). Growing late
-  // overdraws the frame for a frame; shrinking early makes a `Backspace` that
-  // crosses a wrap boundary bounce the whole transcript, and a run of deletions
-  // bounce it repeatedly. Deferring coalesces the run into one move.
-  //
-  // The ref mirrors the state so the decision is made OUTSIDE the updater: React
-  // may call an updater more than once, and scheduling a timer from inside one
-  // would arm it twice.
-  const [draftRows, setDraftRows] = useState(1);
-  const [popupRows, setPopupRows] = useState(0);
+  // Synchronous layout reports keep the fixed slot and its contents in one frame.
   const onPopupRowsChange = useCallback((next: number) => {
     setPopupRows(previous => previous === next ? previous : next);
   }, []);
-  const draftRowsRef = useRef(1);
-  const shrinkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onDraftRows = useCallback((next: number) => {
-    const wanted = Math.max(1, next);
-    if (shrinkTimer.current) {
-      clearTimeout(shrinkTimer.current);
-      shrinkTimer.current = null;
-    }
-    if (wanted === draftRowsRef.current) return;
-    if (wanted > draftRowsRef.current) {
-      draftRowsRef.current = wanted;
-      setDraftRows(wanted);
-      return;
-    }
-    shrinkTimer.current = setTimeout(() => {
-      shrinkTimer.current = null;
-      draftRowsRef.current = wanted;
-      setDraftRows(wanted);
-    }, 0);
+    setDraftRows(previous => previous === next ? previous : next);
   }, []);
-  useEffect(
-    () => () => {
-      if (shrinkTimer.current) clearTimeout(shrinkTimer.current);
-    },
-    [],
-  );
 
   // --- Auto-update bridge (cli-auto-update section 3.8 / 6.3). ------------
   //
@@ -1391,23 +1399,23 @@ export function App({
     clipboard: { write: terminal?.writeForeign },
     onRequest: () => {
       ctrlCArmed.current = false;
+      setMetricsClock(Date.now());
       if (ctrlCTimer.current) clearTimeout(ctrlCTimer.current);
       ctrlCTimer.current = null;
     },
     onStateChange: setCopyState,
     onBusy: ({ cleanupPending }) => toast('info', cleanupPending
-      ? '\u590d\u5236\u5931\u8d25\uff0c\u6b63\u5728\u6e05\u7406' : '\u6b63\u5728\u590d\u5236'),
+      ? 'Copy failed; cleaning up' : 'Copying'),
     onResult: (result, request) => {
       selectionBridge?.onCopied?.(result, request.lines, request.text.length);
-      if (result.status === 'confirmed') {
-        toast('success', `\u5df2\u590d\u5236 ${request.lines} \u884c`);
-      } else if (result.status === 'sent') {
-        toast('info', '\u5df2\u8bf7\u6c42\u7ec8\u7aef\u590d\u5236\uff0c\u7ed3\u679c\u672a\u786e\u8ba4');
-      } else {
-        const text = `${interactionCopy.copyFailed}\uff1a${interactionCopy.copyReasons[result.reason]}`;
-        toast('warn', text);
-        notify('error', text);
-      }
+      const text = result.status === 'confirmed' ? `Copied ${request.lines} lines`
+        : result.status === 'sent' ? 'Copy sent to terminal; not confirmed'
+        : `${interactionCopy.copyFailed}: ${interactionCopy.copyReasons[result.reason]}`;
+      copyFeedback.current = { result: {
+        status: result.status === 'confirmed' || result.status === 'sent' ? result.status : 'error',
+        text }, previousIds: new Set(stateRef.current.toasts.map(item => item.id)) };
+      toast(result.status === 'confirmed' ? 'success' : result.status === 'sent' ? 'info' : 'warn', text);
+      if (result.status !== 'confirmed' && result.status !== 'sent') notify('error', text);
     },
   }), []);
   useEffect(() => () => copyCoordinator.dispose(), [copyCoordinator]);
@@ -1427,6 +1435,18 @@ export function App({
     // subscription on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectionBridge]);
+
+  useLayoutEffect(() => {
+    const feedback = copyFeedback.current;
+    if (!feedback) return;
+    if (!feedback.toastId) {
+      feedback.toastId = state.toasts.find(item => !feedback.previousIds.has(item.id)
+        && item.text === feedback.result.text)?.id;
+    }
+    if (feedback.toastId && !state.toasts.some(item => item.id === feedback.toastId)) {
+      copyFeedback.current = null;
+    }
+  }, [state.toasts]);
 
   const selectionController = selectionBridge?.controller ?? null;
 
@@ -1450,6 +1470,13 @@ export function App({
   const onViewportShiftChange = useCallback(() => {
     selectionController?.clear();
   }, [selectionController]);
+
+  const onGeometryChange = useCallback(() => {
+    selectionController?.clear();
+    terminal?.scrollbar?.controller?.cancel();
+    terminal?.scrollbar?.invalidate();
+    setSelectionHold(false);
+  }, [selectionController, terminal]);
 
   // I-9, the ENUMERATED half. `shiftUp` covers every movement of the rows and is
   // wired straight into `ScrollViewport` below; these three are the cases that
@@ -1528,6 +1555,8 @@ export function App({
     state: stateRef.current,
     dispatch: (action) => {
       if (action.type === 'resetConversation' || action.type === 'restoreEntries') {
+        metrics.current = createRunMetrics();
+        manualMetrics.current = createRunMetrics();
         setScrollResetKey((n) => n + 1);
         const wasStarting = interactionPhase.current === 'starting';
         submissionSequence.current += 1;
@@ -1622,7 +1651,7 @@ export function App({
     cancelFollowThrough();
 
     cancelConfirmation();
-    if (interactionPhase.current === 'running') {
+    if (interactionPhase.current === 'running' || controller.isCompactionBusy?.()) {
       try {
         const queueId = controller.queueUserMessage(message);
         dispatch({ type: 'steerQueued', queueId, text: message });
@@ -1674,6 +1703,12 @@ export function App({
   submitRef.current = submitMessage;
 
   const executeSlashInput = async (raw: string): Promise<void> => {
+    const switchWhileBusy = controller.isCompactionBusy?.()
+      && /^\s*\/(clear|reset|resume)(?:\s|$)/.test(raw);
+    if (switchWhileBusy) {
+      switchingConversation.current = true;
+      await controller.cancelCompaction();
+    }
     // Retain a recoverable command before any asynchronous handler can fail.
     const safe = redactText(raw, getSecrets());
     recordPrompt(safe);
@@ -1683,6 +1718,11 @@ export function App({
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       notify('error', `Command failed: ${redactText(reason, getSecrets())}\nInput: ${safe}`);
+    } finally {
+      if (switchWhileBusy) {
+        switchingConversation.current = false;
+        drainCompactionQueue.current();
+      }
     }
   };
 
@@ -1840,6 +1880,7 @@ export function App({
     ) {
       const payload = selectionController!.takeSelection();
       ctrlCArmed.current = false;
+      setMetricsClock(Date.now());
       if (ctrlCTimer.current) clearTimeout(ctrlCTimer.current);
       ctrlCTimer.current = null;
       if (payload) {
@@ -1875,13 +1916,23 @@ export function App({
         return;
       }
       ctrlCArmed.current = true;
-      toast('warn', 'Press Ctrl+C again to exit.');
+      // Gesture feedback follows its live state, without a second toast lifetime.
+      setMetricsClock(value => value + 1);
       if (ctrlCTimer.current) clearTimeout(ctrlCTimer.current);
       ctrlCTimer.current = setTimeout(() => {
+        ctrlCTimer.current = null;
         ctrlCArmed.current = false;
+        setMetricsClock(value => value + 1);
       }, 1500);
       return;
     }
+
+    if (key.ctrl && input.toLowerCase() === 'g') {
+      if (tooSmall || stateRef.current.overlay) return;
+      setStatusExpanded(value => !value);
+      return;
+    }
+    if (tooSmall) return;
 
     // R-P1-7: the overlay branch MUST come before the transcript scroll branch
     // and MUST return. `PgUp` used to fall through to `scrollBy()` while an
@@ -2023,6 +2074,10 @@ export function App({
 
   const handleComposerEscape = useCallback(() => {
     if (stateRef.current.overlay) return;
+    if (controller.isCompactionBusy?.()) {
+      controller.abort();
+      return;
+    }
     if (interactionPhase.current === 'idle') {
       if (followTimer.current) {
         cancelFollowThrough();
@@ -2035,8 +2090,14 @@ export function App({
     const next = advanceInterruptGesture(interruptGesture.current, performance.now());
     interruptGesture.current = next.state;
     if (next.action === 'hint') {
-      dispatch({ type: 'pushToast', level: 'info',
-        text: '\u4e2d\u65ad\u5df2\u51c6\u5907' });
+      if (interruptTimer.current) clearTimeout(interruptTimer.current);
+      interruptTimer.current = setTimeout(() => {
+        interruptTimer.current = null;
+        if (interruptGesture.current.phase !== 'armed') return;
+        interruptGesture.current = { phase: 'ready' };
+        setMetricsClock(Date.now());
+      }, INTERRUPT_CONFIRM_MS + 1);
+      setMetricsClock(value => value + 1);
       return;
     }
     endReasonRef.current.aborted = true;
@@ -2046,6 +2107,7 @@ export function App({
       interactionPhase.current = 'idle';
       resetInterrupt();
       autoContinuationRef.current = false;
+      metrics.current = freezeRunMetrics(metrics.current, Date.now());
       if (next.action === 'force-stop') controller.forceStop();
       else controller.abort();
       dispatch({ type: 'runEnd' });
@@ -2055,8 +2117,7 @@ export function App({
     }
     controller.abort();
     if (sequence === submissionSequence.current && interactionPhase.current === 'running') {
-      dispatch({ type: 'pushToast', level: 'info',
-        text: '\u6b63\u5728\u505c\u6b62' });
+      setMetricsClock(value => value + 1);
     }
   }, [controller, cancelFollowThrough, resetInterrupt]);
 
@@ -2077,13 +2138,9 @@ export function App({
   // handler will do on the very next keystroke.
   const liveServices = liveServiceCount(services);
 
-  const tokPerSec =
-    state.status === 'running' && elapsedMs > 500
-      ? Math.max(
-          0,
-          Math.round((state.usageTotal.outputTokens - runBaselineOut.current) / (elapsedMs / 1000)),
-        )
-      : 0;
+  const projectedMetrics = projectRunMetrics(manualMetrics.current.startedAt !== null
+    && state.status !== 'running' ? manualMetrics.current : metrics.current, Date.now());
+  const { elapsedMs, tokPerSec, speedKnown } = projectedMetrics;
 
   // --- The activity line's seed (§3.2.3 / P1-7). --------------------------
   //
@@ -2124,10 +2181,12 @@ export function App({
   // comparator; `Transcript` passes it on only to running tool entries.
   const nowSec = running || compactionLive ? Math.floor(Date.now() / 1000) : undefined;
 
-  const viewportBudget = computeViewportRows(rows, draftRows);
+  const frameBudget = buildFrameBudget({ rows, cols, draftRows,
+    popupRows: overlay ? 0 : popupRows, statusExpanded });
+  const viewportBudget = frameBudget.viewportRows;
   const overlayMaxRows = viewportBudget;
 
-  const composerBaseRows = 2 + clampDraftRows(rows, draftRows);
+  const composerBaseRows = 0;
   const baseRail = buildTodoRailLayout({
     cols: cols - 1, panelEnabled: cfg.todo.panel, overlayOpen: false,
     itemCount: state.todos?.items.length ?? 0, viewportBudget,
@@ -2144,7 +2203,7 @@ export function App({
   const railLayout = buildTodoRailLayout({
     cols: cols - 1, panelEnabled: cfg.todo.panel, overlayOpen: false,
     itemCount: state.todos?.items.length ?? 0, viewportBudget,
-    teamRows: teamLayout.rowCount, queueRows: queueLayout.rows, popupRows, composerBaseRows,
+    teamRows: teamLayout.rowCount, queueRows: queueLayout.rows, popupRows: 0, composerBaseRows,
   });
   const { visible: showRail, width: railWidth, rows: railRows, contentCols } = railLayout;
   const transcriptEntries = useMemo(() => selectTranscriptEntries(state.entries,
@@ -2168,6 +2227,7 @@ export function App({
       />
     ) : overlay === 'model' ? (
       <ModelPicker
+        isActive={!tooSmall}
         registry={controller.getModelRegistry()}
         currentProvider={cfg.provider}
         currentModel={cfg.model}
@@ -2179,6 +2239,7 @@ export function App({
       />
     ) : overlay === 'settings' ? (
       <SettingsScreen
+        isActive={!tooSmall}
         initial={{
           provider: cfg.provider,
           model: cfg.model,
@@ -2228,6 +2289,7 @@ export function App({
       />
     ) : overlay === 'confirm' && confirmState ? (
       <ConfirmDialog
+        isActive={!tooSmall}
         state={confirmState}
         maxRows={overlayMaxRows}
         cols={cols}
@@ -2237,6 +2299,7 @@ export function App({
       />
     ) : overlay === 'question' && humanRequest?.kind === 'questions' ? (
       <QuestionOverlay
+        isActive={!tooSmall}
         questions={humanRequest.questions}
         maxRows={overlayMaxRows}
         cols={cols}
@@ -2246,6 +2309,7 @@ export function App({
       />
     ) : overlay === 'plan' && humanRequest?.kind === 'plan' ? (
       <PlanReviewOverlay
+        isActive={!tooSmall}
         plan={humanRequest.plan}
         maxRows={overlayMaxRows}
         cols={cols}
@@ -2259,6 +2323,10 @@ export function App({
 
   const header = (
     <Header
+      columns={cols}
+      statusExpanded={statusExpanded}
+      scrolledLines={scrolledLines}
+      overlayOpen={overlay !== null}
       cwd={controller.getCwd()}
       provider={cfg.provider}
       model={cfg.model}
@@ -2274,7 +2342,7 @@ export function App({
   // the header the moment the first message lands.
   const opener = empty ? (
     <SessionOpener
-      variant={pickOpenerVariant(viewportBudget, contentCols, caps)}
+      variant={pickOpenerVariant(viewportBudget, contentCols)}
       version={version}
       cwd={controller.getCwd()}
       hasKey={hasKey}
@@ -2315,8 +2383,8 @@ export function App({
     },
   };
 
-  // Completion belongs to the document footer; cap it to keep the editor usable.
-  const popupMaxRows = Math.max(1, viewportBudget - 4);
+  // Completion shares the fixed editor slot and its frame budget.
+  const popupMaxRows = 6;
 
   // WHICH KEY THE HINT ROW NAMES (shift-tab-mode-toggle-still-dead-on-windows,
   // C3-1). Derived from `vtInputWarning` rather than from a probe of its own,
@@ -2329,13 +2397,51 @@ export function App({
   // only decides which one the user is taught.
   const modeToggleKey = vtInputWarning ? MODE_TOGGLE_KEYS.fallback : MODE_TOGGLE_KEYS.primary;
 
+  const pendingCopy = copyFeedback.current;
+  const copyResult = pendingCopy && state.toasts.some(item => pendingCopy.toastId
+    ? item.id === pendingCopy.toastId
+    : !pendingCopy.previousIds.has(item.id) && item.text === pendingCopy.result.text)
+    ? pendingCopy.result : undefined;
+  const latestToast = state.toasts.at(-1);
+  const feedbackProjection = projectStatusFeedback({
+    interactionPhase: interactionPhase.current, interruptPhase: interruptGesture.current.phase,
+    completion, overlay, copyState, copyResult, ctrlCArmed: ctrlCArmed.current,
+    selectionPending: selectionController?.hasPendingSelection() ?? false, liveServices,
+    toast: latestToast ? { text: latestToast.text,
+      level: latestToast.level === 'success' ? 'info' : latestToast.level } : undefined,
+  });
+  const statusInput: StatusPrimaryInput = {
+    columns: cols, phase: state.runPhase, pendingCount: state.pendingSteering.length,
+    context: state.context, usageTotal: state.usageTotal, thinkingLevel: cfg.thinkingLevel,
+    elapsedMs, tokPerSec, speedKnown, activeTool: state.activeTool, runOutcome: state.runOutcome,
+    waitingForConfirmation: !!humanRequest || !!confirmState,
+    stopping: interruptGesture.current.phase === 'stopping',
+    interruptPhase: interruptGesture.current.phase,
+    compacting: compactionLive || !!state.compaction?.inFlight,
+    mode: state.agentMode, pendingMode: state.pendingAgentMode,
+    servicesActive: { live: liveServices }, ecoRung: governor.rung,
+    teamActive: state.team ? { running: state.team.runs.filter(item =>
+      !['queued', 'done', 'failed', 'aborted'].includes(item.phase)).length,
+      total: state.team.runs.length } : undefined,
+    todoActive: state.todos ? { done: state.todos.doneCount, total: state.todos.total } : undefined,
+    fastActive: state.fast?.live ? { inFlight: state.fast.inFlight } : undefined,
+    ...feedbackProjection,
+  };
+  const details = planStatusDetail({ status: statusInput, model: cfg.model, provider: cfg.provider,
+    hints: { interactionPhase: interactionPhase.current, cols, completion, overlay,
+      selectionPending: selectionController?.hasPendingSelection() ?? false,
+      copyInFlight: copyState.busy, copyCleanupPending: copyState.cleanupPending,
+      services: liveServices, hintsEnabled: cfg.hints, modeToggleKey,
+      interruptPhase: interruptGesture.current.phase,
+      updateAvailable: !!updateSnapshot && shouldRenderUpdateLine(updateSnapshot) } });
+
   const composer = (
     <Composer
-      measureRef={composerRef}
       deleteDisambiguated={terminal?.deleteDisambiguated ?? false}
       onCompletionContextChange={setCompletion}
-      cols={contentCols}
-      cursorVisible={cursorVisible}
+      cols={frameBudget.composerCols}
+      terminalRows={rows}
+      statusExpanded={statusExpanded}
       onInteraction={returnToComposer}
       reducedMotion={cfg.reducedMotion ?? false}
       onEscape={handleComposerEscape}
@@ -2345,16 +2451,15 @@ export function App({
       history={promptHistory}
       commands={commandOptions}
       cwd={controller.getCwd()}
-      showHint={rows >= HINT_MIN_ROWS}
+      showHint={false}
       submitCount={cfg.submitCount}
       hintsEnabled={cfg.hints}
       agentMode={state.agentMode}
       services={liveServices}
       modeToggleKey={modeToggleKey}
       popupMaxRows={popupMaxRows}
-      popupMaxHeight={railLayout.popupMaxHeight}
+      popupMaxHeight={frameBudget.popupMaxHeight}
       onPopupRowsChange={onPopupRowsChange}
-      scrolledLines={scrolledLines}
       onDraftRows={onDraftRows}
       onNotice={notify}
       theme={theme}
@@ -2390,19 +2495,17 @@ export function App({
   const viewport = (
       <ScrollViewport
         active={overlay === null && !tooSmall}
-        overlay={tooSmall ? null : overlayNode}
-        footer={<>{team}<QueuePanel layout={queueLayout} theme={theme} />{composer}</>}
+        overlay={overlayNode}
+        footer={<>{team}<QueuePanel layout={queueLayout} theme={theme} /></>}
         rail={rail}
         scrollbar={terminal?.scrollbar}
-        composerRef={composerRef}
-        onComposerVisibilityChange={setCursorVisible}
-        activityRef={activityRef}
-        onActivityVisibilityChange={setActivityRowVisible}
         resetKey={scrollResetKey}
         intent={scrollIntent}
         pinToBottomNonce={pinToBottomNonce}
         onScrolledLinesChange={setScrolledLines}
         onViewportShiftChange={onViewportShiftChange}
+        onGeometryChange={onGeometryChange}
+        geometryKey={`${rows}:${cols}:${viewportBudget}:${frameBudget.composerSlotRows}:${frameBudget.statusRows}:${contentCols}:${overlay}:${tooSmall}`}
         tailRowsRef={tailSink}
         hold={selectionHold}
         resumeMs={cfg.scrollResumeMs}
@@ -2440,35 +2543,17 @@ export function App({
       cols={cols}
       header={header}
       viewport={viewport}
-      toast={
-        <BottomStatusRow
-          toasts={state.toasts}
-          hints={{ interactionPhase: state.runPhase === 'starting' ? 'starting'
-            : running ? 'running' : 'idle', cols, completion,
-            selectionPending: selectionController?.hasPendingSelection() ?? false,
-            copyInFlight: copyState.busy, copyCleanupPending: copyState.cleanupPending,
-            overlay, services: liveServices, hintsEnabled: cfg.hints, modeToggleKey,
-            interruptHint: interruptGesture.current.phase === 'stopping'
-              ? 'Esc force-stop' : interruptGesture.current.phase === 'armed'
-                ? 'Esc confirm' : 'Esc x2 interrupt',
-            updateAvailable: !!updateSnapshot && !overlayNode && !running
-              && shouldRenderUpdateLine(updateSnapshot),
-          }}
-          update={
-            updateSnapshot && !overlayNode && !running && shouldRenderUpdateLine(updateSnapshot) ? (
-              <UpdateLine
-                snapshot={updateSnapshot}
-                compact={cols < UPDATE_LIMITS.statusCompactCols}
-                theme={theme}
-                caps={caps}
-              />
-            ) : null
-          }
-          theme={theme}
-        />
-      }
+      viewportRows={frameBudget.viewportRows}
+      composer={composer}
+      composerSlotRows={frameBudget.composerSlotRows}
+      statusRows={frameBudget.statusRows}
+      details={<BottomStatusRow plan={details} columns={cols} theme={theme} />}
       status={
         <StatusBar
+          columns={cols}
+          speedKnown={speedKnown}
+          {...feedbackProjection}
+          interruptPhase={interruptGesture.current.phase}
           pendingSteering={state.pendingSteering}
           runPhase={state.runPhase}
           activeTool={state.activeTool}
@@ -2527,16 +2612,8 @@ export function App({
           // only legal in CHILD position, and in an opening tag's attribute list it
           // is a parse error ("'...' expected") that takes the whole program down.
           {...(state.fast?.live ? { fastActive: { inFlight: state.fast.inFlight } } : {})}
-          // `state.compaction.live` and not merely non-null, for the reason the
-          // note above gives one chip over: a session that registered compaction
-          // and then turned it off with `/compact off` must stop advertising it.
-          //
-          // THE GAUGE MARKS NO LONGER RIDE THIS CONDITION (P2-6 / RV-4). They
-          // used to, and the spread just below is now their own; see the note
-          // there for why colour answers a different question than the chip.
-          {...(state.compaction?.live
-            ? { compactionActive: { inFlight: state.compaction.inFlight } }
-            : {})}
+          // Manual compaction starts before its next snapshot is published.
+          compactionActive={{ inFlight: statusInput.compacting ?? false }}
           // THE GAUGE MARKS RIDE THEIR OWN CONDITION (P2-6 / RV-4). They used to
           // share the chip's `state.compaction?.live`, and `live` is
           // `enabled && summarizer !== null` - so a session whose summarizer

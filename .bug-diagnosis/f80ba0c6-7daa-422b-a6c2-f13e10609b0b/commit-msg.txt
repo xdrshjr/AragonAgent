@@ -1,0 +1,22 @@
+feat: per-model context windows from user-editable model-windows.json
+
+A model id no table knows resolved to the untrusted 128k fallback, so the
+context gauge rendered '?' forever for gateway/self-hosted models. Users can
+now declare windows per id in ~/.aragon-agent/model-windows.json:
+
+- config/model-windows.ts: parse + mtime-cached lookup; UTF-8 BOM and UTF-16
+  saves decode correctly, malformed files degrade to empty with one log line
+  and never crash the TUI; only ENOENT clears, transient stat errors keep the
+  last good table
+- controller.getModelInfoFor overlays the declared window (source 'user');
+  precedence: config.json contextWindow > model-windows.json > api discovery
+  > builtin/CATALOG > fallback
+- contextWindowSource unions widened with 'user' (Core never produces it,
+  host-injected only); /context names the new source and admits unnamed
+  sources as unverified instead of claiming the model table
+- tests: parse/encoding matrix (UTF-8+BOOM/UTF-16LE/UTF-16BE), deletion
+  semantics, malformed flag, controller precedence ladder, /context branches
+- docs: both READMEs (home layout tree, resolution order, new section)
+
+Values verified against Moonshot platform pricing, docs.z.ai and OpenRouter:
+kimi-k3, glm-5.3, glm-5.3-flash all 1M (1048576) context.

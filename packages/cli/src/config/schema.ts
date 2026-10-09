@@ -1265,7 +1265,7 @@ export interface CompactionConfig {
    * SESSION'S OWN MODEL, and the first compaction is a ~30 k-token call on it.
    */
   useFastTier: boolean;
-  /** What happens when summarization fails outright. See §3.7 rungs 3 / 4. */
+  /** Legacy truncate remains readable; all failures now preserve history. */
   onFailure: CompactionFailureMode;
   /**
    * Give `task` children their own compaction
@@ -1299,7 +1299,7 @@ export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
   warnThreshold: 0.75,
   keepRecentTurns: 4,
   useFastTier: true,
-  onFailure: 'truncate',
+  onFailure: 'stop',
   subagents: true,
   archive: true,
 };
@@ -1610,6 +1610,14 @@ export interface PersistedConfig {
    * asked for; a kill switch is what a bug report needs.
    */
   paste: boolean;
+  /**
+   * Ask the terminal to report modified keys distinctly so Shift+Enter can
+   * insert a newline (win32-input-mode on Windows, kitty disambiguate +
+   * modifyOtherKeys elsewhere). A KILL SWITCH in the exact sense `paste`
+   * above records: the encoding tables are structural and live in
+   * `input/win32-input-mode.ts` / `input/csiu-keys.ts`.
+   */
+  keyboardEnhancement: boolean;
   /** Idle ms before a paused viewport returns to the newest line; `0` disables. */
   scrollResumeMs: number;
   /** Start every session in PLAN mode (plan-mode §4.4). */
@@ -1676,6 +1684,7 @@ export const DEFAULT_CONFIG: PersistedConfig = {
   mouse: true,
   mouseSelect: DEFAULT_MOUSE_SELECT,
   paste: true,
+  keyboardEnhancement: true,
   scrollResumeMs: DEFAULT_SCROLL_RESUME_MS,
   planModeDefault: false,
   planModeMaxAskRounds: DEFAULT_PLAN_MAX_ASK_ROUNDS,
@@ -1884,6 +1893,15 @@ export interface CliConfig {
    * reach none of them.
    */
   paste: boolean;
+  /**
+   * Whether this session may push the keyboard-enhancement modes.
+   *
+   * IT MUST EXIST HERE AND NOT ONLY IN `PersistedConfig`, for the reason
+   * `paste` above records: `runInteractive` reads it -- where `config`
+   * is a `CliConfig` -- to decide the filter's `enhancedKeys` feature
+   * and the `enableKeyboardEnhancement` push.
+   */
+  keyboardEnhancement: boolean;
   /** Idle ms before a paused viewport returns to the newest line; `0` disables. */
   scrollResumeMs: number;
   /**
@@ -2012,9 +2030,9 @@ export interface CliConfig {
   cwd: string;
   /** Whether ANSI color is enabled. */
   color: boolean;
-  /** Detected terminal color depth (0 none · 1 16 · 2 256 · 3 truecolor). */
+  /** Resolved color depth: TUI policy or non-interactive terminal detection. */
   colorLevel?: 0 | 1 | 2 | 3;
-  /** Detected Unicode support (box/round glyphs & spinners). */
+  /** TUI always enables Unicode; non-interactive output uses detection. */
   unicode?: boolean;
   /** One-shot `--api-key` override; applies to the active provider only. */
   apiKeyOverride?: string;

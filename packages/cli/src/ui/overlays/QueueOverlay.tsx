@@ -72,7 +72,7 @@ export function QueueOverlay(props: {
   }, [projected, offset, scrollOffset, onScrollClamp]);
   const rows = useMemo(() => projected.length ? projected.map((row, index) =>
     <Text key={`${row.queueId}:${index}`} wrap="truncate" color={theme.primary}>{row.text || ' '}</Text>)
-    : [<Text key="empty">{'\u961f\u5217\u5df2\u5904\u7406\u5b8c\u6bd5'}</Text>], [projected, theme]);
-  return <OverlayFrame {...props} title={`Queue: \u5f85\u5904\u7406 ${pending.length}`}
+    : [<Text key="empty">Queue is empty</Text>], [projected, theme]);
+  return <OverlayFrame {...props} title={`Queue: ${pending.length} pending`}
     hint="PgUp/PgDn | Up/Down | Esc" rows={rows} scrollOffset={offset} />;
 }

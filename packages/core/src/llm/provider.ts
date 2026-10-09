@@ -121,7 +121,7 @@ export interface LLMProvider {
    * Implementations should apply a reasonable timeout (15 s) and return an
    * empty array on failure rather than throwing.
    */
-  listModels(apiKey: string, baseUrl?: string): Promise<ModelInfo[]>;
+  listModels(apiKey: string, baseUrl?: string, signal?: AbortSignal): Promise<ModelInfo[]>;
 }
 
 // ---------------------------------------------------------------------------

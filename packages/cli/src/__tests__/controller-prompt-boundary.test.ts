@@ -35,14 +35,36 @@ afterEach(() => {
 });
 
 describe('prompt startup boundary', () => {
+  it('drops provider measurements when the model connection changes', () => {
+    const { controller } = setup();
+    controller.replaceMessages([{ role: 'user', content: 'keep', timestamp: 1 }]);
+    controller.getContextMeter().onTurnEnd({ inputTokens: 70_000, outputTokens: 10 });
+    expect(controller.getContextUsage().source).toBe('usage');
+    controller.setModel('anthropic', 'another-model', 'https://other.invalid');
+    expect(controller.getContextUsage().source).toBe('estimate');
+  });
+
+  it('keeps the measured numerator when only the context window changes', () => {
+    const { controller } = setup();
+    controller.replaceMessages([{ role: 'user', content: 'keep', timestamp: 1 }]);
+    controller.getContextMeter().onTurnEnd({ inputTokens: 70_000, outputTokens: 10 });
+    const before = controller.getContextUsage();
+    const snapshot = controller.prepareModelSettingsSnapshot({
+      ...controller.getConfig(), contextWindow: 300_000,
+    });
+    controller.applyModelSettingsSnapshot(snapshot);
+    expect(controller.getContextUsage()).toMatchObject({ source: 'usage',
+      occupied: before.occupied, window: 300_000 });
+  });
+
   it('rolls back only the protection ID of a failed queue submission', () => {
     const { controller, engine } = setup();
     const first = controller.queueUserMessage('keep');
-    const protectedIds = (controller as unknown as { pendingUserSteering: Set<string> })
+    const protectedIds = (controller as unknown as { pendingUserSteering: Map<string, string> })
       .pendingUserSteering;
     vi.spyOn(engine, 'steer').mockImplementationOnce(() => { throw new Error('unavailable'); });
     expect(() => controller.queueUserMessage('rejected')).toThrow('unavailable');
-    expect([...protectedIds]).toEqual([first]);
+    expect([...protectedIds.keys()]).toEqual([first]);
     expect(controller.queueUserMessage('next')).not.toBe(first);
   });
   it('a newer prompt invalidates the older pending message', async () => {
@@ -152,6 +174,7 @@ describe('mounted App with the real pending-start controller', () => {
     const view = render(React.createElement(App, { controller, version: 'test',  }));
     try {
       await flush();
+      view.stdin.write('\x07'); await flush();
       state.isRunning = true;
       view.stdin.write('first'); await flush(); view.stdin.write('\r'); await flush();
       view.stdin.write(ESC); await flush(); view.stdin.write(ESC); await flush();
@@ -178,6 +201,7 @@ describe('mounted App with the real pending-start controller', () => {
     const view = render(React.createElement(App, { controller, version: 'test',  }));
     try {
       await flush();
+      view.stdin.write('\x07'); await flush();
       state.isRunning = true;
       view.stdin.write('old request'); await flush();
       view.stdin.write('\r'); await flush();
@@ -216,6 +240,7 @@ describe('mounted App with the real pending-start controller', () => {
     try {
       await flush();
       // The view is idle after a force-stop, but the old engine is still unwinding.
+      view.stdin.write('\x07'); await flush();
       state.isRunning = true;
       view.stdin.write('cancel me'); await flush();
       view.stdin.write('\r'); await flush();
@@ -251,11 +276,12 @@ describe('mounted App with the real pending-start controller', () => {
     const view = render(React.createElement(App, { controller, version: 'test',  }));
     try {
       await flush();
+      view.stdin.write('\x07'); await flush();
       state.isRunning = true;
       view.stdin.write('timeout'); await flush();
       view.stdin.write('\r'); await flush();
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(view.lastFrame()).toMatch(/失败|结束/);
+      expect(view.lastFrame()).toMatch(/Failed|Done/);
       expect(notify).toHaveBeenCalledTimes(1);
       expect(ends).not.toHaveBeenCalled();
       expect(controller.getTodoSnapshot()).not.toBeNull();

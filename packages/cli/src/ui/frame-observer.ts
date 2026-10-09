@@ -17,10 +17,16 @@ function summarizeFrame(chunk: unknown, rows: number, cols: number): FrameSummar
   const unicode = pickGlyphs({ unicode: true, colorLevel: 0 });
   const cells = new Set(['|', '#', unicode.scrollTrack, unicode.scrollThumb]);
   const plain = lines.map((line) => stripAnsi(line));
-  const track = plain.slice(1, rows - 3);
-  if (plain.some((line) => stringWidth(line) > cols) ||
-    !track.every((line) => stringWidth(line) === cols && cells.has(line.slice(-1)))) return null;
-  return { columns: cols, rows, trackTop: 2, trackRows: rows - 4 };
+  if (plain.some((line) => stringWidth(line) > cols)) return null;
+  let trackRows = 0;
+  // Fixed composer/status slots have no last-column rail. Discover the actual
+  // message track, then acknowledge it only against the published Yoga geometry.
+  for (const line of plain.slice(1)) {
+    if (stringWidth(line) !== cols || !cells.has(line.slice(-1))) break;
+    trackRows++;
+  }
+  if (trackRows < 1) return null;
+  return { columns: cols, rows, trackTop: 2, trackRows };
 }
 
 /** Observe before differ transformation, but acknowledge only after downstream write returns. */
@@ -31,6 +37,7 @@ export function createFrameObserver(options: {
 }): { stdout: NodeJS.WriteStream; dispose(): void; invalidate(): void } {
   const { stdout, terminal, scrollbar } = options;
   let summary: FrameSummary | null = null;
+  let summaryRevision: number | undefined;
   let disposed = false;
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
   const invalidate = (): void => { summary = null; scrollbar.invalidate(); };
@@ -47,12 +54,15 @@ export function createFrameObserver(options: {
   };
   const match = (): void => {
     const g = scrollbar.geometry;
+    if (summary && g && summaryRevision === undefined) summaryRevision = g.revision;
     scrollbar.frameReady = !!summary && !!g && summary.columns === terminal.columns &&
       summary.rows === terminal.rows && g.trackCol === summary.columns &&
-      g.trackTop === summary.trackTop && g.trackRows === summary.trackRows;
+      g.trackTop === summary.trackTop && g.trackRows === summary.trackRows &&
+      g.revision === summaryRevision;
   };
   const observe = (chunk: unknown): void => {
     summary = summarizeFrame(chunk, terminal.rows, terminal.columns);
+    summaryRevision = scrollbar.geometry?.revision;
     if (!summary) { invalidate(); return; }
     match();
   };

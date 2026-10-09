@@ -38,6 +38,7 @@ function useEditorInput(props: ModelProfileEditorProps, navigation: EditorNaviga
     dispatch({ type: 'merge-editor' });
   }
   useInput((input, key) => {
+    if (props.isActive === false) return;
     if (key.escape) { dispatch({ type: 'cancel-editor' }); return; }
     if (key.upArrow || (key.tab && key.shift)) { setIndex((index - 1 + count) % count); return; }
     if (key.downArrow || key.tab) { setIndex((index + 1) % count); return; }

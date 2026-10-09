@@ -1,8 +1,26 @@
 import { describe, expect, it } from 'vitest';
-import { detectCapabilities } from '../ui/capabilities.js';
+import { detectCapabilities, resolveTuiCapabilities } from '../ui/capabilities.js';
 import { getTheme } from '../ui/theme.js';
 import { clampTheme, isThemeName, THEME_NAMES } from '../config/schema.js';
 import { COOL, WARM } from '../ui/palettes.js';
+import stringWidth from 'string-width';
+
+describe('full TUI styling', () => {
+  it('uses unambiguous single-column status marks in narrow frames', () => {
+    const glyphs = getTheme('warm', resolveTuiCapabilities({})).symbols;
+    for (const glyph of [glyphs.toolDone, glyphs.todoDone, glyphs.toolError,
+      glyphs.error, glyphs.info, glyphs.boxChecked, glyphs.teamMail, glyphs.tool.todo_write!]) {
+      expect(stringWidth(glyph), glyph).toBe(1);
+    }
+  });
+  it.each([{}, { LANG: 'C' }, { LANG: 'zh_CN.GBK' }, { TERM: 'dumb' },
+    { CI: '1' }, { CI: 'false' }, { FORCE_COLOR: '1' }, { FORCE_COLOR: '2' },
+    { WT_SESSION: 'windows-terminal' }, { TERM_PROGRAM: 'vscode' }])(
+    'does not downgrade for environment %j', (env) => {
+      expect(resolveTuiCapabilities(env)).toEqual({ unicode: true, colorLevel: 3 });
+    },
+  );
+});
 
 describe('detectCapabilities', () => {
   it('forces monochrome for NO_COLOR and TERM=dumb', () => {
@@ -67,7 +85,7 @@ describe('getTheme', () => {
     expect(ascii.symbols.toolDone).toBe('[ok]');
     expect(ascii.symbols.gaugeFull).toBe('#');
     const uni = getTheme('cool', { colorLevel: 3, unicode: true });
-    expect(uni.symbols.toolDone).toBe('✔');
+    expect(uni.symbols.toolDone).toBe('✓');
     expect(uni.symbols.gaugeFull).toBe('█');
   });
 

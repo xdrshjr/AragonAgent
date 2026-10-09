@@ -7,6 +7,47 @@ were written.
 
 ## Unreleased
 
+### 启动与缩窗不再误报 Frame diff lost sync
+
+- 启动即现的 "Frame diffing lost sync with the terminal and fell back to a
+  full repaint … `--no-diff-render`" 警告已消除：Ink 挂载/卸载经渲染 stdout 写出的
+  光标隐藏/恢复序列（`ESC[?25l` / `ESC[?25h`）由帧写入器直接透传——不进差分、
+  不失效缓存、不计 fallback，也不再消耗会话的首写豁免。启动序列恢复
+  "种子帧透传 → 首帧全量 → 之后纯 diff"。
+- 终端高度缩小（拖小窗口、改字号、面板重排）不再触发同一条警告：Ink 的
+  `clearTerminal` 整帧写入被差分器识别为 Ink 自身写法，透传并失效缓存但不计
+  fallback；该控制写同样不消耗首写豁免，其后的首个 log-update 帧仍按种子帧豁免，
+  下一帧自然全量重绘。
+- `/perf` 的 `fallbacks` 重新从 0 起步，"健康会话 fallbacks === 0" 的诊断信号
+  （AC-11）恢复可判。
+
+### Consistent TUI styling
+
+- Interactive sessions always use Unicode and default to truecolor, including
+  PowerShell sessions without terminal or UTF locale markers. Ink's actual color
+  output follows the same policy, with renderer state restored on exit.
+- Explicit color opt-outs keep Unicode borders and icons; the opening logo now
+  depends only on available space. Headless terminal detection is unchanged.
+- Reloading model settings preserves session display preferences. Syntax
+  highlighting follows the same color policy, and status icons use consistent
+  single-column glyphs to prevent narrow-frame overflow.
+- Hiding the editor caret while scrolling preserves draft geometry, preventing
+  a layout update loop when entering text above the full startup logo.
+- Register exit cleanup before mounting the application, so immediate exits and
+  initial render failures restore terminal and color state reliably. Failed
+  mounts no longer mark an auto-installed build as healthy.
+
+### Model context window
+
+- Discover context limits at startup and after connection changes without blocking
+  input. The status bar and compaction use the discovered limit; `/context` names
+  API versus catalog metadata. Unknown windows show `?`, not a fabricated 128k
+  capacity or percentage. Manual `contextWindow` overrides retain precedence.
+- Window overrides now apply to tail relief and compaction progress as well as
+  the gauge. Workers on different models/endpoints do not inherit the lead's
+  override. API-key changes refresh metadata, and ending a session cancels its
+  pending model queries. `/context` also hides unknown capacities/percentages.
+
 ### TUI 输入与排队可靠性
 
 - Shift+Enter 与粘贴按输入顺序处理；普通 Enter 保持弹层兼容，混合输入最多提交一次，

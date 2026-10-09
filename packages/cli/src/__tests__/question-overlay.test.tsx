@@ -316,3 +316,40 @@ describe('PlanReviewOverlay', () => {
     unmount();
   });
 });
+
+
+describe('short and inactive overlay contracts', () => {
+  it('keeps question focus traversable and ignores hidden submission', async () => {
+    const onSubmit = vi.fn();
+    const node = (active: boolean) => <QuestionOverlay questions={QUESTIONS.slice(0, 1)}
+      maxRows={3} cols={40} theme={ASCII_THEME} caps={ASCII_CAPS} isActive={active}
+      onSubmit={onSubmit} />;
+    const view = render(node(true));
+    await delay(30);
+    expect(view.lastFrame()?.split('\n')).toHaveLength(3);
+    expect(view.lastFrame()).toContain('Postgres');
+    expect(view.lastFrame()).toMatch(/\d+-\d+\/\d+/);
+    view.rerender(node(false)); await delay(20);
+    view.stdin.write(DOWN); view.stdin.write(ENTER); view.stdin.write(ENTER);
+    await delay(30); expect(onSubmit).not.toHaveBeenCalled();
+    view.rerender(node(true)); await delay(20);
+    expect(view.lastFrame()).toContain('Postgres');
+    view.stdin.write(DOWN); await delay(30);
+    expect(view.lastFrame()).toContain('SQLite');
+    view.unmount();
+  });
+  it.each([[40, 3], [80, 6]])('keeps the end of plan feedback visible at %i columns and %i rows', async (cols, maxRows) => {
+    const plan = normalizePlan({ title: 'Plan', summary: 'Summary', steps: [{ title: 'Step', detail: 'Do it' }] });
+    const onVerdict = vi.fn();
+    const view = render(<PlanReviewOverlay plan={plan!} maxRows={maxRows} cols={cols} scrollOffset={0}
+      onScrollClamp={() => {}} theme={ASCII_THEME} caps={ASCII_CAPS} onVerdict={onVerdict} />);
+    await delay(20); view.stdin.write('r'); await delay(20);
+    view.stdin.write('a'.repeat(100) + 'VISIBLE-END'); await delay(30);
+    expect(view.lastFrame()?.split('\n')).toHaveLength(maxRows);
+    expect(view.lastFrame()).toContain('VISIBLE-END');
+    expect(view.lastFrame()).not.toContain('The agent revises');
+    view.stdin.write(ENTER); await delay(20);
+    expect(onVerdict).toHaveBeenCalledWith({ decision: 'revise', feedback: 'a'.repeat(100) + 'VISIBLE-END' });
+    view.unmount();
+  });
+});

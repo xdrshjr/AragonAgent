@@ -12,6 +12,8 @@
  * - Model list via `GET /v1/models`
  */
 
+import { reportedContextWindow } from '../context-window.js';
+import { createModelDiscoverySignal } from '../model-discovery.js';
 import type {
   AssistantMessage,
   ContentBlock,
@@ -321,32 +323,47 @@ export class AnthropicProvider implements LLMProvider {
   // listModels
   // -----------------------------------------------------------------------
 
-  async listModels(apiKey: string, baseUrl?: string): Promise<ModelInfo[]> {
+  async listModels(apiKey: string, baseUrl?: string, signal?: AbortSignal): Promise<ModelInfo[]> {
     const base = (baseUrl || this.defaultBaseUrl).replace(/\/+$/, '');
     const url = `${base}/v1/models`;
+    const scope = createModelDiscoverySignal(signal);
 
     try {
-      const res = await fetch(url, {
-        method: 'GET',
-        headers: {
-          'x-api-key': apiKey,
-          'anthropic-version': ANTHROPIC_VERSION,
-        },
-        signal: AbortSignal.timeout(15_000),
-      });
-
-      if (!res.ok) return [];
-
-      const data = await res.json() as { data?: Array<Record<string, unknown>> };
+      const models: Array<Record<string, unknown>> = [];
+      const seen = new Set<string>();
+      let cursor: string | undefined;
+      for (let page = 0; page < 20 && !scope.signal.aborted; page++) {
+        try {
+          const pageUrl = cursor === undefined ? url : `${url}?after_id=${encodeURIComponent(cursor)}`;
+          const res = await fetch(pageUrl, {
+            method: 'GET',
+            headers: { 'x-api-key': apiKey, 'anthropic-version': ANTHROPIC_VERSION },
+            signal: scope.signal,
+          });
+          if (!res.ok) break;
+          const data = await res.json() as {
+            data?: Array<Record<string, unknown>>; has_more?: unknown; last_id?: unknown;
+          };
+          if (!Array.isArray(data.data)) break;
+          models.push(...data.data);
+          const next = data.last_id;
+          if (data.has_more !== true || typeof next !== 'string' || next.length === 0 || seen.has(next)) break;
+          seen.add(next);
+          cursor = next;
+        } catch {
+          break; // Preserve metadata from earlier pages when continuation fails.
+        }
+      }
+      if (signal?.aborted) return [];
       // The Anthropic models endpoint does NOT report an output ceiling, so this
       // maps through the static table and deliberately does NOT call
       // `learnModelCeiling`: asserting 64000 here is how `claude-3-5-haiku` ends
       // up with a "discovered" ceiling that outranks its correct table entry.
-      return (data.data || []).map((m) => ({
+      return models.map((m) => ({
         id: String(m.id || ''),
         name: String(m.display_name || m.id || ''),
         provider: this.id,
-        contextWindow: 200_000,
+        ...reportedContextWindow(m),
         maxOutputTokens: staticCeilingFor(this.id, String(m.id || '')) ?? DEFAULT_MAX_OUTPUT_TOKENS,
         supportsThinking: /claude-(sonnet-4|opus-4)/i.test(String(m.id)),
         supportsTools: true,
@@ -355,6 +372,8 @@ export class AnthropicProvider implements LLMProvider {
       }));
     } catch {
       return [];
+    } finally {
+      scope.dispose();
     }
   }
 }

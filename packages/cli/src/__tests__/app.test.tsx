@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import { createTerminalHarness, settleTerminal } from './helpers/terminal-harness.js';
+import { renderTui } from '../ui/ink-runtime.js';
 import type { AgentEvent, ModelInfo } from '@aragon-agent/core';
 
 // Keep the app hermetic — never write the developer's real config file.
@@ -539,6 +540,20 @@ function mount(
 }
 
 describe('App (interactive)', () => {
+  it('charges compaction using its call bill after the preferred model has changed', async () => {
+    const controller = new FakeController();
+    controller.config = { ...CONFIG, hints: false };
+    const view = mount(controller);
+    await delay(40);
+    controller.emitCompaction({ type: 'usage', usage: { inputTokens: 1000, outputTokens: 50,
+      cacheReadTokens: 500 }, modelRef: { providerId: 'anthropic', modelId: 'old-model' },
+      costUsd: 1.25, pricingUnknown: false });
+    await delay(40);
+    view.stdin.write('\x07');
+    await delay(40);
+    expect(view.lastFrame()).toContain('Cost $1.25 est');
+    view.unmount();
+  });
   it('opens slash help in an 80-column terminal without a layout feedback loop', async () => {
     const terminal = createTerminalHarness(80, 24, false);
     const fc = new FakeController();
@@ -712,7 +727,9 @@ describe('App (interactive)', () => {
 
   it('shows a transient toast for a slash-command ack', async () => {
     const fc = new FakeController();
-    const { lastFrame, unmount } = mount(fc, { initialPrompt: '/theme cool' });
+    const { lastFrame, stdin, unmount } = mount(fc, { initialPrompt: '/theme cool' });
+    await delay(40);
+    stdin.write('\x07');
     await delay(40);
     expect(lastFrame() ?? '').toContain('Theme set to cool');
     unmount();
@@ -823,6 +840,37 @@ describe('human-input bridge', () => {
 });
 
 describe('App (fullscreen frame)', () => {
+  it('opens completion and help above the full-color startup logo without a layout loop', async () => {
+    const fc = new FakeController();
+    fc.hasApiKey = () => false;
+    const terminal = createTerminalHarness(80, 24);
+    const instance = renderTui(<App controller={fc as unknown as AgentController} version="test" />,
+      { stdout: terminal.stdout, stdin: terminal.stdin, stderr: terminal.stdout,
+        debug: false, patchConsole: false, exitOnCtrlC: false }, { unicode: true, colorLevel: 3 });
+    try {
+      await settleTerminal();
+      terminal.input('/help\r');
+      await settleTerminal();
+      expect(terminal.frames.join('')).not.toContain('Maximum update depth');
+      expect(terminal.lastFrame()).toContain('Help');
+    } finally { instance.unmount(); instance.cleanup(); terminal.dispose(); }
+  });
+
+  it('keeps Unicode chrome even when a controller carries legacy detected capabilities', async () => {
+    const fc = new FakeController();
+    const config = fc.getConfig();
+    config.unicode = false;
+    config.colorLevel = 1;
+    const { lastFrame, unmount } = mount(fc);
+    try {
+      await delay(60);
+      const frame = stripAnsi(lastFrame() ?? '');
+      expect(frame).toContain('\u256d');
+      expect(frame).toContain('\u276f');
+      expect(frame).toContain('\u25c7');
+    } finally { unmount(); }
+  });
+
   it('pins the composer and status bar to the bottom of a fixed-height frame (R2)', async () => {
     const fc = new FakeController();
     const { lastFrame, unmount } = mount(fc);
@@ -837,10 +885,10 @@ describe('App (fullscreen frame)', () => {
     expect(stripAnsi(lines[0] ?? '')).toContain('◇');
     expect(stripAnsi(lines[0] ?? '')).toContain('AragonAgent');
     // The status bar is literally the last row of the frame.
-    expect(stripAnsi(lines[lines.length - 1] ?? '')).toContain('\u7a7a\u95f2');
-    expect(stripAnsi(lines[lines.length - 2] ?? '')).toContain('Enter');
+    expect(stripAnsi(lines[lines.length - 1] ?? '')).toContain('Idle');
+    expect(stripAnsi(lines[lines.length - 2] ?? '')).toContain('╰');
     // The composer sits directly above it, inside the last 5 rows.
-    expect(stripAnsi(lines.slice(-5, -2).join('\n'))).toContain('❯');
+    expect(stripAnsi(lines.slice(-4, -1).join('\n'))).toContain('❯');
     unmount();
   });
 
@@ -1152,7 +1200,7 @@ describe('reduced motion (A-10)', () => {
     // The one braille glyph stays in the last row, next to the actual run phase.
     const spinnerLine = frame.split('\n').find((l) => /[⠀-⣿]/.test(l)) ?? '';
     expect(spinnerLine).toBe(frame.split('\n').at(-1));
-    expect(spinnerLine).toContain('\u751f\u6210');
+    expect(spinnerLine).toContain('Generating');
     expect(ACTIVITY_PHRASES.some((p) => spinnerLine.includes(p))).toBe(false);
 
     // And the streamed answer still renders, with a STATIC role marker.
@@ -1175,48 +1223,56 @@ describe('composer hints (A-14)', () => {
         fc.emit({ type: 'agent_start' });
         fc.emit({ type: 'turn_start' });
       });
-    const { lastFrame, unmount } = mount(fc, {  initialPrompt: 'go' });
+    const { lastFrame, stdin, unmount } = mount(fc, {  initialPrompt: 'go' });
     await delay(100);
+    stdin.write('\x07');
+    await delay(40);
     const rows = stripAnsi(lastFrame() ?? '').split('\n');
-    expect(rows.at(-2)).toContain('Esc\u00d72 \u4e2d\u65ad');
-    expect(rows.at(-1)).not.toContain('Esc');
+    expect(rows.at(-1)).toContain('Esc x2 stop');
+    expect(rows.at(-2)).not.toContain('Esc');
     unmount();
   });
 
   it('keeps essential idle actions visible for experienced users', async () => {
     const fc = new FakeController();
     fc.config = { ...CONFIG, submitCount: 999 };
-    const { lastFrame, unmount } = mount(fc);
+    const { lastFrame, stdin, unmount } = mount(fc);
     await delay(80);
+    stdin.write('\x07');
+    await delay(40);
     const frame = stripAnsi(lastFrame() ?? '');
-    const hint = frame.split('\n').at(-2) ?? '';
+    const hint = frame.split('\n').at(-1) ?? '';
     expect(hint).toContain('Enter');
-    expect(hint).toContain('\u53d1\u9001');
-    expect(hint).toContain('\u6362\u884c');
+    expect(hint).toContain('send');
+    expect(hint).toContain('newline');
     unmount();
   });
 
   it('shows the full idle hint to a new user', async () => {
     const fc = new FakeController();
-    const { lastFrame, unmount } = mount(fc);
+    const { lastFrame, stdin, unmount } = mount(fc);
     await delay(80);
-    const hint = stripAnsi(lastFrame() ?? '').split('\n').at(-2) ?? '';
+    stdin.write('\x07');
+    await delay(40);
+    const hint = stripAnsi(lastFrame() ?? '').split('\n').at(-1) ?? '';
     expect(hint).toContain('Enter');
     expect(hint).toContain('Ctrl+J');
-    expect(hint).toContain('\u6362\u884c');
+    expect(hint).toContain('newline');
     unmount();
   });
 
-  it('hides teaching hints but preserves send and newline when hints are disabled', async () => {
+  it('hides teaching hints but preserves the details toggle when hints are disabled', async () => {
     const fc = new FakeController();
     fc.config = { ...CONFIG, hints: false };
-    const { lastFrame, unmount } = mount(fc);
+    const { lastFrame, stdin, unmount } = mount(fc);
     await delay(80);
+    stdin.write('\x07');
+    await delay(40);
     const frame = stripAnsi(lastFrame() ?? '');
     expect(frame).not.toContain('? help');
-    const hint = frame.split('\n').at(-2) ?? '';
-    expect(hint).toContain('Enter');
-    expect(hint).toContain('\u6362\u884c');
+    const hint = frame.split('\n').at(-1) ?? '';
+    expect(hint).toContain('^G less');
+    expect(hint).not.toContain('newline');
     expect(hint).not.toContain('/ commands');
     expect(hint).not.toContain('@ files');
     expect(frame).not.toContain('newline');
@@ -1584,15 +1640,15 @@ describe('AC-37: the fixed status opens with the current run phase', () => {
     });
     const { frames, lastFrame, unmount } = mount(fc, { initialPrompt: 'go' });
     try {
-      await vi.waitFor(() => expect(lastFrame()).toContain('\u7b49\u5f85'));
+      await vi.waitFor(() => expect(lastFrame()).toContain('Waiting'));
       const firstWaiting = frames.map(stripAnsi).find((frame) =>
-        frame.split('\n').at(-1)?.includes('\u7b49\u5f85'))!;
+        frame.split('\n').at(-1)?.includes('Waiting'))!;
       expect(firstWaiting).toBeDefined();
       expect(firstWaiting.split('\n').at(-1)).toMatch(/[\u2800-\u28ff]/);
       expect(ACTIVITY_PHRASES.some((phrase) => firstWaiting.includes(phrase))).toBe(false);
       fc.emit({ type: 'message_update', streamEvent: { type: 'text_delta', delta: 'first content' } });
       await vi.waitFor(() => expect(lastFrame()).toContain('first content'));
-      expect(stripAnsi(lastFrame() ?? '').split('\n').at(-1)).toContain('\u751f\u6210');
+      expect(stripAnsi(lastFrame() ?? '').split('\n').at(-1)).toContain('Generating');
     } finally { unmount(); }
   });
 });
@@ -1642,10 +1698,12 @@ describe('the auto-update bridge (cli-auto-update §6.3)', () => {
   it('AC-19: `installing -> ready` pushes EXACTLY ONE toast, however often it repeats', async () => {
     const fake = fakeService(IDLE);
     const fc = new FakeController();
-    const { lastFrame, unmount } = mount(fc, {
+    const { lastFrame, stdin, unmount } = mount(fc, {
       updateBridge: { service: fake.service, onAttach: null },
     });
     await delay(20);
+    stdin.write('\x07');
+    await delay(40);
 
     fake.push({ phase: 'installing', latestVersion: '0.6.0' });
     fake.push({ phase: 'ready' });
@@ -1688,7 +1746,7 @@ describe('the auto-update bridge (cli-auto-update §6.3)', () => {
  */
 describe('the fixed action and status rows in <App>', () => {
   const braille = (frame: string): number => (frame.match(/[\u2800-\u28ff]/g) ?? []).length;
-  const INTERRUPT = 'Esc\u00d72 \u4e2d\u65ad';
+  const INTERRUPT = 'Esc x2 stop';
 
   /** A run that streams `lines` lines of text and then waits for `finish()`. */
   function longRun(config: CliConfig = CONFIG, lines = 60) {
@@ -1717,6 +1775,8 @@ describe('the fixed action and status rows in <App>', () => {
       initialPrompt="go" />);
     await settleTerminal();
     await settleTerminal();
+    terminal.input('\x07');
+    await settleTerminal();
     return { terminal, fc, finish };
   }
 
@@ -1729,18 +1789,18 @@ describe('the fixed action and status rows in <App>', () => {
       const during = terminal.lastFrame();
       const top = during.split('\n').findIndex((row) => row.includes('\u256d'));
       expect(top).toBeGreaterThan(0);
-      expect(during.split('\n').at(-2)).toContain(INTERRUPT);
-      expect(during.split('\n').at(-1)).toMatch(/[\u2800-\u28ff]/);
+      expect(during.split('\n').at(-1)).toContain(INTERRUPT);
+      expect(during.split('\n').at(-2)).toMatch(/[\u2800-\u28ff]/);
       expect(braille(during)).toBe(1);
       // Commands belong only to the fixed action row, never to the composer border.
       expect(during.split('\n').slice(0, -2).join('\n')).not.toContain(INTERRUPT);
-      expect(during.split('\n').at(-2)).toContain('\u52a0\u5165\u961f\u5217');
+      expect(during.split('\n').at(-1)).toContain('Enter queue');
       finish();
       await settleTerminal();
       await settleTerminal();
       const after = terminal.lastFrame();
       expect(after).not.toContain(INTERRUPT);
-      expect(after.split('\n').at(-2)).toContain('\u53d1\u9001');
+      expect(after.split('\n').at(-1)).toContain('send');
       // The fixed rows change their content without moving the composer.
       const idleTop = after.split('\n').findIndex((row) => row.includes('╭'));
       expect(top).toBe(idleTop);
@@ -1758,8 +1818,8 @@ describe('the fixed action and status rows in <App>', () => {
       try {
         const during = terminal.lastFrame();
         expect(braille(during)).toBe(1);
-        expect(during.split('\n').at(-2)).toContain(INTERRUPT);
-        expect(during.split('\n').at(-1)).toMatch(/[\u2800-\u28ff]/);
+        expect(during.split('\n').at(-1)).toContain(INTERRUPT);
+        expect(during.split('\n').at(-2)).toMatch(/[\u2800-\u28ff]/);
         // Short windows and disabled teaching hints keep the same fixed rows.
         const runningTop = rowOf(during, '╭');
         finish();
@@ -1772,7 +1832,7 @@ describe('the fixed action and status rows in <App>', () => {
     },
   );
 
-  it('T13: an available update stays silent for the whole run and shows after it', async () => {
+  it('T13: an available update never expands status and is available in requested details', async () => {
     const listeners = new Set<(s: UpdateSnapshot) => void>();
     const snapshot: UpdateSnapshot = {
       phase: 'available', currentVersion: '0.5.9', latestVersion: '0.6.0', source: 'npm-global',
@@ -1783,19 +1843,22 @@ describe('the fixed action and status rows in <App>', () => {
       subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
       checkNow: async () => snapshot, skip: () => {}, nextCheckAt: () => null,
     };
-    const terminal = createTerminalHarness(100, 24);
+    const terminal = createTerminalHarness(200, 24);
     const { fc, finish } = longRun();
     try {
       terminal.mount(<App controller={fc as unknown as AgentController} version="test"
         initialPrompt="go" updateBridge={{ service, onAttach: null }} />);
       await settleTerminal();
       await settleTerminal();
-      expect(terminal.lastFrame()).toContain(INTERRUPT);
-      expect(terminal.lastFrame().split('\n').at(-2)).not.toContain('/update');
+      expect(terminal.lastFrame().split('\n').at(-1)).not.toContain('/update');
+      expect(terminal.lastFrame().split('\n').at(-1)).not.toContain('/update');
       finish();
       await settleTerminal();
       await settleTerminal();
-      expect(terminal.lastFrame().split('\n').at(-2)).toContain('/update');
+      expect(terminal.lastFrame().split('\n').at(-1)).not.toContain('/update');
+      terminal.input('\x07');
+      await settleTerminal();
+      expect(terminal.lastFrame().split('\n').at(-1)).toContain('/update');
     } finally { terminal.dispose(); }
   });
 
@@ -1834,7 +1897,7 @@ describe('App (tui-shift-enter-copy-queue)', () => {
         await settleTerminal();
       }
       expect(queued).toHaveLength(8);
-      expect(terminal.lastFrame()).toContain('Queue: \u5f85\u5904\u7406 8');
+      expect(terminal.lastFrame()).toContain('Queue: 8 pending');
       expect(terminal.lastFrame()).not.toContain('full-detail-8');
 
       // A single input event may include typeahead after the command's Enter.
@@ -1911,6 +1974,8 @@ describe('App (tui-shift-enter-copy-queue)', () => {
       };
       try {
         await delay(60);
+        view.stdin.write('\x07');
+        await delay(35);
         if (source === 'command') await copyCommand();
         else { pending = true; view.stdin.write('\x03'); await delay(35); }
         expect(clipboardMock.calls).toHaveLength(1);
@@ -1923,17 +1988,19 @@ describe('App (tui-shift-enter-copy-queue)', () => {
         expect(pending).toBe(true);
         expect(takeSelection).toHaveBeenCalledTimes(taken);
         expect(fc.stopAllServicesCalls).toHaveLength(0);
-        expect(view.lastFrame()).not.toContain('Press Ctrl+C again to exit.');
+        expect(view.lastFrame()).not.toContain('^C exit');
         await copyCommand();
         expect(clipboardMock.calls).toHaveLength(1);
         expect(onCopied).not.toHaveBeenCalled();
 
         clipboardMock.tasks[0]!.finish({ status: 'failed', reason: 'timeout' });
         await delay(35);
-        expect(view.lastFrame()).toContain('\u590d\u5236\u5931\u8d25');
+        expect(view.lastFrame()).toContain('Copy failed');
+        expect(stripAnsi(view.lastFrame() ?? '').split('\n').slice(1, -5).join('\n'))
+          .toContain('Copy failed: Clipboard tool timed out');
         pending = true;
         view.stdin.write('\x03'); await delay(35);
-        expect(view.lastFrame()).toContain('\u590d\u5236\u5931\u8d25\uff0c\u6b63\u5728\u6e05\u7406');
+        expect(view.lastFrame()).toContain('Copy failed; cleaning up');
         expect(clipboardMock.calls).toHaveLength(1);
         expect(pending).toBe(true);
         expect(fc.stopAllServicesCalls).toHaveLength(0);
@@ -1947,7 +2014,8 @@ describe('App (tui-shift-enter-copy-queue)', () => {
         clipboardMock.tasks[1]!.finish({ status: 'confirmed', via: 'native' });
         clipboardMock.tasks[1]!.release();
         await delay(35);
-        expect(view.lastFrame()).toContain('\u5df2\u590d\u5236 1 \u884c');
+        expect(view.lastFrame()).toContain('Copied 1 lines');
+        expect(view.lastFrame()).not.toContain('Copy sent');
         expect(onCopied).toHaveBeenCalledTimes(2);
         expect(fc.stopAllServicesCalls).toHaveLength(0);
       } finally { view.unmount(); }
@@ -2003,7 +2071,7 @@ describe('App (tui-shift-enter-copy-queue)', () => {
     try {
       await delay(40);
       view.stdin.write('\x03'); await delay(30); // Arm exit first.
-      expect(view.lastFrame()).toContain('Press Ctrl+C again to exit.');
+      expect(view.lastFrame()).toContain('^C exit');
       live = 1;
       pending = true;
       view.stdin.write('\x03'); await delay(30);
@@ -2012,7 +2080,7 @@ describe('App (tui-shift-enter-copy-queue)', () => {
       expect(clipboardMock.calls).toHaveLength(kind === 'empty' ? 0 : 1);
       live = 0;
       view.stdin.write('\x03'); await delay(30);
-      expect(view.lastFrame()).toContain('Press Ctrl+C again to exit.');
+      expect(view.lastFrame()).toContain('^C exit');
     } finally { view.unmount(); }
   });
 
@@ -2124,7 +2192,7 @@ describe('App (tui-shift-enter-copy-queue)', () => {
     await delay(30);
 
     expect(steered).toEqual(['a note']);
-    expect(lastFrame()).toContain('Queue: \u5f85\u5904\u7406 1');
+    expect(lastFrame()).toContain('Queue: 1 pending');
     expect(lastFrame()).toContain('1. a note');
     // The entry IS the feedback; the old toast is gone (5.3).
     expect(lastFrame()).not.toContain('Steering queued.');
@@ -2134,11 +2202,11 @@ describe('App (tui-shift-enter-copy-queue)', () => {
     fc.emit({ type: 'turn_start' });
     fc.emit({ type: 'message_update', streamEvent: { type: 'text_delta', delta: 'picked up' } });
     await delay(60);
-    expect(lastFrame()).toContain('Queue: \u5f85\u5904\u7406 1');
+    expect(lastFrame()).toContain('Queue: 1 pending');
     expect(lastFrame()).toContain('1. a note');
     fc.emit({ type: 'steering_accepted', ids: ['queued-test-id'] });
     await delay(30);
-    expect(lastFrame()).not.toContain('Queue: \u5f85\u5904\u7406');
+    expect(lastFrame()).not.toContain('Queue:');
     expect(lastFrame()).not.toContain('1. a note');
     expect(lastFrame()).toContain('a note');
     expect(lastFrame()).toContain('picked up');
@@ -2183,16 +2251,17 @@ describe('App (tui-shift-enter-copy-queue)', () => {
     await delay(40);
     expect(clipboardMock.calls).toEqual([{ text: 'selected text', hasDoor: false }]);
     // The shared toast funnel named the copy...
-    expect(lastFrame()).toContain('\u5df2\u8bf7\u6c42\u7ec8\u7aef\u590d\u5236');
+    expect(lastFrame()).toContain('Copy sent');
+    expect(lastFrame()).not.toContain('Copied');
     // ...and neither ladder rung fired: no service stop, no arm.
     expect(fc.stopAllServicesCalls).toHaveLength(0);
-    expect(lastFrame()).not.toContain('Press Ctrl+C again to exit.');
+    expect(lastFrame()).not.toContain('^C exit');
 
     // The SECOND Ctrl+C (selection already consumed) walks the original
     // ladder: it arms exit and says so.
     stdin.write('\x03');
     await delay(40);
-    expect(lastFrame()).toContain('Press Ctrl+C again to exit.');
+    expect(lastFrame()).toContain('^C exit');
     unmount();
   });
 });

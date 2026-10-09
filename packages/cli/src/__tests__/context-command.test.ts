@@ -35,6 +35,7 @@ function ctx(opts: Opts = {}): CommandContext {
     source: 'usage',
     deltaTokens: 0,
     windowKnown: true,
+    windowSource: 'catalog',
     windowOverridden: false,
     ...opts.usage,
   };
@@ -68,6 +69,10 @@ function ctx(opts: Opts = {}): CommandContext {
 }
 
 describe('T18 - the Window line names its source', () => {
+  it('names API metadata independently of catalog pricing', () => {
+    expect(formatContextReport(ctx({ usage: { windowSource: 'api' } })))
+      .toContain('200000   from the model API');
+  });
   it('the model table', () => {
     expect(formatContextReport(ctx())).toContain('200000   from the model table');
   });
@@ -79,13 +84,34 @@ describe('T18 - the Window line names its source', () => {
     const text = formatContextReport(
       ctx({ usage: { window: 1_000_000, windowOverridden: true } }),
     );
-    expect(text).toContain('1000000   from contextWindow in config.json (overrides the model table)');
+    expect(text)
+      .toContain('1000000   from contextWindow configuration (overrides API, model table, and model-windows.json)');
   });
 
   it('the invented placeholder, admitted as invented', () => {
     const text = formatContextReport(ctx({ usage: { window: 128_000, windowKnown: false } }));
-    expect(text).toContain('PLACEHOLDER - this model is not in the table');
-    expect(text).toContain('set contextWindow to correct it');
+    expect(text).toContain('UNKNOWN - no verified model limit');
+      expect(text)
+        .toContain('set contextWindow or list the model in model-windows.json to correct it');
+  });
+
+  it('an unnamed source is admitted as unverified, not claimed for the table', () => {
+    const text = formatContextReport(ctx({ usage: { windowSource: undefined } }));
+    expect(text).toContain('200000   source unverified');
+  });
+  it('a per-model user file, named as such (model-windows.json)', () => {
+    const text = formatContextReport(
+      ctx({ usage: { window: 1_048_576, windowSource: 'user' } }),
+    );
+    expect(text).toContain('1048576   from model-windows.json (your per-model table)');
+  });
+
+  it('does not print a fabricated percentage or capacity for unknown windows', () => {
+    const text = formatContextReport(ctx({ usage: { window: 128_000, windowKnown: false } }));
+    const occupancy = text.split('\n').find((line) => line.includes('Occupancy'))!;
+    expect(occupancy).toContain('86.2k of ?');
+    expect(occupancy).not.toContain('%');
+    expect(occupancy).not.toContain('128');
   });
 });
 

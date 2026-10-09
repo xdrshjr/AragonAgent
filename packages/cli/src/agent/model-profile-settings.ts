@@ -204,8 +204,15 @@ export function reloadModelSettings(controller: ModelSettingsController): ModelS
   if (!disk.ok) return rejected('read_failed');
   if (validateModelProfiles(disk.config?.modelProfiles).length) return rejected('invalid');
   try {
-    const resolved = loadConfig({ cwd: controller.getConfig().cwd });
-    resolved.liveToolOutput = controller.getConfig().liveToolOutput;
+    const live = controller.getConfig();
+    const resolved = loadConfig({ cwd: live.cwd });
+    resolved.liveToolOutput = live.liveToolOutput;
+    // The mounted renderer owns these session preferences. Reloading model
+    // settings must not re-detect the shell or discard a startup --no-color.
+    resolved.color = live.color;
+    if (live.colorLevel !== undefined) resolved.colorLevel = live.colorLevel;
+    if (live.unicode !== undefined) resolved.unicode = live.unicode;
+    resolved.reducedMotion ||= !live.color;
     const after = readModelSettingsDisk();
     if (!after.ok) return rejected('read_failed');
     if (after.revision !== disk.revision) return rejected('conflict');

@@ -11,7 +11,7 @@
  * times the number the reversal rests on.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   AgentConfig,
   AgentEvent,
@@ -83,7 +83,11 @@ function baseConfig(over: Partial<CliConfig['compaction']> = {}): CliConfig {
   } as unknown as CliConfig;
 }
 
-function childHarness(getConfig: () => CliConfig, messages: () => readonly Message[]) {
+function childHarness(
+  getConfig: () => CliConfig,
+  messages: () => readonly Message[],
+  model: ModelRef = CHILD_REF,
+) {
   const compacted: string[] = [];
   const deps: ChildCompactionDeps = {
     getConfig,
@@ -93,7 +97,10 @@ function childHarness(getConfig: () => CliConfig, messages: () => readonly Messa
     isPricedModel: () => true,
     complete: async (_id: string, _req: LLMRequest): Promise<AssistantMessage> => ({
       role: 'assistant',
-      content: [{ type: 'text', text: '## Task\nthe child summary' }],
+      content: [{ type: 'text', text: JSON.stringify({ schemaVersion: 2, additions: [{
+        section: 'facts', text: 'The child answered the first request.',
+        sources: [{ messageId: 'g1:m1', role: 'assistant', excerpt: 'answer 0:' }],
+      }] }) }],
       usage: { inputTokens: 500, outputTokens: 100 },
     }),
     onUsage: () => {},
@@ -102,14 +109,14 @@ function childHarness(getConfig: () => CliConfig, messages: () => readonly Messa
   const manager = createChildContextManager(
     {
       label: 'researcher',
-      model: CHILD_REF,
+      model,
       getMessages: messages,
       getSystemPrompt: () => 'child sys',
       onCompacted: () => compacted.push('researcher'),
     },
     deps,
   );
-  return { manager, compacted };
+  return { manager, compacted, deps };
 }
 
 function ctx(messages: Message[], over: Partial<CompactionContext> = {}): CompactionContext {
@@ -125,7 +132,92 @@ function ctx(messages: Message[], over: Partial<CompactionContext> = {}): Compac
   };
 }
 
+describe('child context window isolation', () => {
+  const probe = {
+    messageCount: 4, turnIndex: 10, trigger: 'pressure' as const,
+    lastUsage: { inputTokens: 31_000, outputTokens: 0 },
+  };
+
+  it.each([
+    { providerId: 'anthropic', modelId: 'claude-haiku-4-5' },
+    { providerId: 'openai', modelId: 'claude-sonnet-4-5' },
+    { providerId: 'anthropic', modelId: 'claude-sonnet-4-5', baseUrl: 'https://other.test' },
+  ])('does not inherit the lead override for a different connection: %j', (model) => {
+    const config = { ...baseConfig(), contextWindow: 1_000_000 };
+    const { manager } = childHarness(() => config, () => [], model);
+    manager.onTurnEnd(probe.lastUsage, [], 'child sys');
+    expect(manager.shouldCompact(probe)).toBe(true);
+  });
+
+  it('inherits the lead override for the same model and connection', () => {
+    const config = { ...baseConfig(), contextWindow: 1_000_000 };
+    const { manager } = childHarness(() => config, () => [], {
+      providerId: config.provider, modelId: config.model,
+    });
+    manager.onTurnEnd(probe.lastUsage, [], 'child sys');
+    expect(manager.shouldCompact(probe)).toBe(false);
+  });
+
+  it('keeps child samples independent and ignores a different probe usage', () => {
+    const config = baseConfig();
+    const history = [user('task')];
+    const first = childHarness(() => config, () => history).manager;
+    const second = childHarness(() => config, () => history).manager;
+    first.onTurnEnd({ inputTokens: 31000, outputTokens: 0 }, history, 'child sys');
+    second.onTurnEnd({ inputTokens: 1000, outputTokens: 0 }, history, 'child sys');
+    expect(first.shouldCompact({ ...probe, messageCount: 1, lastUsage: undefined })).toBe(true);
+    expect(second.shouldCompact({ ...probe, messageCount: 1 })).toBe(false);
+  });
+});
+
 describe('the child overlay (§3.4.2 / test 27)', () => {
+  it('forwards the actual child model and its call cost into the lead billing sink', async () => {
+    const history = conversation(8);
+    const { deps } = childHarness(() => baseConfig(), () => history);
+    const onUsage = vi.fn();
+    const manager = createChildContextManager({ label: 'billing', model: CHILD_REF,
+      getMessages: () => history, getSystemPrompt: () => 'child sys', onCompacted: () => {} },
+    { ...deps, onUsage });
+    await manager.compact(ctx(history));
+    expect(onUsage).toHaveBeenCalledWith({ inputTokens: 500, outputTokens: 100 }, {
+      modelRef: CHILD_REF, costUsd: 0.003, pricingUnknown: false,
+    });
+    manager.onCompactionEnd({ applied: false, tokensBefore: 10000, tokensAfter: 10000 });
+  });
+  it('keeps failed legacy truncate summaries intact and never counts them as applied', async () => {
+    const history = conversation(8);
+    const { compacted, deps } = childHarness(() => baseConfig({ onFailure: 'truncate' }),
+      () => history);
+    deps.complete = async () => { throw new Error('provider failed'); };
+    const failed = createChildContextManager({ label: 'failure', model: CHILD_REF,
+      getMessages: () => history, getSystemPrompt: () => 'child sys',
+      onCompacted: () => compacted.push('failed') }, deps);
+    const result = await failed.compact(ctx(history));
+    expect(result.action).toBe('keep');
+    expect(compacted).toEqual([]);
+    expect(history).toEqual(conversation(8));
+  });
+
+  it('counts only the first applied Core verdict after generating a candidate', async () => {
+    const history = conversation(8);
+    const { manager, compacted } = childHarness(() => baseConfig(), () => history);
+    const result = await manager.compact(ctx(history));
+    expect(result.action).toBe('replace');
+    expect(compacted).toEqual([]);
+    const verdict = { applied: true, tokensBefore: 31000, tokensAfter: 10000 };
+    manager.onCompactionEnd(verdict);
+    manager.onCompactionEnd(verdict);
+    expect(compacted).toEqual(['researcher']);
+  });
+
+  it('does not count a Core rejected candidate', async () => {
+    const history = conversation(8);
+    const { manager, compacted } = childHarness(() => baseConfig(), () => history);
+    await manager.compact(ctx(history));
+    manager.onCompactionEnd({ applied: false, reason: 'invalid_history: orphan tool_result',
+      tokensBefore: 31000, tokensAfter: 31000 });
+    expect(compacted).toEqual([]);
+  });
   it('mechanism A: the config view really returns the three policy rows', async () => {
     let seen: CliConfig['compaction'] | null = null;
     const config = baseConfig();
@@ -172,6 +264,7 @@ describe('the child overlay (§3.4.2 / test 27)', () => {
       lastUsage: { inputTokens: 20_000, outputTokens: 0 },
     };
     // 20 000 of a 32 000 window is 62 %: under the default 0.9, over the live 0.5.
+    manager.onTurnEnd(probe.lastUsage, [], 'child sys');
     expect(manager.shouldCompact(probe)).toBe(true);
 
     config = baseConfig({ threshold: 0.95 });
@@ -191,9 +284,14 @@ describe('the child overlay (§3.4.2 / test 27)', () => {
       lastUsage: { inputTokens: 31_000, outputTokens: 0 },
     };
 
+    manager.onTurnEnd(probe.lastUsage, [], 'child sys');
     await manager.compact(ctx(conversation(8), { turnIndex: 1 }));
+    manager.onCompactionEnd({ applied: false, reason: 'invalid_history',
+      tokensBefore: 31000, tokensAfter: 31000 });
     expect(manager.shouldCompact({ ...probe, turnIndex: 50 })).toBe(true);
     await manager.compact(ctx(conversation(8), { turnIndex: 50 }));
+    manager.onCompactionEnd({ applied: false, reason: 'invalid_history',
+      tokensBefore: 31000, tokensAfter: 31000 });
     // THE BOUND, ASSERTED THROUGH BEHAVIOUR. `COMPACTION_LIMITS.maxPerRun` is 5;
     // a child that inherited it would still say `true` here.
     expect(COMPACTION_LIMITS.childMaxPerRun).toBeLessThan(COMPACTION_LIMITS.maxPerRun);
@@ -233,6 +331,10 @@ describe('the child accessors are lazy (§3.4.3 / test 26 / RV-1)', () => {
 class StubChild implements SubagentAgentLike {
   readonly state: { messages: Message[] } = { messages: [] };
   private readonly listeners = new Set<(e: AgentEvent) => void>();
+
+  emit(event: AgentEvent): void {
+    for (const listener of this.listeners) listener(event);
+  }
 
   async prompt(): Promise<void> {
     for (const l of [...this.listeners]) {
@@ -332,6 +434,22 @@ describe('AC-H10: the key decides whether the KEY EXISTS (test 25)', () => {
 });
 
 describe('test 28: onCompacted increments SubagentRun.compactions', () => {
+  it('maps the final Core verdict into the child manager', () => {
+    const deps = subagentDeps(baseConfig(), [], null);
+    const onCompactionEnd = vi.fn();
+    const agent = new StubChild();
+    deps.agentFactory = () => agent;
+    deps.contextManagerFor = () => ({ shouldCompact: () => false,
+      compact: async () => ({ action: 'keep', reason: 'below_threshold' }),
+      onTurnEnd: () => {}, onCompactionEnd });
+    createSubagent(SPEC, deps, { onUpdate: () => {}, onUsage: () => {} });
+    agent.emit({ type: 'compaction_end', applied: false, mode: 'none',
+      reason: 'invalid_history', messagesBefore: 10, messagesAfter: 10,
+      droppedMessages: 0, estimatedTokensBefore: 1000, estimatedTokensAfter: 1000,
+      durationMs: 1 });
+    expect(onCompactionEnd).toHaveBeenCalledExactlyOnceWith({ applied: false,
+      reason: 'invalid_history', tokensBefore: 1000, tokensAfter: 1000 });
+  });
   it('is absent until a child compacts', () => {
     const config = baseConfig({ subagents: true });
     const captured: AgentConfig[] = [];

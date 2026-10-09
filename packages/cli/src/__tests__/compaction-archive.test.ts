@@ -17,7 +17,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentEvent, Message, ModelInfo, ModelRef } from '@aragon-agent/core';
+import { ProviderRegistry, type AgentEvent, type Message, type ModelInfo, type ModelRef } from '@aragon-agent/core';
 import { CompactionWiring } from '../compaction/wiring.js';
 import type { CompactionEvent } from '../compaction/types.js';
 import {
@@ -37,6 +37,7 @@ import {
   type CompactionArchive,
 } from '../compaction/archive.js';
 import { COMPACTION_LIMITS } from '../compaction/limits.js';
+import { scriptedProvider } from './helpers/scripted-provider.js';
 
 const dirs: string[] = [];
 
@@ -297,10 +298,8 @@ const MODEL: ModelInfo = {
 const REF: ModelRef = { providerId: 'anthropic', modelId: 'claude-sonnet-4-5' };
 
 /**
- * NO NETWORK, AND NOT BY MOCKING ONE. `hasKey` answers `false`, so
- * `resolveSummarizer()` returns `null` and the ladder ends at
- * `no_summarizer_model` WITHOUT reaching `getRegistry()`. The result is a
- * `truncated` splice, which is a complete compaction cycle for everything here.
+ * A real registry with an offline provider returns schema-valid sourced deltas.
+ * Archives are produced only after the synchronous host adoption callback.
  */
 function wiringHarness(
   messages: Message[],
@@ -317,16 +316,21 @@ function wiringHarness(
   } as unknown as CliConfig;
 
   const events: CompactionEvent[] = [];
+  let currentMessages = messages;
+  const registry = new ProviderRegistry({ retryPolicy: null });
+  registry.register(scriptedProvider('anthropic', [{ kind: 'summary', text: JSON.stringify({ schemaVersion: 2,
+    additions: [{ section: 'facts', text: 'answer 0', sources: [{ messageId: 'g1:m1', role: 'assistant', excerpt: 'answer 0' }] }] }) }]));
   const wiring = new CompactionWiring({
     getConfig: () => config,
-    hasKey: () => false,
-    getApiKey: () => undefined,
+    hasKey: () => true,
+    getApiKey: () => 'k',
     getModelInfoFor: () => model,
     isPricedModel: () => true,
-    getMessages: () => messages,
+    getMessages: () => currentMessages,
     getSystemPrompt: () => 'sys',
     notify: () => {},
     archiveDir: dir,
+    createRegistry: () => registry,
   });
   wiring.subscribe((e) => events.push(e));
 
@@ -343,7 +347,8 @@ function wiringHarness(
       return e.type === 'compaction_end';
     });
 
-  return { wiring, dir, ends, emitAgent: (e: AgentEvent): void => agent?.(e) };
+  return { wiring, dir, ends, emitAgent: (e: AgentEvent): void => agent?.(e),
+    adopt: (next: Message[]): void => { currentMessages = next; } };
 }
 
 function conversation(turns: number): Message[] {
@@ -373,6 +378,8 @@ describe('the wiring hand-off (§3.5.3 / W4)', () => {
       systemPrompt: 'sys',
       model: REF,
       signal: new AbortController().signal,
+      adopt: h.adopt,
+      isCurrent: () => true,
     });
 
     const files = names(h.dir);
@@ -426,6 +433,8 @@ describe('the wiring hand-off (§3.5.3 / W4)', () => {
       systemPrompt: 'sys',
       model: REF,
       signal: new AbortController().signal,
+      adopt: h.adopt,
+      isCurrent: () => true,
     });
 
     const record = h.ends()[0]!.record as unknown as Record<string, unknown>;
@@ -446,6 +455,8 @@ describe('the wiring hand-off (§3.5.3 / W4)', () => {
       systemPrompt: 'sys',
       model: REF,
       signal: new AbortController().signal,
+      adopt: h.adopt,
+      isCurrent: () => true,
     });
 
     expect(outcome.ok).toBe(true);
@@ -457,7 +468,7 @@ describe('the wiring hand-off (§3.5.3 / W4)', () => {
   // a writer gated on the dropped slice can never produce it. `/compact history`
   // numbers its rows by COMPACTION INDEX, so skipping this compaction leaves a
   // hole at exactly the index a user investigating a clipped tail asks for.
-  it('archives a relief-only compaction, which drops nothing (AC-H9)', async () => {
+  it('never archives a refused relief-only operation (v2 AC-18)', async () => {
     // A SMALL WINDOW and one unsplittable turn: `planCompaction` finds no cut
     // above the protected prefix and the tool results alone exceed the window.
     const small: ModelInfo = { ...MODEL, contextWindow: 32_000, maxOutputTokens: 8_192 };
@@ -476,16 +487,14 @@ describe('the wiring hand-off (§3.5.3 / W4)', () => {
       systemPrompt: 'sys',
       model: REF,
       signal: new AbortController().signal,
+      adopt: h.adopt,
+      isCurrent: () => true,
     });
 
-    expect(outcome.ok).toBe(true);
+    expect(outcome.ok).toBe(false);
     const files = names(h.dir);
-    expect(files).toHaveLength(1);
-    const doc = JSON.parse(readFileSync(join(h.dir, files[0]!), 'utf8')) as CompactionArchive;
-    expect(doc.mode).toBe('relieved');
-    expect(doc.droppedCount).toBe(0);
-    expect(doc.dropped).toEqual([]);
-    expect(doc.tailRelief?.messages).toBe(1);
+    expect(files).toHaveLength(0);
+    expect(history[2]!.content).toBe('r'.repeat(120_000));
   });
 
   it('test 24: archive: false writes nothing and creates no directory entry', async () => {
@@ -497,6 +506,8 @@ describe('the wiring hand-off (§3.5.3 / W4)', () => {
       systemPrompt: 'sys',
       model: REF,
       signal: new AbortController().signal,
+      adopt: h.adopt,
+      isCurrent: () => true,
     });
 
     expect(names(h.dir)).toHaveLength(0);

@@ -289,6 +289,14 @@ export interface ExecFastTierEvent {
  * it. What a wrapper does need is the SHAPE of what happened, which is here.
  */
 export interface ExecCompactionEvent {
+  decision?: {
+    occupied: number;
+    contextWindow: number;
+    threshold: number;
+    source: 'usage' | 'estimate';
+    deltaTokens: number;
+  };
+  memoryVersion?: 2;
   type: 'compaction';
   sessionId: string;
   turn: number;

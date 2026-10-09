@@ -91,75 +91,21 @@ describe('PromptInput — the chip on the input row', () => {
     onSubmit: () => ({ accepted: true }),
   };
 
-  it('T-22: renders inside the border at 12, and nothing at 0', () => {
-    const shown = renderRowsAtWidth(
-      <PromptInput {...base} scrolledLines={12} />,
-      120,
-    ).join('\n');
-    expect(shown).toContain('12 lines below');
-    const pinned = renderRowsAtWidth(
-      <PromptInput {...base} scrolledLines={0} />,
-      120,
-    ).join('\n');
-    expect(pinned).not.toContain('lines below');
+  it('never renders the legacy chip in the editor or changes its rows', () => {
+    const pinned = renderRowsAtWidth(<PromptInput {...base} scrolledLines={0} />, 120);
+    const history = renderRowsAtWidth(<PromptInput {...base} scrolledLines={99999} />, 120);
+    expect(history).toEqual(pinned);
+    expect(history.join('\n')).toContain('Ask a question');
+    expect(history.join('\n')).not.toContain('lines below');
   });
-
-  it('AC-4: it really arrived in the box — same row as the prompt marker', () => {
-    const rows = renderRowsAtWidth(
-      <PromptInput {...base} scrolledLines={12} />,
-      120,
-    );
-    const chipRow = rows.findIndex((r) => r.includes('lines below'));
-    expect(chipRow).toBeGreaterThan(-1);
-    // Inside the border means there is a frame row above it and below it.
-    expect(rows[chipRow]).toContain('\u8f93\u5165\u4efb\u52a1\u6216\u95ee\u9898');
-    expect(chipRow).toBeGreaterThan(0);
-    expect(chipRow).toBeLessThan(rows.length - 1);
-  });
-
-  it('T-23: survives BOTH hint switches, because it is state and not a tutorial', async () => {
-    // `showHint` is dropped on a short terminal and `hintsEnabled` is the user's
-    // `--no-hints`. Both govern the TEACHING row below the box, which retires
-    // keys the user has demonstrably learned. "You are 12 rows behind the newest
-    // output" is neither learnable nor optional, so it must survive both.
-    const { Composer } = await import('../ui/Composer.js');
-    for (const [showHint, hintsEnabled] of [
-      [false, true],
-      [true, false],
-      [false, false],
-    ] as const) {
-      const rows = renderRowsAtWidth(
-        <Composer
-          isActive
-          running={false}
-          history={[]}
-          commands={[]}
-          cwd={process.cwd()}
-          showHint={showHint}
-          submitCount={0}
-          hintsEnabled={hintsEnabled}
-          agentMode="build"
-          scrolledLines={12}
-          theme={getTheme('cool', RICH)}
-          caps={RICH}
-          onSubmit={() => ({ accepted: true })}
-        />,
-        120,
-      ).join('\n');
-      expect(rows, `showHint=${showHint} hints=${hintsEnabled}`).toContain('12 lines below');
+  it('keeps the history indicator in the header for both hint preferences', async () => {
+    const { Header } = await import('../ui/Header.js');
+    for (const variant of ['mini', 'bar'] as const) {
+      const rows = renderRowsAtWidth(<Header columns={120} cwd="/work" model="model"
+        provider="provider" hasKey variant={variant} statusExpanded={false}
+        scrolledLines={12} theme={base.theme} caps={RICH} />, 120);
+      expect(rows.join('\n')).toContain('^12');
+      expect(rows.join('\n')).toContain('^G more');
     }
-  });
-
-  it('pins to the FIRST row of a multi-line draft', () => {
-    // Yoga's default `stretch` would size the chip box to the whole editor; it
-    // lands on the top row either way today, and relying on that is how a later
-    // `justifyContent` edit moves it without failing anything.
-    const rows = renderRowsAtWidth(
-      <PromptInput {...base} scrolledLines={7} />,
-      120,
-    );
-    const chipRow = rows.findIndex((r) => r.includes('lines below'));
-    const markerRow = rows.findIndex((r) => r.includes('\u8f93\u5165\u4efb\u52a1\u6216\u95ee\u9898'));
-    expect(chipRow).toBe(markerRow);
   });
 });

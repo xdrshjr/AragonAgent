@@ -1,12 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import stringWidth from 'string-width';
 import { LOGO_ART, LOGO_ART_WIDTH, pickHeaderVariant, pickOpenerVariant } from '../ui/Logo.js';
-import type { TermCapabilities } from '../ui/capabilities.js';
-
-const RICH: TermCapabilities = { colorLevel: 3, unicode: true };
-const ASCII: TermCapabilities = { colorLevel: 3, unicode: false };
-const LOW_COLOR: TermCapabilities = { colorLevel: 1, unicode: true };
-
 describe('LOGO_ART', () => {
   it('is six rows', () => {
     expect(LOGO_ART).toHaveLength(6);
@@ -48,18 +42,16 @@ describe('pickHeaderVariant', () => {
 });
 
 describe('pickOpenerVariant', () => {
-  it('gives the full wordmark only to a tall, wide, capable viewport', () => {
-    expect(pickOpenerVariant(20, 100, RICH)).toBe('art');
+  it('gives the full wordmark to a tall, wide viewport', () => {
+    expect(pickOpenerVariant(20, 100)).toBe('art');
     // Each boundary alone knocks it down a tier.
-    expect(pickOpenerVariant(13, 100, RICH)).toBe('banner');
-    expect(pickOpenerVariant(20, 51, RICH)).toBe('banner');
-    expect(pickOpenerVariant(20, 100, ASCII)).toBe('banner');
-    expect(pickOpenerVariant(20, 100, LOW_COLOR)).toBe('banner');
+    expect(pickOpenerVariant(13, 100)).toBe('banner');
+    expect(pickOpenerVariant(20, 51)).toBe('banner');
   });
 
   it('drops the opener entirely below the banner column floor', () => {
-    expect(pickOpenerVariant(20, 47, RICH)).toBe('none');
-    expect(pickOpenerVariant(0, 10, RICH)).toBe('none');
+    expect(pickOpenerVariant(20, 47)).toBe('none');
+    expect(pickOpenerVariant(0, 10)).toBe('none');
   });
 
   it('keeps four columns of headroom above the art width (rename C2)', () => {
@@ -67,15 +59,15 @@ describe('pickOpenerVariant', () => {
     // `wrap="truncate"`, so a threshold equal to the art width would let a
     // single upstream column shear the right edge off the `N`; degrading to
     // `banner` in that band is the intended behaviour, not a near-miss.
-    expect(pickOpenerVariant(20, LOGO_ART_WIDTH + 3, RICH)).toBe('banner');
-    expect(pickOpenerVariant(20, LOGO_ART_WIDTH + 4, RICH)).toBe('art');
+    expect(pickOpenerVariant(20, LOGO_ART_WIDTH + 3)).toBe('banner');
+    expect(pickOpenerVariant(20, LOGO_ART_WIDTH + 4)).toBe('art');
   });
 
   it('is judged against VIEWPORT rows, not terminal rows', () => {
     // 14 viewport rows is the `art` floor. A 28-row terminal has 20 viewport
     // rows, so it qualifies -- under the old rule the same terminal paid for the
     // wordmark out of the frame budget and lost 5 rows of content doing it.
-    expect(pickOpenerVariant(14, 100, RICH)).toBe('art');
-    expect(pickOpenerVariant(13, 100, RICH)).toBe('banner');
+    expect(pickOpenerVariant(14, 100)).toBe('art');
+    expect(pickOpenerVariant(13, 100)).toBe('banner');
   });
 });

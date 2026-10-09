@@ -56,8 +56,12 @@ describe('/terminal-setup (tui-shift-enter-copy-queue 3.6)', () => {
     // conhost cannot rebind Enter; the advice must say what to use instead.
     expect(text).toContain('Ctrl+J');
     expect(text).toContain('"copyOnSelect": false');
-    expect(text).toContain('"terminal.integrated.copyOnSelection": false');
     expect(text).toContain('"when": "terminalFocus"');
+    // The app pushes the enhancement itself now; the advice must say so AND
+    // teach the one-line revert for a host where it misbehaves.
+    expect(text).toContain('win32-input-mode');
+    expect(text).toContain('keyboardEnhancement false');
+    expect(text).toContain('Node >= 22.17');
     expect(text).not.toContain('every terminal');
     // glyphs.test.ts scans for non-ASCII in commands/**; this keeps the
     // command's own contract visible in its own file.

@@ -5,11 +5,12 @@
  * since this gates mutating tools like write_file/edit_file/bash).
  */
 
-import React from 'react';
+import React, { useState } from 'react';
 import { Text, useInput } from 'ink';
 import type { Theme } from '../theme.js';
 import type { TermCapabilities } from '../capabilities.js';
 import { pickGlyphs } from '../glyphs.js';
+import { wrapToRows } from '../layout/wrap-rows.js';
 import { OverlayFrame } from '../layout/OverlayFrame.js';
 
 export interface ConfirmState {
@@ -18,6 +19,7 @@ export interface ConfirmState {
 }
 
 interface ConfirmDialogProps {
+  isActive?: boolean;
   state: ConfirmState;
   maxRows: number;
   cols: number;
@@ -34,7 +36,7 @@ interface ConfirmDialogProps {
  * untouched.
  */
 export function ConfirmDialog({
-  state,
+  state, isActive = true,
   maxRows,
   cols,
   theme,
@@ -42,7 +44,11 @@ export function ConfirmDialog({
   onClose,
 }: ConfirmDialogProps): React.ReactElement {
   const glyphs = pickGlyphs(caps);
+  const [offset, setOffset] = useState(0);
   useInput((input, key) => {
+    if (!isActive) return;
+    if (key.pageUp || key.upArrow) { setOffset(n => Math.max(0, n - 1)); return; }
+    if (key.pageDown || key.downArrow) { setOffset(n => n + 1); return; }
     if (input === 'y' || input === 'Y') {
       state.resolve(true);
       onClose();
@@ -55,14 +61,14 @@ export function ConfirmDialog({
   return (
     <OverlayFrame
       title="Confirm action"
-      hint={`y approve ${glyphs.midDot} n / Enter / Esc reject`}
+      hint="y approve | n/Enter/Esc reject | PgDn"
       maxRows={maxRows}
       cols={cols}
       theme={theme}
       caps={caps}
-    >
-      <Text color={theme.assistant}>{state.summary}</Text>
-      <Text color={theme.muted}>Proceed? (y/N)</Text>
-    </OverlayFrame>
+      scrollOffset={offset} onScrollClamp={setOffset}
+      rows={wrapToRows(state.summary, Math.max(1, cols - 4)).map((line, index) =>
+        <Text key={index} wrap="truncate" color={theme.assistant}>{line || ' '}</Text>)}
+    />
   );
 }

@@ -537,8 +537,11 @@ describe('the decision reaches the transcript', () => {
     fc.running = false;
     fc.emit({ type: 'agent_end', messages: [] } as AgentEvent);
     await delay(150);
+    stdin.write('\x07');
+    await delay(40);
     const frame = stripAnsi(lastFrame() ?? '');
-    expect(frame).toContain('\u6b63\u5728\u505c\u6b62');
+    expect(frame).toContain('Interrupted');
+    expect(frame).not.toContain('Stopping');
     expect(frame).not.toContain('unfinished');
     expect(frame).not.toContain('Continuing with');
     unmount();
@@ -575,6 +578,8 @@ describe('arming, firing and cancelling', () => {
     // TTL, so checking it at the far side of a 3.4 s sleep would test the toast
     // timer rather than the cancellation.
     await delay(80);
+    stdin.write('\x07');
+    await delay(40);
     expect(stripAnsi(lastFrame() ?? '')).toContain('Auto-continue cancelled.');
     await delay(PAST_GRACE);
     expect(seen).toHaveLength(1);

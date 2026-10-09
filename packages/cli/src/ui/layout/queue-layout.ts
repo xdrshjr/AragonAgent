@@ -26,14 +26,14 @@ export function buildQueueLayout(input: QueueLayoutInput): QueueLayout {
   const items = input.pending.slice(0, shown).map((item, index) => {
     const prefix = `${index + 1}. `;
     const lines = item.text.split(/\r\n|[\r\n]/).length;
-    const suffix = lines > 1 ? ` (+${lines - 1}\u884c)` : '';
+    const suffix = lines > 1 ? ` (+${lines - 1} lines)` : '';
     return { queueId: item.queueId, label: prefix + truncateSummary(queueSummary(item.text),
       Math.max(0, input.columns - stringWidth(prefix + suffix)), '...') + suffix };
   });
   const hiddenCount = count - items.length;
-  const paused = input.paused ? ' \u5df2\u6682\u505c' : '';
-  const hidden = hiddenCount ? ` \u53e6${hiddenCount}\u6761` : '';
-  const title = `Queue: \u5f85\u5904\u7406 ${count}${paused}${hidden} /queue`;
+  const paused = input.paused ? ' paused' : '';
+  const hidden = hiddenCount ? ` +${hiddenCount} more` : '';
+  const title = `Queue: ${count} pending${paused}${hidden} /queue`;
   if (limit === 1) return { rows: 1,
     title: truncateSummary(`Queue ${count} /queue ${items[0]!.label}`, input.columns, '...'),
     items, hiddenCount: count - items.length };

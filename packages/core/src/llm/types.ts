@@ -255,6 +255,12 @@ export interface ModelInfo {
   name: string;
   provider: string;
   contextWindow: number;
+  /**
+   * Provenance of the context limit; omitted by legacy/custom providers.
+   * `user` is set only by a host layer from user configuration (the CLI's
+   * model-windows.json); Core itself never produces it.
+   */
+  contextWindowSource?: 'api' | 'catalog' | 'fallback' | 'user';
   maxOutputTokens: number;
   supportsThinking: boolean;
   supportsTools: boolean;

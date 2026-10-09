@@ -7,7 +7,8 @@
  *   - Overrides: ARAGON_PROVIDER, ARAGON_MODEL, ARAGON_BASE_URL, ARAGON_THINKING,
  *     ARAGON_SHOW_THINKING,
  *     ARAGON_MAX_TOKENS (a number, or `auto` / `0` for the per-model ceiling),
- *     ARAGON_THEME, ARAGON_MOUSE, ARAGON_PASTE, ARAGON_PLAN, ARAGON_TEAM,
+ *     ARAGON_THEME, ARAGON_MOUSE, ARAGON_PASTE, ARAGON_KEYBOARD_ENHANCEMENT,
+ *     ARAGON_PLAN, ARAGON_TEAM,
  *     ARAGON_TEAM_MAX, ARAGON_RETRY, ARAGON_RETRY_MAX, ARAGON_FAST,
  *     ARAGON_FAST_PROVIDER, ARAGON_FAST_MODEL, ARAGON_FAST_BASE_URL,
  *     ARAGON_LOG_LEVEL,
@@ -175,6 +176,19 @@ export function readEnvConfig(): EnvConfig {
   const paste = process.env.ARAGON_PASTE?.trim().toLowerCase();
   if (paste !== undefined && paste.length > 0) {
     partial.paste = paste === '1' || paste === 'true' || paste === 'on' || paste === 'yes';
+  }
+
+  // ARAGON_KEYBOARD_ENHANCEMENT=0 stops the Shift+Enter mode push and its
+  // translation -- the one-env revert to pre-enhancement input handling.
+  // Parsed by the POSITIVE list, exactly as its three neighbours above are.
+  const keyboardEnhancement =
+    process.env.ARAGON_KEYBOARD_ENHANCEMENT?.trim().toLowerCase();
+  if (keyboardEnhancement !== undefined && keyboardEnhancement.length > 0) {
+    partial.keyboardEnhancement =
+      keyboardEnhancement === '1' ||
+      keyboardEnhancement === 'true' ||
+      keyboardEnhancement === 'on' ||
+      keyboardEnhancement === 'yes';
   }
 
   // ARAGON_SCROLL_RESUME_MS=<n> — idle delay before a paused viewport returns to

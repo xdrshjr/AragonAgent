@@ -4,6 +4,8 @@ import { isAdapterProvider } from '../config/schema.js';
 import { normalizeTodos } from '../todo/normalize.js';
 import { TODO_LIMITS } from '../todo/limits.js';
 import type { SavedSession } from './persist.js';
+import { validateCompactionIdentity } from '../compaction/memory-identity.js';
+import { MemoryError } from '../compaction/memory.js';
 
 type Validator = (value: unknown, path: string) => void;
 type Fields = Record<string, Validator>;
@@ -30,6 +32,21 @@ const number: Validator = (value, path) => {
 };
 const boolean: Validator = (value, path) => {
   if (typeof value !== 'boolean') fail(path, 'a boolean');
+};
+const nonnegative: Validator = (value, path) => {
+  number(value, path);
+  if ((value as number) < 0) fail(path, 'non-negative');
+};
+const positive: Validator = (value, path) => {
+  number(value, path);
+  if ((value as number) <= 0) fail(path, 'positive');
+};
+const threshold: Validator = (value, path) => {
+  number(value, path);
+  if ((value as number) < 0.5 || (value as number) > 0.95) fail(path, 'between 0.5 and 0.95');
+};
+const memoryVersion: Validator = (value, path) => {
+  if (value !== 2) fail(path, '2');
 };
 const object: Validator = (value, path) => { record(value, path); };
 
@@ -154,6 +171,9 @@ const ENTRY_FIELDS: Record<Entry['kind'], Fields> = {
     text: optional(string), detail: optional(string), turn: number,
     durationMs: optional(number), live: boolean },
   compaction: {
+    decision: optional(shape({ occupied: nonnegative, contextWindow: positive,
+      threshold, source: enumeration('usage', 'estimate'), deltaTokens: nonnegative })),
+    memoryVersion: optional(memoryVersion),
     index: number, trigger: enumeration('pressure', 'overflow', 'manual'),
     mode: enumeration('summarized', 'truncated', 'relieved', 'none'), applied: boolean,
     reason: optional(string), messagesBefore: number, messagesAfter: number,
@@ -201,6 +221,14 @@ export function validateSession(value: unknown): SavedSession {
   array(message)(source.messages, 'messages');
   validateEntries(source.entries);
   if (source.model !== undefined) validateModel(source.model);
+  if (source.compactionIdentity !== undefined) {
+    try {
+      validateCompactionIdentity(source.compactionIdentity);
+    } catch (error) {
+      if (!(error instanceof MemoryError)) throw error;
+      fail('compactionIdentity', 'a valid adopted-memory identity');
+    }
+  }
   // Missing fields remain missing in old files, including exec metadata.
   const prepared = { ...source };
   if (source.todos !== undefined) {

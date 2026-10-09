@@ -79,3 +79,15 @@ describe('overlayListLimit (A-11)', () => {
     }
   });
 });
+
+
+// Every focused overlay uses the same reduced chrome allowance at V=3.
+describe('short overlay body budget', () => {
+  it('keeps one traversable body row between title and actions', async () => {
+    const { overlayBodyRows } = await import('../ui/layout/OverlayFrame.js');
+    for (const cols of [40, 80, 120]) {
+      expect(overlayBodyRows(3, cols)).toBe(1);
+      expect(overlayBodyRows(4, cols)).toBeGreaterThanOrEqual(1);
+    }
+  });
+});

@@ -13,7 +13,7 @@ import { TodoPanel } from '../ui/TodoPanel.js';
 import { TeamPanel } from '../ui/TeamPanel.js';
 import { buildTodoRailLayout } from '../ui/layout/todo-layout.js';
 import { buildTeamPanelLayout } from '../ui/layout/team-panel.js';
-import { viewportRows } from '../ui/layout/budget.js';
+import { buildFrameBudget } from '../ui/layout/budget.js';
 import { getTheme } from '../ui/theme.js';
 import type { TodoSnapshot } from '../todo/types.js';
 import type { TeamSnapshot } from '../team/types.js';
@@ -145,11 +145,12 @@ describe('真实组件响应式布局', () => {
     }) {
       const [popupRows, setPopupRows] = useState(0);
       const [draftRows, setDraftRows] = useState(1);
-      const budget = viewportRows(rows, draftRows);
+      const frame = buildFrameBudget({ rows, cols, draftRows, popupRows, statusExpanded: false });
+      const budget = frame.viewportRows;
       const teamLayout = buildTeamPanelLayout({ snapshot: teamOn ? team : null,
         terminalRows: rows, availableRows: budget });
       const layout = buildTodoRailLayout({  cols: cols - 1, viewportBudget: budget,
-        teamRows: teamLayout.rowCount, popupRows, itemCount: 20,
+        teamRows: teamLayout.rowCount, popupRows: 0, composerBaseRows: 0, itemCount: 20,
         panelEnabled: true, overlayOpen: false });
       layoutRows = layout.rows;
       const reportOffset = useCallback((n: number) => { offset = n; }, []);
@@ -158,25 +159,26 @@ describe('真实组件响应式布局', () => {
       const footer = <>
         {teamOn && <TeamPanel snapshot={team} layout={teamLayout} rows={rows}
           cols={layout.contentCols} reducedMotion theme={theme} caps={caps} now={1} />}
-        <Composer isActive cols={layout.contentCols} running={false} history={[]}
+      </>;
+      const composer = <Composer isActive cols={cols - 1} terminalRows={rows} running={false} history={[]}
           commands={commands} cwd={process.cwd()} showHint={rows >= 20} submitCount={0}
           hintsEnabled agentMode="build" theme={theme} caps={caps} onSubmit={() => ({ accepted: true })}
-          onDraftRows={setDraftRows} popupMaxHeight={layout.popupMaxHeight}
-          onPopupRowsChange={setPopupRows} />
-      </>;
+          onDraftRows={setDraftRows} popupMaxHeight={frame.popupMaxHeight}
+          onPopupRowsChange={setPopupRows} />;
       return <AppShell rows={rows} cols={cols} header={<Text>HEADER</Text>}
         viewport={<ScrollViewport cols={layout.contentCols} theme={theme} caps={caps}
           showScrollIndicator rail={rail} footer={footer}
           intent={nonce ? { kind: 'pageUp', nonce } : undefined}
           onScrolledLinesChange={reportOffset}>
           <Transcript /></ScrollViewport>}
-        toast={<Text>TOAST</Text>} status={<Text>STATUS</Text>} />;
+        composer={composer} composerSlotRows={frame.composerSlotRows}
+        viewportRows={budget} statusRows={1} status={<Text>STATUS</Text>} />;
     }
     const t = terminal();
     const view = render(<Harness cols={100} rows={20} teamOn />, t.options);
     try {
       await delay();
-      expect(layoutRows).toBe(16);
+      expect(layoutRows).toBe(14);
       expect(t.frames.at(-1)).toContain('ANCHOR');
       expect(t.frames.at(-1)).toContain('9/20');
       view.rerender(<Harness cols={100} rows={20} teamOn={false} nonce={1} />);
@@ -184,10 +186,10 @@ describe('真实组件响应式布局', () => {
       expect(offset).toBeGreaterThan(0);
       t.stdin.write('/');
       await delay();
-      expect(layoutRows).toBe(16);
+      expect(layoutRows).toBe(5);
       t.stdin.write('\u001b');
       await delay();
-      expect(layoutRows).toBe(16);
+      expect(layoutRows).toBe(14);
       for (const cols of [75, 76, 100, 200]) {
         t.stdout.columns = cols;
         view.rerender(<Harness cols={cols} rows={20} teamOn={false} nonce={1} />);

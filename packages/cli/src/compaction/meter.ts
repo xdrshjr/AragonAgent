@@ -66,6 +66,7 @@ export interface ContextMeterDeps {
    * measurement, so a live settings edit moves the denominator without a relaunch.
    */
   getWindowOverride(): number | null;
+  getRequestVersion?(): number;
 }
 
 export type ContextUsageListener = (usage: ContextUsageSnapshot) => void;
@@ -84,6 +85,7 @@ type TimerHandle = ReturnType<typeof setTimeout>;
 export function toContextUsage(p: Pressure): ContextUsageSnapshot {
   return {
     occupied: p.occupied,
+    ...(p.windowSource ? { windowSource: p.windowSource } : {}),
     window: p.contextWindow,
     // FROM `ratio`, NOT FROM A SECOND DIVISION. `computePressure` already
     // clamped it to [0, 1] and already decided what a zero window means.
@@ -135,6 +137,14 @@ export class ContextMeter {
   private last: Pressure | null = null;
   /** Whether the history has changed since the last measurement. */
   private dirty = true;
+  private prefixLast: Message | undefined;
+  private sampledPrompt: string | undefined;
+  private sampledVersion: number | undefined;
+  private publishedLength = -1;
+  private publishedLast: Message | undefined;
+  private publishedPrompt: string | undefined;
+  private publishedVersion: number | undefined;
+
 
   constructor(private readonly deps: ContextMeterDeps) {}
 
@@ -161,7 +171,7 @@ export class ContextMeter {
     // precisely the symptom. `estimateAppendedTokens` bounds-checks too, but it
     // only zeroes the DELTA and keeps the wrong measured base, so that belt does
     // not cover this.
-    if (this.discardStalePrefix()) this.dirty = true;
+    this.refreshValidity();
     if (!this.dirty && this.last) return this.last;
     return this.measureAndPublish(this.lastUsage);
   }
@@ -189,15 +199,9 @@ export class ContextMeter {
   // Writing
   // =========================================================================
 
-  /**
-   * Measure with the caller's own authoritative usage. FOR A DECISION POINT.
-   *
-   * `Compactor.shouldCompact` has a `CompactionProbe.lastUsage` the meter may
-   * not have seen yet, so it supplies it rather than trusting the field here.
-   */
-  measureWith(lastUsage: TokenUsage | undefined): Pressure {
-    if (this.discardStalePrefix()) this.dirty = true;
-    return this.measureAndPublish(lastUsage);
+  /** Compatibility reads cannot establish or resurrect a provider sample. */
+  measureWith(_lastUsage: TokenUsage | undefined): Pressure {
+    return this.current();
   }
 
   /**
@@ -215,6 +219,9 @@ export class ContextMeter {
     this.lastUsage = usage;
     this.estimateOffset = computeEstimateOffset(usage, messages, systemPrompt);
     this.measuredPrefixLength = messages.length;
+    this.prefixLast = messages[messages.length - 1];
+    this.sampledPrompt = systemPrompt;
+    this.sampledVersion = this.deps.getRequestVersion?.() ?? 0;
     this.measureAndPublish(usage);
   }
 
@@ -235,6 +242,7 @@ export class ContextMeter {
   onHistorySpliced(): void {
     this.lastUsage = undefined;
     this.measuredPrefixLength = undefined;
+    this.prefixLast = undefined;
     if (this.dirty) return;
     this.dirty = true;
     this.scheduleTick();
@@ -254,23 +262,26 @@ export class ContextMeter {
   onHistoryReplaced(): void {
     this.lastUsage = undefined;
     this.measuredPrefixLength = undefined;
+    this.prefixLast = undefined;
     this.estimateOffset = undefined;
+    this.sampledPrompt = undefined;
+    this.sampledVersion = undefined;
     this.dirty = true;
     this.scheduleTick();
   }
 
   /**
-   * Only the DENOMINATOR moved (`/model`, a `contextWindow` edit).
+   * Only the denominator moved (window override or model metadata refresh).
    *
    * DELIBERATELY NOT A RESET. The measured base is still a true statement about
    * the history, so throwing it away would trade a correct numerator for a whole
    * history estimate and produce a visible jump on a common operation. The
-   * numerator's calibration is one turn stale until the next `turn_end`
-   * refreshes it, which is the trade this method names (RV-13).
+   * Changing the model connection or request environment requires the deep
+   * invalidation path instead; its measurement is no longer transferable.
    */
   onWindowChanged(): void {
     this.dirty = true;
-    this.measureAndPublish(this.lastUsage);
+    this.current();
   }
 
   /**
@@ -290,7 +301,7 @@ export class ContextMeter {
     const handle = setTimeout(() => {
       this.timer = null;
       if (!this.dirty || this.disposed) return;
-      this.measureAndPublish(this.lastUsage);
+      this.current();
     }, CONTEXT_METER_TICK_MS);
     // The other half of I-11: an armed tick must not keep the event loop alive.
     const unrefable = handle as unknown as { unref?: () => void };
@@ -390,10 +401,12 @@ export class ContextMeter {
    */
   private discardStalePrefix(): boolean {
     if (this.measuredPrefixLength === undefined) return false;
-    const length = this.deps.getMessages().length;
-    if (length >= this.measuredPrefixLength) return false;
+    const messages = this.deps.getMessages();
+    if (messages.length >= this.measuredPrefixLength &&
+        messages[this.measuredPrefixLength - 1] === this.prefixLast) return false;
     this.lastUsage = undefined;
     this.measuredPrefixLength = undefined;
+    this.prefixLast = undefined;
     return true;
   }
 
@@ -404,8 +417,33 @@ export class ContextMeter {
    * is cached" cannot drift, which is what makes `lastPublished()` a meaningful
    * answer rather than a stale one.
    */
+  private refreshValidity(): void {
+    const messages = this.deps.getMessages();
+    const prompt = this.readSystemPrompt();
+    const version = this.deps.getRequestVersion?.() ?? 0;
+    if (this.sampledPrompt !== undefined &&
+        (prompt !== this.sampledPrompt || version !== this.sampledVersion)) {
+      this.onHistoryReplaced();
+    }
+    if (this.discardStalePrefix()) this.dirty = true;
+    const window = this.resolveWindow();
+    const last = this.last;
+    if (messages.length !== this.publishedLength ||
+        messages[messages.length - 1] !== this.publishedLast ||
+        prompt !== this.publishedPrompt || version !== this.publishedVersion ||
+        window.contextWindow !== last?.contextWindow ||
+        window.windowKnown !== last?.windowKnown ||
+        window.windowOverridden !== last?.windowOverridden ||
+        this.deps.getModelInfo().contextWindowSource !== last?.windowSource) this.dirty = true;
+  }
+
   private measureAndPublish(lastUsage: TokenUsage | undefined): Pressure {
     const pressure = this.compute(lastUsage);
+    const messages = this.deps.getMessages();
+    this.publishedLength = messages.length;
+    this.publishedLast = messages[messages.length - 1];
+    this.publishedPrompt = this.readSystemPrompt();
+    this.publishedVersion = this.deps.getRequestVersion?.() ?? 0;
     this.last = pressure;
     this.dirty = false;
     this.publish(pressure);
@@ -419,6 +457,7 @@ export class ContextMeter {
       messages: this.deps.getMessages(),
       systemPrompt: this.readSystemPrompt(),
       contextWindow: window.contextWindow,
+      windowSource: this.deps.getModelInfo().contextWindowSource,
       windowKnown: window.windowKnown,
       windowOverridden: window.windowOverridden,
       ...(this.estimateOffset !== undefined ? { estimateOffset: this.estimateOffset } : {}),

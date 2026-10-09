@@ -9,9 +9,11 @@
  */
 
 import React from 'react';
+import { Box } from 'ink';
 import { describe, expect, it } from 'vitest';
 import { render } from 'ink-testing-library';
 import { CompactionCard } from '../ui/entries/CompactionCard.js';
+import { EntryView } from '../ui/Transcript.js';
 import { ActivityLine } from '../ui/ActivityLine.js';
 import { StatusBar } from '../ui/StatusBar.js';
 import { buildGauge } from '../ui/gauge.js';
@@ -42,6 +44,58 @@ import { promptTokensOf } from '../agent/usage.js';
 const UNICODE: TermCapabilities = { colorLevel: 3, unicode: true };
 const ASCII: TermCapabilities = { colorLevel: 0, unicode: false };
 const theme = getTheme('cool', UNICODE);
+
+describe('truthful compaction reasons and task memory', () => {
+  it.each([80, 100, 160])('keeps the reason and ASCII output at %i columns', (columns) => {
+    const view = render(<Box width={columns}><CompactionCard
+      {...record({ memoryVersion: 2, model: 'summary-' + 'x'.repeat(100) })}
+      live={false} theme={theme} caps={ASCII} /></Box>);
+    const output = view.lastFrame() ?? '';
+    expect(output).toContain('Automatic: threshold reached');
+    expect(output).toContain('Task memory v2');
+    expect(output).toMatch(/^[\x00-\x7F]*$/);
+    view.unmount();
+  });
+  it('threads task memory through the actual transcript entry and expands its sections', () => {
+    const entry: Entry = { id: 'memory', kind: 'compaction',
+      ...record({ memoryVersion: 2 }), live: false };
+    const props = { entry, prev: undefined, expanded: false, thinkingVisible: false,
+      reducedMotion: true, density: 'comfortable' as const, theme, caps: ASCII };
+    const collapsed = render(<EntryView {...props} />);
+    expect(collapsed.lastFrame()).toContain('Task memory v2');
+    expect(collapsed.lastFrame()).not.toContain('## Task');
+    collapsed.unmount();
+    const expanded = render(<EntryView {...props} expanded />);
+    expect(expanded.lastFrame()).toContain('## Task');
+    expanded.unmount();
+  });
+  it.each([
+    ['pressure', 'Automatic: threshold reached'],
+    ['manual', 'Manual compaction'],
+    ['overflow', 'Overflow: threshold reached'],
+  ] as const)('renders the %s trigger and v2 label', (trigger, reason) => {
+    const view = render(<CompactionCard {...record({ trigger, memoryVersion: 2 })}
+      live={false} theme={theme} caps={ASCII} />);
+    expect(view.lastFrame()).toContain(reason);
+    expect(view.lastFrame()).toContain('Task memory v2');
+    expect(view.lastFrame()).not.toContain('## Task');
+    view.unmount();
+  });
+
+  it('does not report a zero-token reduction as success', () => {
+    const view = render(<CompactionCard {...record({ tokensBefore: 100, tokensAfter: 100 })}
+      live={false} theme={theme} caps={ASCII} />);
+    expect(view.lastFrame()).toContain('context not compacted');
+    view.unmount();
+  });
+
+  it('preserves optional decision metadata in the reducer', () => {
+    const decision = { occupied: 90000, contextWindow: 100000, threshold: 0.9,
+      source: 'usage' as const, deltaTokens: 0 };
+    const state = run([{ type: 'compactionEnd', record: record({ decision, memoryVersion: 2 }) }]);
+    expect(state.entries[0]).toMatchObject({ decision, memoryVersion: 2 });
+  });
+});
 
 function record(over: Partial<CompactionRecord> = {}): CompactionRecord {
   return {
@@ -306,6 +360,7 @@ describe('buildGauge marks (§6.2)', () => {
 
 describe('the status chip (§6.2)', () => {
   const base = {
+    columns: 100, speedKnown: false,
     model: 'claude-sonnet-4-5',
     provider: 'anthropic',
     usageTotal: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.01 },
@@ -330,7 +385,7 @@ describe('the status chip (§6.2)', () => {
     const { lastFrame } = render(
       <StatusBar {...base} compactionActive={{ inFlight: true }} />,
     );
-    expect(lastFrame()).toContain('压缩');
+    expect(lastFrame()).toContain('Compacting');
     expect((lastFrame() ?? '').match(/[⠀-⣿]/g)).toHaveLength(1);
   });
 

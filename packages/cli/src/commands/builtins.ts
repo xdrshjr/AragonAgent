@@ -1065,7 +1065,7 @@ const COMMANDS: SlashCommand[] = [
             modelId: cfg.model,
             ...(cfg.baseUrl ? { baseUrl: cfg.baseUrl } : {}),
           },
-          messages: ctx.controller.getMessages(),
+          ...(ctx.controller.getSessionSnapshot?.() ?? { messages: ctx.controller.getMessages() }),
           entries: mergePendingEntries(ctx.state.entries, ctx.state.pendingSteering),
           // `/resume` restores `messages`, so the belief that justifies the
           // panel comes back — and the panel has to come back with it (§3.13).
@@ -1095,7 +1095,7 @@ const COMMANDS: SlashCommand[] = [
         // Loading has validated and normalized every external value. Commit
         // synchronously so no new run can start between clearing and restoring.
         ctx.controller.clearAllQueues();
-        ctx.controller.replaceMessages(session.messages);
+        ctx.controller.replaceMessages(session.messages, session.compactionIdentity);
         // Absence clears the previous conversation's list, including old files.
         ctx.controller.restoreTodos(session.todos ?? []);
         ctx.dispatch({ type: 'restoreEntries', entries: session.entries });
@@ -1178,55 +1178,53 @@ const COMMANDS: SlashCommand[] = [
   },
   {
     name: 'terminal-setup',
-    description: 'How to make Shift+Enter send a newline in your terminal',
+    description: 'How Shift+Enter sends a newline in your terminal',
     run: (ctx) => {
-      // READ-ONLY BY DESIGN (3.6): pushing kitty keyboard mode or
-      // modifyOtherKeys=2 would re-encode EVERY modified key as CSI-u and
-      // blind Ink's parser for the whole session. One user-side binding
-      // reaches the same result for the one key that needs it.
-      //
-      // Ctrl+J and Alt+Enter work with no setup at all; CSI-u terminals
-      // (kitty / WezTerm / foot with keyboard enhancement on) need none
-      // either. The lines below are for the terminals that send a plain
-      // CR for Shift+Enter and CAN be configured.
+      // THE APP NOW PUSHES THE MODES ITSELF (shift-enter-newline fix):
+      // win32-input-mode on Windows, kitty disambiguate + modifyOtherKeys=2
+      // elsewhere, each translated back to legacy bytes before Ink parses
+      // them. The lines below cover the terminals where pushing is not
+      // enough: macOS Terminal.app and conhost under an old Node publish no
+      // keyboard-enhancement protocol at all, and a terminal that ignores
+      // the push still sends a plain CR for Shift+Enter.
       const lines = [
         'Shift+Enter newline - terminal setup',
         '',
-        'Ctrl+J inserts a newline when delivered; Alt+Enter may be intercepted.',
-        'To get a dedicated Shift+Enter key, make the terminal send',
-        'the CSI-u sequence \\u001b[13;2u for it:',
+        'This app asks the terminal to report modified keys itself:',
+        '  Windows: win32-input-mode (conhost and Windows Terminal)',
+        '  macOS/Linux: kitty disambiguate + modifyOtherKeys (iTerm2,',
+        '    kitty, ghostty, WezTerm, foot, Alacritty)',
+        'A terminal that implements none of these sends a plain CR for',
+        'Shift+Enter, indistinguishable from Enter. There Ctrl+J inserts a',
+        'newline with no setup, and Alt+Enter may also work.',
+        '',
+        'If your terminal can be configured, make Shift+Enter send the',
+        'CSI-u sequence \\u001b[13;2u and it works even without the push:',
         '',
         '  Windows Terminal settings.json, merge root-level arrays:',
         '    "copyOnSelect": false,',
         '    "actions": [{ "id": "User.AragonNewline", "command":',
         '      { "action": "sendInput", "input": "\\u001b[13;2u" } }],',
         '    "keybindings": [{ "keys": "shift+enter", "id": "User.AragonNewline" }]',
-        '    PowerShell runs inside the terminal; configure this binding in',
-        '    Windows Terminal, not in the PowerShell profile. If both keys',
-        '    send CR, the application cannot distinguish Shift+Enter from Enter.',
         '  VS Code terminal  keybindings.json:',
         '    { "key": "shift+enter",',
         '      "command": "workbench.action.terminal.sendSequence",',
         '      "when": "terminalFocus",',
         '      "args": { "text": "\\u001b[13;2u" } }',
-        '    User settings: "terminal.integrated.copyOnSelection": false',
         '  iTerm2            Settings > Profiles > Keys > Key Mappings:',
         '    Shift+Enter -> Send Escape Sequence: [13;2u',
         '  kitty/WezTerm/foot  native once keyboard enhancement is on',
         '    (kitty: map shift+enter send_text all \\u001b[13;2u)',
         '  Alacritty         alacritty.toml, [keyboard] bindings:',
         '    { key = "Enter", mods = "Shift", chars = "\\u001b[13;2u" }',
-        '  macOS Terminal.app / conhost  cannot rebind Enter; use Ctrl+J',
-        '    or Alt+Enter',
+        '  macOS Terminal.app / old conhost  cannot rebind Enter; use Ctrl+J',
         '',
+        'Windows needs Node >= 22.17 (or >= 24.2): older versions never',
+        'turn on virtual-terminal input, so no report can arrive.',
+        'Opt out of the push entirely:',
+        '  aragon config set keyboardEnhancement false',
+        '  --no-keyboard-enhancement / ARAGON_KEYBOARD_ENHANCEMENT=0',
         'This command only prints advice; it changes no terminal modes.',
-        'Host selections (Shift+drag or /mouse off) belong to the terminal.',
-        'App selections wait for Ctrl+C; only a native tool exit confirms copying.',
-        'SSH uses OSC 52: the terminal may deny it; sent does not mean confirmed.',
-        'Without the stdin filter, Delete falls back to Backspace.',
-        'Without paste support, multiline paste cannot be guaranteed safe.',
-        'IME confirmation has no composition signal in PTY bytes. If it emits CR,',
-        'edit externally and use bracketed paste; this host combination needs validation.',
       ];
       ctx.notify('info', lines.join('\n'));
     },

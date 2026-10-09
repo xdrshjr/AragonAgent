@@ -54,20 +54,21 @@ describe('controller queue identities', () => {
 
   it('keeps user protection through turn_start and deletes only exact receipt IDs', () => {
     const { controller, emit } = setup();
-    const pending = (controller as unknown as { pendingUserSteering: Set<string> })
+    const pending = (controller as unknown as { pendingUserSteering: Map<string, string> })
       .pendingUserSteering;
     const a = controller.queueUserMessage('same');
     const b = controller.queueUserMessage('same');
     emit({ type: 'turn_start' });
-    expect([...pending]).toEqual([a, b]);
+    expect([...pending.keys()]).toEqual([a, b]);
     emit({ type: 'steering_accepted', ids: [a, a, 'unknown'] });
-    expect([...pending]).toEqual([b]);
+    expect([...pending.keys()]).toEqual([b]);
     controller.clearAllQueues();
     expect(pending.size).toBe(0);
   });
 
-  it('shares skill-frame activation across visible and legacy steering', () => {
-    const { controller } = setup({ skills: { ...DEFAULT_CONFIG.skills, enabled: true } });
+  it('shares skill-frame activation across visible and legacy steering during a run', () => {
+    const { controller, engine } = setup({ skills: { ...DEFAULT_CONFIG.skills, enabled: true } });
+    vi.spyOn(engine, 'state', 'get').mockReturnValue({ ...engine.state, isRunning: true });
     const skills = controller.getSkillService();
     skills.queueFrame('first');
     controller.queueUserMessage('visible');
@@ -75,6 +76,24 @@ describe('controller queue identities', () => {
     controller.steer('legacy');
     expect(skills.getRegistry().frameNames).toEqual(['first', 'second']);
     expect(skills.getRegistry().pendingFrameNames).toEqual([]);
+  });
+
+  it('keeps idle queued skill frames pending until the next user turn', async () => {
+    const { controller, engine } = setup({ skills: { ...DEFAULT_CONFIG.skills, enabled: true } });
+    const skills = controller.getSkillService();
+    skills.getRegistry().enterFrame('previous');
+    skills.queueFrame('first');
+    controller.queueUserMessage('visible');
+    skills.queueFrame('second');
+    controller.steer('legacy');
+    expect(skills.getRegistry().frameNames).toEqual(['previous']);
+    expect(skills.getRegistry().pendingFrameNames).toEqual(['first', 'second']);
+    vi.spyOn(engine, 'continue').mockResolvedValue(undefined);
+    await controller.continue();
+    expect(skills.getRegistry().frameNames).toEqual(['first', 'second']);
+    expect(skills.getRegistry().pendingFrameNames).toEqual([]);
+    // Only Core acceptance receipts may retire queued user protection.
+    expect(controller.hasPendingUserMessages()).toBe(true);
   });
 
   it('allocates distinct IDs for identical text and never reuses IDs after reset', () => {
@@ -127,9 +146,9 @@ describe('reviewer and user queue protection through real controller wiring', ()
       controller.setAgentMode('plan');
       emit({ type: 'agent_end', messages: [] });
       expect(clear).toHaveBeenCalledTimes(withUser ? 0 : 1);
-      const pending = (controller as unknown as { pendingUserSteering: Set<string> })
+      const pending = (controller as unknown as { pendingUserSteering: Map<string, string> })
         .pendingUserSteering;
-      expect([...pending]).toEqual(withUser ? [userId] : []);
+      expect([...pending.keys()]).toEqual(withUser ? [userId] : []);
     });
 });
 
@@ -155,12 +174,13 @@ describe('mounted queue with the real controller', () => {
       view.stdin.write('\u001b'); await flush();
       view.stdin.write('\u001b'); await flush();
       expect(controller.isRunning()).toBe(true);
-      expect(view.lastFrame()).toMatch(/Queue.*已暂停/);
+      expect(view.lastFrame()).toMatch(/Queue.*paused/);
       emit({ type: 'steering_accepted', ids: [id] }); await flush();
       expect(view.lastFrame()).not.toContain('Queue');
-      expect(view.lastFrame()).toContain('中断');
+      await vi.advanceTimersByTimeAsync(2600);
+      expect(view.lastFrame()).toContain('Interrupted');
       emit({ type: 'turn_start' }); await flush();
-      expect(view.lastFrame()).toContain('中断');
+      expect(view.lastFrame()).toContain('Interrupted');
     } finally { state.isRunning = false; view.unmount(); }
   });
 });

@@ -36,6 +36,7 @@ import type { ExecEmitter } from './emitter.js';
 import type { FastSnapshot } from '../fast/types.js';
 import type { ExecEvent, ExecStopReason } from './events.js';
 import { ExecProgressReporter } from './progress-reporter.js';
+import type { CompactionEvent } from '../compaction/types.js';
 
 /**
  * The controller surface the runner needs.
@@ -108,7 +109,14 @@ export interface ExecRunnerOptions {
   priorTurns?: number;
 }
 
+export interface ExecCompactionBilling {
+  usage: TokenUsage;
+  costUsd: number;
+  pricingUnknown: boolean;
+}
+
 export interface ExecRunStats {
+  compactionBilling?: ExecCompactionBilling;
   turns: number;
   usage: TokenUsage;
   lastAssistantText: string;
@@ -132,6 +140,7 @@ export class ExecRunner {
 
   private turns = 0;
   private readonly usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
+  private compactionBilling: ExecCompactionBilling | undefined;
   private lastAssistantText = '';
   private errored = false;
   private sawTurnEnd = false;
@@ -259,8 +268,7 @@ export class ExecRunner {
     // wrapper gets.
     const compaction = controller.subscribeCompaction?.((event) => {
       if (event.type === 'usage') {
-        this.usage.inputTokens += event.usage.inputTokens;
-        this.usage.outputTokens += event.usage.outputTokens;
+        this.onCompactionUsage(event);
         return;
       }
       if (event.type === 'compaction_start') {
@@ -291,6 +299,8 @@ export class ExecRunner {
         tokensBefore: r.tokensBefore,
         tokensAfter: r.tokensAfter,
         ...(r.tailRelief ? { tailRelief: r.tailRelief } : {}),
+        ...(r.decision ? { decision: r.decision } : {}),
+        ...(r.memoryVersion ? { memoryVersion: r.memoryVersion } : {}),
         durationMs: r.durationMs,
       });
     });
@@ -328,6 +338,9 @@ export class ExecRunner {
     return {
       turns: this.turns,
       usage: { ...this.usage },
+      ...(this.compactionBilling ? { compactionBilling: {
+        ...this.compactionBilling, usage: { ...this.compactionBilling.usage },
+      } } : {}),
       lastAssistantText: this.lastAssistantText,
       errored: this.errored,
       stopReason: this.stopReason,
@@ -399,6 +412,24 @@ export class ExecRunner {
         this.emit({ type: 'turn_state', sessionId: this.sessionId, requestSeq, phase });
       }
     }
+  }
+
+  private onCompactionUsage(event: Extract<CompactionEvent, { type: 'usage' }>): void {
+    const usage = event.usage;
+    this.usage.inputTokens += usage.inputTokens;
+    this.usage.outputTokens += usage.outputTokens;
+    for (const key of ['cacheReadTokens', 'cacheWriteTokens'] as const) {
+      if (usage[key] !== undefined) this.usage[key] = (this.usage[key] ?? 0) + usage[key];
+    }
+    if (event.costUsd === undefined && event.pricingUnknown === undefined) return;
+    const billing = this.compactionBilling ??= { costUsd: 0, pricingUnknown: false,
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } };
+    billing.costUsd += event.costUsd ?? 0;
+    billing.pricingUnknown ||= event.pricingUnknown === true;
+    billing.usage.inputTokens += usage.inputTokens;
+    billing.usage.outputTokens += usage.outputTokens;
+    billing.usage.cacheReadTokens! += usage.cacheReadTokens ?? 0;
+    billing.usage.cacheWriteTokens! += usage.cacheWriteTokens ?? 0;
   }
 
   private requestSeq = 0;

@@ -227,7 +227,7 @@ describe('StatusBar retry chip (AC-28)', () => {
     };
 
     const instance = inkRender(
-      <StatusBar
+      <StatusBar columns={cols} speedKnown={false}
         model="claude-sonnet-4-5"
         provider="anthropic"
         usageTotal={{ inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.24 }}
@@ -256,13 +256,13 @@ describe('StatusBar retry chip (AC-28)', () => {
   };
 
   it('shows the real retry stage and countdown at 120 columns', () => {
-    expect(bar(120, { attempt: 3, max: 10, secondsLeft: 7 })).toContain('等待重试 7s');
+    expect(bar(120, { attempt: 3, max: 10, secondsLeft: 7 })).toContain('Retrying');
   });
 
   it('keeps retry and the complete context pair at 80 columns', () => {
     const narrow = bar(80, { attempt: 3, max: 10, secondsLeft: 7 });
-    expect(narrow).toContain('重试');
-    expect(narrow).toMatch(/1(?:\.0)?k\/200(?:\.0)?k tok/);
+    expect(narrow).toContain('Retry');
+    expect(narrow).toContain('1%');
     expect(narrow).not.toContain('retry 3/10');
   });
 

@@ -15,17 +15,19 @@
  * accident of promise semantics, and is not a pattern to copy (R-P12).
  */
 
-import React, { useState } from 'react';
+import React, { useState, useLayoutEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { Theme } from '../theme.js';
 import type { TermCapabilities } from '../capabilities.js';
 import { pickGlyphs } from '../glyphs.js';
-import { OverlayFrame } from '../layout/OverlayFrame.js';
+import { wrapToRows } from '../layout/wrap-rows.js';
+import { OverlayFrame, overlayBodyRows } from '../layout/OverlayFrame.js';
 import type { Answer, NormalizedQuestion } from '../../tools/human-input.js';
 import { stripPasteFrames } from '../paste-frames.js';
 import { stripEnterFrames } from '../enter-frames.js';
 
 interface QuestionOverlayProps {
+  isActive?: boolean;
   questions: NormalizedQuestion[];
   maxRows: number;
   cols: number;
@@ -47,6 +49,7 @@ function initialSelections(questions: NormalizedQuestion[]): Set<number>[] {
 }
 
 export function QuestionOverlay({
+  isActive = true,
   questions,
   maxRows,
   cols,
@@ -62,6 +65,7 @@ export function QuestionOverlay({
   const [selections, setSelections] = useState<Set<number>[]>(() => initialSelections(questions));
   const [customs, setCustoms] = useState<string[]>(() => questions.map(() => ''));
   const [draft, setDraft] = useState('');
+  const [offset, setOffset] = useState(0);
 
   const question = questions[Math.min(step, questions.length - 1)]!;
   const cursor = cursors[step] ?? 0;
@@ -114,6 +118,9 @@ export function QuestionOverlay({
   };
 
   useInput((input, key) => {
+    if (!isActive) return;
+    if (key.pageUp) { setOffset(n => Math.max(0, n - 1)); return; }
+    if (key.pageDown) { setOffset(n => n + 1); return; }
     // App owns Esc for both new overlays (R-P12). Swallow it here so the
     // free-text editor below cannot eat the raw escape byte as a character.
     if (key.escape) return;
@@ -210,142 +217,33 @@ export function QuestionOverlay({
           question.allowMultiple ? ` ${glyphs.midDot} space toggle` : ''
         } ${glyphs.midDot} ${glyphs.arrowLeft} back ${glyphs.midDot} esc cancel`;
 
-  return (
-    <OverlayFrame
-      title={`${title}${position}`}
-      hint={hint}
-      maxRows={maxRows}
-      cols={cols}
-      theme={theme}
-      caps={caps}
-    >
-      {phase === 'review' ? (
-        <ReviewBody questions={questions} answers={buildAnswers()} theme={theme} />
-      ) : (
-        <QuestionBody
-          question={question}
-          cursor={cursor}
-          selected={selections[step] ?? new Set()}
-          typing={phase === 'typingOther'}
-          draft={draft}
-          theme={theme}
-          caps={caps}
-        />
-      )}
-    </OverlayFrame>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Bodies
-// ---------------------------------------------------------------------------
-
-interface QuestionBodyProps {
-  question: NormalizedQuestion;
-  cursor: number;
-  selected: Set<number>;
-  typing: boolean;
-  draft: string;
-  theme: Theme;
-  caps: TermCapabilities;
-}
-
-/**
- * ONE QUESTION PER SCREEN, not all of them at once. Three questions x four
- * options x a description line is 20+ rows against a ~15-row viewport on a
- * 24-row terminal.
- */
-function QuestionBody({
-  question,
-  cursor,
-  selected,
-  typing,
-  draft,
-  theme,
-  caps,
-}: QuestionBodyProps): React.ReactElement {
-  const glyphs = pickGlyphs(caps);
-  const markOn = question.allowMultiple ? glyphs.boxChecked : glyphs.keyOn;
-  const markOff = question.allowMultiple ? glyphs.boxEmpty : glyphs.keyOff;
-
-  return (
-    <Box flexDirection="column">
-      <Text wrap="truncate" color={theme.accent} bold>
-        {question.header}
-      </Text>
-      <Text wrap="truncate" color={theme.assistant}>
-        {question.question}
-      </Text>
-      <Text> </Text>
-      {question.options.map((option, i) => {
-        const active = i === cursor;
-        const on = selected.has(i);
-        return (
-          <Text key={`${question.id}-${i}`} wrap="truncate">
-            <Text color={active ? theme.primary : theme.muted}>
-              {active ? glyphs.caret : ' '}{' '}
-            </Text>
-            <Text color={on ? theme.primary : theme.muted}>{on ? markOn : markOff} </Text>
-            <Text color={active ? theme.assistant : undefined} bold={active}>
-              {option.isOther ? `${option.label}${glyphs.ellipsis}` : option.label}
-            </Text>
-            {option.description.length > 0 && (
-              <Text color={theme.muted}>{'  '}{option.description}</Text>
-            )}
-            {option.recommended && (
-              <Text backgroundColor={theme.chip.bg} color={theme.chip.fg}>
-                {' '}
-                RECOMMENDED{' '}
-              </Text>
-            )}
-          </Text>
-        );
-      })}
-      {typing && (
-        <>
-          <Text> </Text>
-          <Text wrap="truncate">
-            <Text color={theme.primary} bold>
-              {glyphs.caret}{' '}
-            </Text>
-            {draft.length > 0 ? (
-              <Text>{draft}</Text>
-            ) : (
-              <Text color={theme.muted}>type your own answer</Text>
-            )}
-            <Text inverse> </Text>
-          </Text>
-        </>
-      )}
-    </Box>
-  );
-}
-
-/**
- * The review step exists because a wizard that fires on the last `Enter` with no
- * confirmation makes a mis-keyed answer unrecoverable.
- */
-function ReviewBody({
-  questions,
-  answers,
-  theme,
-}: {
-  questions: NormalizedQuestion[];
-  answers: Answer[];
-  theme: Theme;
-}): React.ReactElement {
-  return (
-    <Box flexDirection="column">
-      {questions.map((q, i) => {
-        const answer = answers[i];
-        const value = answer?.custom ?? answer?.selected.join(', ') ?? '';
-        return (
-          <Text key={q.id} wrap="truncate">
-            <Text color={theme.accent}>{q.header.padEnd(14)}</Text>
-            <Text color={theme.assistant}>{value}</Text>
-          </Text>
-        );
-      })}
-    </Box>
-  );
+  const rowTexts: string[] = [];
+  const optionStarts: number[] = [];
+  const push = (text: string): void => { rowTexts.push(...wrapToRows(text, Math.max(1, cols - 4))); };
+  if (phase === 'review') {
+    buildAnswers().forEach((answer, index) => push(`${questions[index]!.header}: ${answer.custom ?? answer.selected.join(', ')}`));
+  } else {
+    push(question.header);
+    push(question.question);
+    question.options.forEach((option, index) => {
+      optionStarts.push(rowTexts.length);
+      const mark = (selections[step] ?? new Set()).has(index) ? '[x]' : '[ ]';
+      push(`${index === cursor ? glyphs.caret : ' '} ${mark} ${option.label}${option.recommended ? ' RECOMMENDED' : ''} ${option.description}`);
+    });
+    if (phase === 'typingOther') push(`${glyphs.caret} ${draft || 'type your own answer'} `);
+  }
+  const focus = phase === 'review' ? 0 : phase === 'typingOther'
+    ? Math.max(0, rowTexts.length - 1) : optionStarts[cursor] ?? 0;
+  useLayoutEffect(() => {
+    const height = overlayBodyRows(maxRows, cols);
+    setOffset(previous => focus < previous ? focus : focus >= previous + height
+      ? focus - height + 1 : previous);
+  }, [focus, maxRows, cols, step, phase]);
+  const shortHint = phase === 'typingOther' ? 'Enter commit | Left back | Esc cancel'
+    : phase === 'review' ? 'Enter submit | Left back | Esc cancel'
+    : question.allowMultiple ? '^v choose Space toggle Enter next Esc' : 'Up/Down choose Enter next Esc cancel';
+  return <OverlayFrame title={`${title}${position}`} hint={cols <= 48 ? shortHint : hint}
+    maxRows={maxRows} cols={cols} theme={theme} caps={caps}
+    rows={rowTexts.map((line, index) => <Text key={index} wrap="truncate">{line || ' '}</Text>)}
+    scrollOffset={offset} onScrollClamp={setOffset} />;
 }

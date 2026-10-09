@@ -80,6 +80,29 @@ function isUtf8Encoding(encoding: string): boolean {
   return e === 'utf8' || e === 'utf-8';
 }
 
+/**
+ * DEC private mode 25 set/reset — hide / show the cursor.
+ *
+ * Ink 5.2.1's own root `<App>` writes these two EXACT strings through the
+ * render stdout on mount and unmount (`ink/build/components/App.js` →
+ * `cli-cursor`), which is this proxy, not the process stream. Cursor
+ * VISIBILITY changes no cell and moves no row, so the differ's
+ * absolute-addressing cache survives them untouched — yet `transform` cannot
+ * recognise them and answers `passThrough(true)`: counted, `onFirstFallback`
+ * raised (the warning fired on EVERY launch), cache dropped for nothing. Worse,
+ * in the real CLI the mount write arrives FIRST, so it also consumes the
+ * session's one seed-write exemption (`firstChunk`, P1-1) and the seed frame
+ * itself becomes the counted fallback.
+ *
+ * Absorbed here instead: straight to the real stream — no transform, no
+ * `invalidate()`, no fallback count, no exemption consumed. The match is
+ * exact on the whole chunk, so a future Ink that mixes the sequence into a
+ * longer write simply misses and falls back to today's conservative handling;
+ * a missed absorb costs one extra repaint, never a swallowed desync.
+ */
+const CURSOR_HIDE = '\x1b[?25l';
+const CURSOR_SHOW = '\x1b[?25h';
+
 type WriteCallback = (error?: Error | null) => void;
 
 export function wrapStdoutForFrames(
@@ -118,6 +141,13 @@ export function wrapStdoutForFrames(
     // encoding means the string is not the bytes (P1-4).
     if (typeof chunk !== 'string' || (encoding !== undefined && !isUtf8Encoding(encoding))) {
       differ.invalidate();
+      return writeReal(chunk, encoding, cb);
+    }
+
+    // Ink's own cursor-mode pair (see CURSOR_HIDE / CURSOR_SHOW above): not a
+    // frame and not a desync — the bytes reach the terminal untransformed,
+    // uncounted, and without touching the cache or the seed exemption.
+    if (chunk === CURSOR_HIDE || chunk === CURSOR_SHOW) {
       return writeReal(chunk, encoding, cb);
     }
 

@@ -40,6 +40,25 @@ const messages = [
 const fixture = () => ({ version: 1, savedAt: 1, entries, messages });
 
 describe('session validation before restoration', () => {
+  it('preserves v2 entry evidence and valid optional host identity', () => {
+    const entry = entries.find((item) => item.kind === 'compaction')!;
+    const decision = { occupied: 90, contextWindow: 100, threshold: 0.9,
+      source: 'usage', deltaTokens: 0 };
+    const compactionIdentity = { version: 1, anchorIndex: 0, blockIndex: 1,
+      generation: 2, prefixSha256: 'a'.repeat(64) };
+    const loaded = load({ ...fixture(), compactionIdentity,
+      entries: [{ ...entry, decision, memoryVersion: 2 }] });
+    expect(loaded).toHaveProperty('compactionIdentity', compactionIdentity);
+    expect(loaded.entries[0]).toMatchObject({ decision, memoryVersion: 2 });
+  });
+
+  it.each([null, {}, { version: 1, anchorIndex: 0, blockIndex: 1,
+    generation: 0, prefixSha256: 'a'.repeat(64) }, { version: 1, anchorIndex: 0,
+    blockIndex: 1, generation: 1, prefixSha256: 'broken' }])(
+    'rejects malformed optional host credentials: %j', (compactionIdentity) => {
+      expect(() => load({ ...fixture(), compactionIdentity })).toThrow('compactionIdentity');
+    },
+  );
   it('accepts every old entry and message kind, preserving meta and extension fields', () => {
     const loaded = load({ ...fixture(), meta: { id: 'exec' }, extension: { legacy: true } });
     expect(loaded.messages).toEqual(messages);
@@ -80,6 +99,15 @@ describe('session validation before restoration', () => {
     ['todo', { items: [{ content: 'work', activeForm: 'working', status: 'invalid' }] },
       'items[0].status'],
     ['compaction', { tailRelief: { messages: 2, charsRemoved: 'bad' } }, 'tailRelief.charsRemoved'],
+    ['compaction', { memoryVersion: 3 }, 'memoryVersion'],
+    ['compaction', { decision: { occupied: -1, contextWindow: 100,
+      threshold: 0.9, source: 'usage', deltaTokens: 0 } }, 'decision.occupied'],
+    ['compaction', { decision: { occupied: 90, contextWindow: 0,
+      threshold: 0.9, source: 'usage', deltaTokens: 0 } }, 'decision.contextWindow'],
+    ['compaction', { decision: { occupied: 90, contextWindow: 100,
+      threshold: 1, source: 'usage', deltaTokens: 0 } }, 'decision.threshold'],
+    ['compaction', { decision: { occupied: 90, contextWindow: 100,
+      threshold: 0.9, source: 'other', deltaTokens: 0 } }, 'decision.source'],
     ['service', { rows: [2] }, 'rows[0]'],
     ['queued', { queueId: '' }, 'queueId'],
   ])('checks nested and optional %s payloads (%#)', (kind, extra, field) => {

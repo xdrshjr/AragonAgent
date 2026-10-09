@@ -162,12 +162,14 @@ describe('I-11: `filter !== null` answers exactly one question in cli.tsx', () =
     expect(CLI_SOURCE).toMatch(/mouseSource=\{mouseOn && filter \? filter\.source : undefined\}/);
   });
 
-  it('adds only the explicit Delete capability alongside feature gates — the handle is not a mouse signal', () => {
-    // The additional occurrence is the actual keyboard-normalization capability,
-    // not an implicit mouse or paste feature switch.
+  it('adds only the explicit capabilities alongside feature gates — the handle is not a mouse signal', () => {
+    // Each additional occurrence is an actual named capability, not an
+    // implicit mouse or paste feature switch: Delete disambiguation, then the
+    // keyboard-enhancement translation (same shape as pasteOn).
     expect(CLI_SOURCE).toMatch(/deleteDisambiguated: filter !== null,/);
+    expect(CLI_SOURCE).toMatch(/const enhancedKeysOn = wantEnhancedKeys && filter !== null;/);
     const code = stripComments(CLI_SOURCE);
-    expect(code.split('filter !== null').length - 1).toBe(3);
+    expect(code.split('filter !== null').length - 1).toBe(4);
   });
 
   it('gates `?2004h` on `pasteOn`, never on the handle', () => {

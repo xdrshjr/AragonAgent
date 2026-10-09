@@ -195,9 +195,9 @@ export function runBootGuard(deps: BootGuardDeps = {}): void {
  *
  * Called from two places, and both matter:
  *
- *  - `cli.tsx::runInteractive`, immediately after `render()` returns - the
- *    earliest moment at which "this build starts" is PROVEN: the module graph
- *    loaded, config resolved, Ink mounted. This is the primary, and it is what
+ *  - `cli.tsx::runInteractive`, after mount-time exit promises settle, while
+ *    the app is still live (or has exited successfully): the module graph
+ *    loaded, config resolved, Ink mounted successfully. This primary path
  *    makes a long session that is later `SIGKILL`ed (terminal window closed,
  *    machine slept badly, OOM killer) still count as healthy.
  *  - the exit hook installed by `runBootGuard`, when the code is `0` - the

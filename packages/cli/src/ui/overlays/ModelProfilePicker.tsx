@@ -5,12 +5,13 @@ import type { ModelProfile, ModelProfilesConfig, ModelRole } from '../../config/
 import type { Theme } from '../theme.js';
 import type { TermCapabilities } from '../capabilities.js';
 import { pickGlyphs } from '../glyphs.js';
-import { OverlayFrame } from '../layout/OverlayFrame.js';
+import { OverlayFrame, overlayBodyRows } from '../layout/OverlayFrame.js';
 import { stripPasteFrames } from '../paste-frames.js';
 import { stripEnterFrames } from '../enter-frames.js';
 import { profileUsers } from './model-profile-state.js';
 
 export interface ProfileFrameProps {
+  isActive?: boolean;
   theme: Theme;
   caps: TermCapabilities;
   cols: number;
@@ -24,7 +25,7 @@ export function useProfileScroll(props: ProfileFrameProps, focus: number): numbe
   useEffect(() => { props.onScrollClamp?.(0); }, []);
   useEffect(() => { setOffset(props.scrollOffset); }, [props.scrollOffset]);
   useEffect(() => {
-    const height = Math.max(1, props.maxRows - (props.cols >= 48 ? 5 : 3));
+    const height = overlayBodyRows(props.maxRows, props.cols);
     const next = focus < offset ? focus : focus >= offset + height ? focus - height + 1 : offset;
     if (next !== offset) { setOffset(next); props.onScrollClamp?.(next); }
   }, [focus, props.maxRows, props.cols]);
@@ -110,6 +111,7 @@ function usePickerInput(props: ModelProfilePickerProps, state: PickerState): voi
     if (action === 'Delete' && selected) props.onDelete(selected.id);
   }
   useInput((input, key) => {
+    if (props.isActive === false) return;
     if (key.escape) { if (searching) setSearching(false); else props.onCancel(); return; }
     if (searching) {
       if (key.return || key.downArrow || key.tab) { setSearching(false); return; }

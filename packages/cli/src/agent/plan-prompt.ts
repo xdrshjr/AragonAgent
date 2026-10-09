@@ -9,7 +9,7 @@
  */
 
 /** Bump when the wording changes, so a transcript can be dated. */
-export const PLAN_MODE_BLOCK_VERSION = 'v1-2026-07';
+export const PLAN_MODE_BLOCK_VERSION = 'v2-2026-10-08';
 
 export interface PlanModeBlockOptions {
   /** False under `-p` / piped stdin: no overlay can be rendered, so no tools. */
@@ -90,8 +90,9 @@ export function buildPlanModeBlock(options: PlanModeBlockOptions): string {
     'design mode: you must not change anything on disk and must not run commands.',
     '',
     'Work in this order:',
-    '1. Ground yourself in the real code. Use read_file, list_dir, glob, grep and any',
-    '   relevant skill. Never plan against a directory structure you have not read.',
+    '1. Follow the project-guidance protocol: read applicable guidance and index navigation',
+    '   before any source search or read. Then inspect the real code with read_file,',
+    '   list_dir, glob, grep and relevant skills. Never plan against unread structure.',
     ...askStep,
     ...submitStep,
     '',

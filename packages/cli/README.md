@@ -433,7 +433,7 @@ completes, `Up` / `Down` moves the selection, `Esc` closes it.
 | Key | Action |
 | --- | --- |
 | `Enter` | 空闲时发送，运行时加入队列；收到 Core 已纳入会话的接收凭据后才移除 Queue 提示 |
-| `Ctrl+J` / `Alt+Enter` / `Shift+Enter` | 插入换行。Ctrl+J 已通过输入链路测试；另外两种组合键需要宿主发送独立序列，Alt+Enter 可能被宿主拦截。参见 [终端设置](#terminal-setup-for-shiftenter) |
+| `Ctrl+J` / `Alt+Enter` / `Shift+Enter` | 插入换行。应用默认请求终端区分修饰键（Windows 用 win32-input-mode，macOS/Linux 用 kitty/modifyOtherKeys），Shift+Enter 在支持的终端开箱即用；不支持的终端用 Ctrl+J。参见 [终端设置](#terminal-setup-for-shiftenter) |
 | `Shift+Tab` | Toggle **plan mode** (`BUILD` <-> `PLAN`). Equivalent: `/plan`. On Windows this needs a console flag Node < 22.17 does not set; aragon sets it at startup — see [Requirements](#requirements) |
 | `Ctrl+P` | The same toggle, over a channel no Windows console can swallow. Use it if `Shift+Tab` does nothing |
 | `Esc` | Close an overlay or popup; otherwise ask for interruption confirmation. While idle, cancel pending auto-continuation |
@@ -456,14 +456,11 @@ completes, `Up` / `Down` moves the selection, `Esc` closes it.
 | Paste | Inserted as-is up to 6 lines / 400 chars; larger collapses to `[Pasted text #1 +15 lines]`, which deletes as one unit and expands in full when you send. `--no-paste` restores the pre-0.6.3 behaviour |
 | `?` | Open help (empty input) |
 
-In **full-screen mode** the transcript is scrolled by the app itself: `PgUp` /
-`PgDn` and `Shift+↑` / `Shift+↓`. While pinned to the bottom the viewport follows
-new output automatically; once you scroll away the status bar shows `↑N`, a slim
-scrollbar occupies the terminal's last column (including 40-column windows). Drag its thumb
-to move through history, or click the track to move one page. Messages, the team panel
-and the input area scroll together; typing or editing returns to the input without
-losing the draft. The fixed status row reports the distance from the end while reading history.
-`PgDn` moves one page down; editing or submitting returns directly to the end.
+In **full-screen mode**, PgUp/PgDn, Shift+Up/Down and the right-edge scrollbar
+scroll the transcript and its team/queue panels. The input stays fixed and visible.
+Typing or submitting returns the transcript to the newest output without losing the draft.
+The header shows `^N`, the line offset from the bottom (capped at `^9999+`).
+The scrollbar track ends above the input.
 
 **The mouse wheel is a viewport gesture and nothing else.** Wherever the pointer
 happens to be — including right on top of the composer — a notch scrolls the
@@ -493,10 +490,13 @@ is what it used to do. Inline mode is unaffected either way.
 
 ## Terminal setup for Shift+Enter
 
-输入支持 `Ctrl+J`、`Alt+Enter` 和可独立编码的 `Shift+Enter` 换行。如果终端把
-Shift+Enter 与 Enter 都发送为 CR，应用无法区分；请用 `/terminal-setup` 查看绑定，
-让 Shift+Enter 发送 `\u001b[13;2u`。合并到已有终端配置，不要覆盖其他快捷键；
-终端拦截某个组合键时可使用另外两种方式。参考绑定如下：
+应用现在会主动请求终端区分修饰键：Windows 上推送 win32-input-mode（conhost 与
+Windows Terminal 均支持），macOS/Linux 上推送 kitty disambiguate 与
+`modifyOtherKeys=2`（iTerm2、kitty、ghostty、WezTerm、foot、Alacritty 实现其一），
+并在 stdin 过滤器里把新编码翻译回传统字节，Ink 的按键解析不受影响。上述推送不满足时
+（macOS Terminal.app、旧 Node 下的 conhost、或不支持任何协议的终端）Shift+Enter 仍与
+Enter 同为 CR，此时用 `Ctrl+J` 换行，或按 `/terminal-setup` 给终端加一条让
+Shift+Enter 发送 `\u001b[13;2u` 的绑定（合并进已有配置，不要覆盖其他快捷键）。参考绑定如下：
 
 - **Windows Terminal** — `settings.json` 的 `actions` 与 `keybindings` 分别定义动作和按键；完整示例见下文“输入、待处理队列与底部状态区”。
 - **VS Code integrated terminal** — `keybindings.json`:
@@ -510,10 +510,14 @@ Shift+Enter 与 Enter 都发送为 CR，应用无法区分；请用 `/terminal-s
 - **macOS Terminal.app / legacy conhost** — cannot rebind `Enter`; use
   `Ctrl+J` or `Alt+Enter`
 
-aragon deliberately does not push kitty keyboard mode or `modifyOtherKeys=2`
-onto the terminal itself: mode 2 re-encodes *every* modified key as CSI-u and
-would blind this app's (and Ink's) key parsing for the whole session. One
-user-side binding reaches the same result for the one key that needs it.
+The push and its translation ship as one unit: `input/win32-input-mode.ts` and
+`input/csiu-keys.ts` translate every enhanced encoding back to the legacy
+bytes before Ink parses them, so a translated stream is byte-identical to a
+pre-enhancement one (Enter family excepted: a modified Enter becomes the
+newline frame). Windows additionally requires Node >= 22.17 / >= 24.2 --
+older versions never turn on virtual-terminal input. Opt out with
+`aragon config set keyboardEnhancement false`, `--no-keyboard-enhancement`,
+or `ARAGON_KEYBOARD_ENHANCEMENT=0`.
 
 ## Queued messages while the agent runs
 
@@ -586,37 +590,32 @@ session, `showThinking: true` (or `--show-thinking`, or `ARAGON_SHOW_THINKING=1`
 shows them permanently, and `/settings` has a **Show thinking** row next to
 **Thinking**.
 
-**There is something to look at while it thinks.** One row directly above the
-input box, for as long as a run is in flight, with the keys that act on the run
-beside it (it takes the place of the idle hint row below the box, so starting a
-run never moves the layout):
+**The input and status stay fixed while output streams.** The default status is
+one row below the input, with one global activity spinner and five fields:
 
-```
-  ⠋ Percolating… · ⏎ queue · esc×2 interrupt · ctrl+c×2 exit            PLAN
-```
-
-The row scrolls with the input box. On a narrow terminal whole clauses are dropped
-from the end (`exit` first) and only the phrase is shortened with an ellipsis, so
-`queue` and `interrupt` are never cut mid-word. When you scroll history until the
-input box is out of view, the animation moves to the fixed row at the bottom, so
-there is always exactly one spinner on screen. Terminals shorter than 20 rows, and
-`--no-hints`, keep the animation on that fixed row instead.
-
-The word rotates every four seconds. It carries no clock and no token count on
-purpose: the status bar one row below already has both, under the same
-condition, driven by the same ticker. Under `reducedMotion` the spinner is a
-static glyph and the word is chosen once and holds — rotating text is motion too.
-An idle frame is exactly what it was before this existed, down to the row count.
-
-While a **tool** is in flight the row stops guessing and names it instead:
-
-```
-  ⠙ Running bash
+```text
+* Thinking | Context ~35% | Think high | 12 tok/s | 1m04s
+* Think C~35% Th:H 12t/s 1m04s
 ```
 
-`running` covers the whole turn, including the minutes the model is idle and a
-child process is doing the work. "Pondering" is right for the gap before the
-first token and simply untrue during a build.
+Ctrl+G adds a second detail row; press it again to collapse. The header always
+shows the entry, including at 40 columns. Overlays temporarily disable the toggle.
+The preference lasts for the process and survives clear, reset, resume and new runs.
+Only this explicit toggle changes status height; feedback and updates never add rows.
+
+The five fields remain visible at 40 columns. Thinking codes O/N/L/M/H/X mean
+off/minimal/low/medium/high/xhigh. Speed is the main Agent's reported output tokens
+divided by total run time, including tools and waits; team, fast and compaction
+tokens are excluded. Missing usage reads `--`; a reported zero is valid. At run end,
+speed returns to `--` and elapsed time stays frozen until the next run. Idle manual
+compaction has its own elapsed time and no output speed.
+
+Details reserve the actual Esc operation and `^G less`, then fit feedback, actions,
+queue/services/mode, context tokens, session usage and estimated cost, and other
+metadata. Long feedback is clipped within that row; errors also appear in the transcript.
+`Copy sent` means an unconfirmed terminal copy request; `Copied` means confirmed.
+At extreme widths E/F means copy error plus Esc force-stop. Reduced motion uses
+a static status glyph. Built-in interface text is English; user text is unchanged.
 
 **A long command is not a blank card.** `bash` is the only tool here that can run
 for minutes — `npm test`, a `git clone`, a training job — and while it ran, its
@@ -680,9 +679,8 @@ near-identical added ones.
 
 - Your previous shell output is **covered, not erased**, and returns untouched
   when you exit. Nothing in your scrollback is destroyed.
-- The frame is fixed at `rows - 1` tall. The header, activity row and status bar
-  stay visible. The input belongs to the scrolling document; short sessions fill
-  the space above it, and browsing history moves it out of view.
+- The frame is fixed at `rows - 1` tall. The header, input and status stay visible.
+  Only the message area scrolls; Ctrl+G reserves one optional detail row.
 
 On exit the session is replayed into the normal buffer as plain text so the
 conversation survives leaving the screen (`--no-exit-transcript` opts out;
@@ -969,6 +967,39 @@ is written to stderr as `[todo] 3/7 <step>` lines, suppressed by `--quiet`.
 inline 模式时不显示右栏。低于 12 行使用原有小终端提示；扩大窗口后自动恢复。
 inline 仍使用上文的单行任务条。`/todo status` 中的 `Panel: on` 仅表示配置开启，
 实际可见性还取决于数据和窗口空间；可以通过该命令区分未生成计划与暂时隐藏。
+
+## Project guidance
+
+For workspace tasks, Aragon is instructed to read existing guidance and indexes before
+choosing an implementation approach, writing a detailed plan, or changing files.
+The protocol starts with the current directory listing and all applicable `AGENTS.md` /
+`agent.md` and `CLAUDE.md` guidance, then README context and index pointers.
+Case variants are recognized; tool calls preserve the actual filename spelling.
+
+Supported entries include `.claude-index` as a file or a directory containing
+`index.md` (or a README fallback), and README files such as `.agentmesh/readme`.
+Explicit local index references from other agents are also supported. Relative
+references resolve from the referring document, within the authorized workspace.
+Aragon reads the overview and relevant sections, checks directory guidance for
+the target module, and verifies index locations against current source before
+planning. It avoids recursive orientation scans and unrelated task logs, and
+reuses guidance while it remains current and available in the conversation.
+
+Missing or stale indexes do not mean the workspace is a new project, and do not
+trigger index generation. Unreadable entries are reported when relevant; tool
+refusals and task boundaries still apply. Project documents provide conventions
+and navigation, not new authority to run commands or expand the task.
+
+This versioned English prompt protocol is shared by TUI Build/Plan, `-p`,
+`aragon exec`, and subagents; replies still follow the user's language. Discovery
+uses available, permitted read-only tools. It is model guidance, not an automatic
+startup scanner, filesystem isolation, or a programmatic read-before-write lock.
+Conversation that needs no workspace context skips discovery.
+
+Actual-model acceptance remains incomplete: the deployed model has skipped
+guidance or searched source too early in recorded sessions. See the
+[validation record](../../docs/plans/project-guidance-first/manual-test.md)
+for observed results and remaining release gates.
 
 ## Built-in tools
 
@@ -1290,25 +1321,11 @@ you for a rate-limited provider's quota. The review's own wall-clock bound is
 
 ## The context gauge
 
-The right end of the status bar answers one question: **how full is the context,
-out of how much.**
-
-```
-[####----] 43%  86.0k/200.0k   total 1.2M^ 48.0k v   $3.21   12 tok/s  1m02s
-            ^        ^         ^
-            |        |         +-- session spend, prompt side / output side
-            |        +-- occupied / window
-            +-- the two together, as a percentage
-```
-
-The readouts drop as the terminal narrows, in that order of priority:
-
-| Columns | Right cluster |
-|---|---|
-| >= 96 | `[####----] 43%  86.0k/200.0k  total 1.2M^ 48.0k v  $3.21` |
-| 72-95 | `[####----] 43%  86.0k/200.0k  $3.21` |
-| 60-71 | `[####----] 43%  $3.21` |
-| < 60 | `43%  $3.21` |
+The primary status row shows context percentage at every supported width.
+The expanded details show occupied/window token counts when space permits;
+`/context` always provides the complete values. No primary field is dropped:
+narrow screens use `C35%`, `C~35%` or `C?`. Percentages above 999 read
+`C>999%` or `C~>999%`, retaining the approximation marker.
 
 **Two different markers, because there are two different things to doubt.**
 
@@ -1316,9 +1333,9 @@ The readouts drop as the terminal narrows, in that order of priority:
   either no completed turn has reported usage yet (right after `/resume`, or
   right after a compaction), or tool results have been appended since the last
   measurement and their size is estimated.
-- `?` sits on the **window** and means the *denominator* is a guess: the model is
-  not in the built-in table, so a flat 128 000 was substituted. See
-  `contextWindow` below.
+- `?` replaces the **window** when neither the API nor the catalog provides a
+  limit. No percentage is shown in that case. The internal 128 000-token fallback
+  remains a compaction budget, not a claim about model capacity. See `contextWindow` below.
 
 **The percentage keeps moving during a turn.** Every tool result nudges it,
 whether or not compaction is enabled — it is not a compaction feature, and a
@@ -1343,7 +1360,8 @@ Context
 ```
 
 Two lines are worth reading closely. **`Window`** always names where the number
-came from — the model table, your own `contextWindow`, or the invented
+came from — the model API, the model table, your own `contextWindow`, a
+`model-windows.json` entry, or the invented
 placeholder — because those are indistinguishable everywhere else. And
 **`Compaction`** reports what is actually true of this session, including
 `off - not registered for this session (started with --no-compaction)`; it never
@@ -1351,13 +1369,22 @@ promises a threshold that nothing will act on.
 
 ### `contextWindow`
 
-When the model is not in the built-in table — a custom `baseUrl`, a self-hosted
-id, something released last week — the denominator is a **fabricated** 128 000
-and the percentage is meaningless. Correct it:
+Window resolution uses your explicit override first, then per-model declarations
+in `model-windows.json`, then API metadata from the configured endpoint, then the
+built-in catalog (including known aliases and dated
+snapshots). Startup, connection changes, and subsequent prompts refresh discovery
+in the background, with a five-minute cache. OpenAI-compatible endpoints may expose
+`context_length` or `context_window`; Anthropic uses `max_input_tokens`; Google uses
+`inputTokenLimit`. An ID-only models response cannot establish the real limit.
+Google/Anthropic lists are paginated (up to 20 pages within one 15-second deadline).
+Changing the connection or ending the session cancels its pending lookup.
+
+If neither the endpoint nor the catalog knows your model, the status bar shows `?`.
+Set a verified provider limit explicitly:
 
 ```bash
 aragon config set contextWindow 1000000   # persisted; prints "Set contextWindow = 1000000"
-aragon config set contextWindow auto      # back to the model table / placeholder
+aragon config set contextWindow auto      # back to API discovery / catalog
 ARAGON_CONTEXT_WINDOW=1000000 aragon      # one session
 ```
 
@@ -1365,6 +1392,33 @@ Values are clamped to `[8000, 5000000]`; `auto` (the default) is stored as
 `null`. Setting it removes the `?` marker, because you have asserted the number —
 and `/context` still shows that it came from you, which is what makes a wrong
 value findable.
+
+#### `model-windows.json` — one window per model
+
+`contextWindow` describes ONE model: the active one. To pin several at once — a
+main model plus a fast tier plus a gateway alias — declare them by id in
+`~/.aragon-agent/model-windows.json`:
+
+```json
+{
+  "version": 1,
+  "windows": {
+    "kimi-k3": 1048576,
+    "glm-5.3": 1048576,
+    "glm-5.3-flash": 1048576
+  }
+}
+```
+
+A bare map without the wrapper works too. Keys are matched case-insensitively
+after stripping a `models/`-style prefix and a dated snapshot suffix, so
+`Kimi-K3-20260716` still resolves. Entries must be whole tokens between 1024 and
+1e9; at most 512 are kept. The file is read live (mtime-cached), never written
+by the CLI, and outranks API discovery and the catalog while still losing to the
+active model's `contextWindow` override. `/context` reports these windows as
+`from model-windows.json`, and a file that cannot be parsed is ignored with one
+log line rather than trusted. UTF-8 (with or without BOM) and UTF-16 saves are
+both accepted.
 
 ## Context compaction
 
@@ -1388,20 +1442,39 @@ before.
 
 ### What actually happens
 
-1. **Proactively**, when measured occupancy crosses the threshold. This is the
-   case that fires almost every time.
-2. **Reactively**, when the provider returns `context_overflow` anyway — because
-   the model's context window is not in the static table, or you are pointed at a
-   proxy in front of a smaller model. One compaction, one re-send, run continues.
-   The engine allows exactly one of these per turn.
+1. **Automatically**, when current occupancy reaches the configured threshold.
+   Comparison uses the unrounded occupied-token / window ratio.
+2. **After an overflow**, only when that same occupancy threshold is reached.
+   The engine allows one recovery attempt; an overflow below the threshold
+   preserves the provider error and suggests `/compact` or correcting `contextWindow`.
 3. **Manually**, with `/compact`. While the agent is idle it runs immediately;
    while it is running it queues and fires at the next turn boundary.
 
-The trigger has **two** terms, and the second one is not belt-and-braces: 90 % of
-a 200 k window leaves 20 k, which is plenty, but 90 % of a 32 k window leaves
-3.2 k — less than a single `max_tokens` of 8192, so the request is already
-impossible. Compaction therefore also fires whenever the remaining headroom drops
-below one full response.
+Output-token reservations, session spend, and unsent drafts do not trigger
+compaction. Submitted input can trigger it if that input raises real occupancy
+to the threshold. `/compact status` shows exact token counts, the threshold token
+count, and a two-decimal percentage; estimates retain their approximate marker.
+Querying status/history or changing settings never requests a summary.
+
+### Structured task memory
+
+Task memory v2 retains the original task, full later user requirements, prior
+memory items, and complete recent turns. New facts, decisions, tasks, evidence,
+pitfalls, and next steps are added with source references. Updates supersede
+older items without silently erasing them. Images remain real message content.
+Protected content that cannot fit causes a refusal, never truncation.
+
+The host validates the full structured response and adopts it only after history
+and token-reduction checks pass. This mechanically preserves protected text and
+recorded items; it cannot guarantee the model understood every new tool result.
+`/compact <instructions>` accepts at most 4000 characters after trimming.
+
+Saved sessions carry optional host identity evidence for adopted memory. Valid
+v2 sessions resume the same generation chain. Without evidence, memory-looking
+user text remains ordinary protected input. A recognized legacy v1 summary is
+preserved in full and marked incomplete; migration cannot recover content lost
+before v2. Corrupt identities or unsupported versions preserve history and refuse
+compaction. Older CLI releases have no guaranteed lossless v2 downgrade path.
 
 ### Which model summarizes, and what it costs
 
@@ -1422,19 +1495,13 @@ The transcript card then names the cheap model.
 
 ### When it cannot summarize
 
-Summarization is a network call and it will sometimes fail. The ladder is: one
-retry — on your **main** model if the first attempt used the fast tier, because
-"a fast model that cannot summarize" is the likeliest single failure — and then,
-by default, a **truncation**: the same cut, the same verbatim task, and a block
-that says plainly that the dropped messages were not summarized. That is
-announced on the card, in the transcript, on the JSON event stream and inside the
-block the model itself reads.
-
-Truncation loses information, and it is still the default, because an unattended
-`aragon exec` that wedges on an unrecoverable 400 loses the whole run.
-`compaction.onFailure: "stop"` makes the other trade: the history is left alone,
-an error names your exits, and the next request will probably fail — which is
-what you asked for by setting it.
+Each compaction makes at most two summary attempts under one total deadline;
+transport retries follow the provider's existing retry policy within that same
+deadline. Invalid structured output may be retried once with validation feedback.
+Cancellation, timeout, invalid data, missing credentials, budget overflow, or
+failed adoption leave history unchanged. The command reports `History preserved`
+and the reason. `onFailure` now defaults to `stop`; legacy `truncate` values still
+load but preserve history as well, as `/compact status` explicitly explains.
 
 ### It will not loop on your money
 
@@ -1443,12 +1510,12 @@ than 5 per run, a splice that does not project a real reclaim does not count as
 progress, and two consecutive no-progress compactions **switch the proactive
 trigger off for the session** with a notice naming the cause and the fix.
 
-The guards are trigger-aware. A *pressure* compaction that reclaims little has
-spent money to buy two turns and should stop. An *overflow* compaction that
-reclaims little is the difference between a live run and a dead one, because the
-provider has already refused the request — so the reactive path stays armed even
-after a self-disable, and an overflow attempt may halve `keepRecentTurns` for
-itself, which is the one lever that can make a too-large tail fit.
+Overflow can bypass the consecutive-turn cooldown, but it still respects the
+threshold, run limit, and automatic self-disable. It never shrinks the retained
+tail. Manual requests bypass the automatic threshold and self-disable, while
+queued requests respect the run limit and expire at the end of that run.
+Idle manual work locks history adoption; new input stays queued, Esc cancels,
+and replacing history invalidates late responses.
 
 ### What you see
 
@@ -1467,8 +1534,9 @@ Three surfaces, each answering something the others cannot:
   resolves; after `/compact off` they fall back to the generic 60 / 85, because
   colouring by a rescue that is not coming is worse than not colouring at all.
 - **As a record** — a transcript card with the before/after message and token
-  counts, the summarizer, the duration, and the summary itself. `Ctrl+O` expands
-  it.
+  counts, the summarizer, duration, and the actual automatic/manual/overflow
+  reason. `Task memory v2` identifies structured memory; `Ctrl+O` reveals its
+  sections. Rejected candidates never appear as successful compactions.
 
 **What a red gauge means:** the trigger is `>= threshold` while the red band is
 `> threshold`, so any occupancy that would paint red has already triggered
@@ -1484,25 +1552,9 @@ all.
 
 ### When the RECENT turns are what does not fit
 
-Every rung above operates on the **head** of the conversation. When the retained
-tail is the problem — a few turns each carrying several 100 KB tool results —
-each of those rungs reports success or "nothing to drop" while the history stays
-un-sendable.
-
-The last rung clips oversized `tool_result` bodies **inside the retained turns**,
-oldest first, stopping the moment the request fits. Nothing is removed: no
-message, no tool-call id, no role — so a history that was structurally valid
-before is still valid after. Every clip is announced **in the text the model
-reads**, at the exact place the data went:
-
-```
-[... 214003 characters removed by context compaction ...]
-```
-
-A model that sees that knows the output is partial and can re-run the tool. It is
-also stated on the transcript card, in `/compact status`, on the JSON event
-stream and in the archive. When clipping is the **only** thing that happened, the
-card says so and names no model, because none was called.
+The CLI preserves retained tool results in full. If the recent turns alone are
+too large and no safe older head can be compacted, history is kept and the
+refusal is explained. Automatic tail clipping and failure truncation are disabled.
 
 ### Sub-agents get the same protection
 
@@ -1513,14 +1565,15 @@ dispatch reached you as one partial sentence.
 
 Children now compact their own history, under tighter bounds: **two** retained
 turns instead of four, at most **two** compactions per child instead of five, the
-fast tier preferred whenever it resolves, and `onFailure` forced to `truncate`
-because nobody is watching a background worker. There is no transcript card for a
+fast tier preferred whenever it resolves, and failures preserve history. Each
+child owns its own context meter and counts compaction only after Core accepts
+the candidate. There is no transcript card for a
 child — the lead's transcript describes the lead's context. Turn it off with
 `compaction.subagents: false`.
 
 ### A compaction is no longer irreversible
 
-Before a splice is adopted, the dropped messages are written verbatim to
+After a splice is adopted, the dropped messages are written verbatim to
 `~/.aragon/compaction/` — metadata, the summary, and the messages themselves.
 
 `/compact history` lists **this run's** archives, newest first, with the path of
@@ -1550,7 +1603,7 @@ you can check rather than something you have to accept.
     "warnThreshold": 0.75,    // [0.4, threshold - 0.05]; where the gauge turns amber
     "keepRecentTurns": 4,     // [1, 20] complete turns kept verbatim
     "useFastTier": true,      // summarize with the fast tier WHEN it resolves
-    "onFailure": "truncate",  // or "stop"
+    "onFailure": "stop",      // legacy "truncate" also preserves history
     "subagents": true,        // give `task` children their own compaction
     "archive": true           // write the dropped messages to ~/.aragon/compaction
   }
@@ -1890,7 +1943,7 @@ env / `.env` → CLI flags**.
 | Config key | Default | Meaning |
 | --- | --- | --- |
 | `maxTokens` | `64000` | Output token cap, clamped to `[256, 200000]`. `null` means **auto** — use each model's own ceiling, never above 64000. Absent means the default. See [Output token limits](#output-token-limits). |
-| `contextWindow` | `null` | The window the context gauge measures against, clamped to `[8000, 5000000]`. `null` means **auto** — the built-in model table, or a fabricated 128000 for a model it has never seen. Set it when the gauge shows `?` on the denominator. See [The context gauge](#the-context-gauge). |
+| `contextWindow` | `null` | The window the context gauge measures against, clamped to `[8000, 5000000]`. `null` means **auto** — API metadata, then the built-in catalog. Unknown windows show `?`; the internal fallback is 128000. See [The context gauge](#the-context-gauge). |
 | `showThinking` | `false` | Draw the reasoning the model returns. `thinkingLevel` is the effort the provider is asked to **spend**; this is whether the terminal **shows** it. Off by default: a settled turn that thought leaves one muted `thought for 12s` row in its place, so nothing is hidden silently. |
 | `liveToolOutput` | `true` | Draw up to eight sanitised rows of a **running** tool's output on its card, plus a `no output for Ns` row when the child goes quiet. On by default, unlike `showThinking`: this ADDS the information a long `bash` call otherwise hides, and its cost is bounded by construction — eight rows per call, sixteen calls, whatever the command emits. Turn it off and the card is a single `running` row again, with no store allocated and no recorder attached. |
 | `exitTranscript` | `true` | Replay a plain-text session summary after exiting (full-screen only). |
@@ -1968,7 +2021,7 @@ aragon config set maxTokens 32000    # persisted; prints "Set maxTokens = 32000"
 aragon config set maxTokens auto     # persisted as null
 aragon config set maxTokens default  # back to 64000
 aragon config set contextWindow 1000000  # the gauge's denominator
-aragon config set contextWindow auto     # back to the model table
+aragon config set contextWindow auto     # back to API discovery / catalog
 aragon config get maxTokens          # "64000" | "auto"
 ```
 
@@ -2133,6 +2186,8 @@ Everything AragonAgent keeps for you lives under one directory in your home:
 ~/.aragon-agent/                    (Windows: C:\Users\<you>\.aragon-agent\)
 ├── config.json                     settings + API keys (0600 on POSIX)
 ├── config.json.bak                 written by `aragon config edit` before it opens
+├── model-windows.json              per-model context windows you declare by hand;
+│                                   read live, never written by the CLI
 ├── prompt-history.jsonl            prompts you submitted, for ↑ recall (0600 on POSIX)
 ├── state.json                      UI bookkeeping: submit count, one-shot notices
 ├── update-state.json               auto-update: last check, pending restart, skipped version,
@@ -2272,12 +2327,15 @@ quiet output is required.
 `--theme` / `config.theme` / `/theme` pick a palette: `warm`, `cool`, `light`, or
 `auto` (which resolves to `warm` — terminals can't reliably report their
 background). `dark` remains accepted everywhere as an alias for `cool`.
-Colors degrade automatically to your terminal's depth (truecolor → 256 → 16 →
-monochrome) and glyphs fall back to ASCII on terminals without Unicode. Color is
-disabled — and the UI renders plain monochrome with ASCII glyphs — when any of
-`NO_COLOR`, `--no-color`, `TERM=dumb`, or `config.color=false` is set; `FORCE_COLOR`
-is respected. `reducedMotion` (also `ARAGON_REDUCED_MOTION`, and implied by
-`--no-color`) replaces spinners with a static glyph.
+Interactive sessions always use Unicode borders, icons and scrollbars, with
+truecolor and gradients by default. Missing terminal/locale markers, `TERM=dumb`,
+and low `FORCE_COLOR` levels do not simplify the TUI. `--no-color`, `NO_COLOR`
+(including an empty value), or `FORCE_COLOR=0/false` explicitly disable color;
+Unicode stays enabled. The opening logo adapts only to available space and
+remains visible in monochrome. `reducedMotion` (also `ARAGON_REDUCED_MOTION`,
+and implied by disabling color) replaces spinners with a static glyph.
+Headless commands retain their existing terminal detection. The terminal and
+font still need to support the characters and colors the TUI emits.
 
 ### Timeout invariant
 
@@ -2346,7 +2404,9 @@ UTF-16 编辑和 ZWJ/组合字形仍有既有限制，本次修复保证视觉�
 ## 输入、待处理队列与底部状态区
 
 Enter 在空闲时发送，运行时加入队列；启动阶段拒绝重复提交并保留草稿。
-Ctrl+J 换行；终端能发送独立序列时，Shift+Enter 与 Alt+Enter 也可换行。
+Ctrl+J 换行；应用默认推送键盘增强模式（Windows 用 win32-input-mode，其余平台用
+kitty disambiguate + modifyOtherKeys=2）并将新编码翻译回传统字节，因此 Shift+Enter
+与 Alt+Enter 在支持的终端开箱即用，Ctrl+J 始终可用。
 光标按完整字素移动，支持中文、组合字符和 emoji；输入最多占终端高度四分之一且不超过六行。
 括号粘贴保留换行，不触发发送。过滤器或粘贴支持关闭时，不保证未标记多行粘贴安全。
 过滤器不可用时 Delete 保守按 Backspace 处理，避免退格误删后文。
@@ -2355,14 +2415,14 @@ Ctrl+J 换行；终端能发送独立序列时，Shift+Enter 与 Alt+Enter 也�
 原生剪贴板工具完成后显示确认，OSC 52 只表示请求已发送，终端可能拒绝。
 Shift+拖动或 `/mouse off` 后的选区由宿主管理，应用无法关闭宿主的自动复制。
 
-Queue 面板逐条显示待处理消息，数量始终留在状态栏。只有 Core 已把消息纳入会话并发回接收凭据，
+Queue 面板逐条显示待处理消息，数量在展开状态详情中按空间显示。只有 Core 已把消息纳入会话并发回接收凭据，
 该条提示才会消失。中断时未接收消息显示暂停；`/queue` 可分页查看全部原文，Esc 关闭。
 `/clear` 不丢待处理消息；`/reset`、切换会话会明确报告取消数量；恢复保存的未发送历史不会自动重发。
 
-底部依次为输入框、固定操作提示/短反馈行、全局状态栏。状态字段按显示宽度完整保留或整项隐藏。
-上下文表示当前主 Agent 的已用/上限 tokens；`~` 表示含估算，`?` 表示上限未知。
+底部依次为固定输入框和一行核心状态；Ctrl+G 展开或收起第二行详情。五个核心字段按显示宽度缩写，始终保留。
+核心上下文显示当前主 Agent 的百分比；展开详情或 /context 可查看已用/上限 tokens；`~` 表示含估算，`?` 表示上限未知。
 费用是含子代理、快速模型及压缩的会话估算 USD，恢复会话沿用累计，缺价格按零计，零值不保证免费。
-本轮均速是本轮期间入账输出 token 增量除以耗时，可能包含上述辅助调用，并非瞬时生成速度。
+本轮均速只累计主 Agent 已报告的 output tokens，再除以本轮总耗时（含工具与等待）；排除辅助调用，并非瞬时生成速度。结束后保留耗时，速度显示 --。
 `/context` 提供统计范围和完整值。
 
 Windows Terminal：在设置 JSON **根级**添加 `"copyOnSelect": false`，把以下条目合并到已有数组：
@@ -2411,3 +2471,11 @@ VS Code 用户设置添加 `"terminal.integrated.copyOnSelection": false`，快�
 `/model`、`/fast model` 和 `config set` 修改连接会回到对应角色的自定义配置。若解除绑定会丢失专属账户或默认地址语义，命令会拒绝并引导到设置中编辑或复制。`/reload` 会一起刷新两个角色的连接和凭据，保留对话与用量。
 
 配置库仍位于 `ARAGON_HOME` 指向目录中的 `config.json`，不写入会话文件。密钥按现有机制明文保存：POSIX 创建权限为 0600，Windows 依赖用户目录 ACL，不提供加密。`config get/list` 对方案密钥使用固定掩码；损坏或未来版本的配置段整体隐藏。既有 `config edit` 备份也包含凭据。关闭通用日志脱敏、使用短密钥或分享第三方 SDK 错误日志时，仍需自行检查日志内容。
+
+### 固定输入与状态详情人工验收
+
+在 Windows Terminal/PowerShell、VS Code 集成终端以及 macOS/Linux 终端分别检查
+40x12、80x24、120x40。保留草稿，连续输出思考、正文与工具日志至少 30 秒：
+输入上下边框不得移动；拖动消息滚动条不会隐藏输入。切换 Ctrl+G 仅改变一行，
+复制、队列、通知和更新不自动展开。验证补全、Unicode 草稿和光标在切换后保留，
+弹层期间 Ctrl+G 无效，小屏恢复后草稿与状态模式保留。自动化测试不能替代这些宿主观察。

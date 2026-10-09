@@ -1,23 +1,8 @@
-/**
- * The bounded summarization call (context-auto-compaction §3.6.4).
- *
- * ASCII ONLY: `src/compaction/**` is inside the glyph scanner's scope.
- *
- * THIS MODULE DOES NOT OWN AN `AbortController`, AND THAT IS A PROHIBITION
- * RATHER THAN AN OVERSIGHT - the identical rule `fast/review-call.ts` records at
- * length, and for the identical reason: the retry layer returns SILENTLY on
- * abort, so a cancellation and a timeout arrive as byte-identical bare `Error`s
- * carrying no `errorType`. Once the controller is private to this module, the
- * caller can no longer stamp WHICH of the two happened, and every cancelled
- * summarization is misreported as a failure.
- *
- * So this module RECEIVES the signal and a timeout callback, and returns an
- * outcome. It does not create, own, or classify the abort.
- */
-
+/** Bounded summary transport; local cancellation also settles uncooperative providers. */
 import type { AssistantMessage, LLMRequest, ModelRef, TokenUsage } from '@aragon-agent/core';
 import { COMPACTION_LIMITS } from './limits.js';
 import { buildSummarySystemPrompt, buildSummaryUserMessage } from './summary-prompt.js';
+import { CompactionOperation } from './operation.js';
 
 /** The assistant text of a completion, or `''` for an answer with no text block. */
 export function assistantText(message: AssistantMessage | undefined): string {
@@ -49,6 +34,10 @@ export function accumulateUsage(total: TokenUsage, next: TokenUsage): TokenUsage
   return {
     inputTokens: total.inputTokens + next.inputTokens,
     outputTokens: total.outputTokens + next.outputTokens,
+    ...((total.cacheReadTokens !== undefined || next.cacheReadTokens !== undefined)
+      ? { cacheReadTokens: (total.cacheReadTokens ?? 0) + (next.cacheReadTokens ?? 0) } : {}),
+    ...((total.cacheWriteTokens !== undefined || next.cacheWriteTokens !== undefined)
+      ? { cacheWriteTokens: (total.cacheWriteTokens ?? 0) + (next.cacheWriteTokens ?? 0) } : {}),
   };
 }
 
@@ -58,6 +47,7 @@ export interface SummarizeRequestParams {
   digest: string;
   instructions?: string;
   hasPriorSummary: boolean;
+  validationError?: string;
   /** Created and owned by the compactor; forwarded into the provider from there. */
   signal: AbortSignal;
   now: number;
@@ -76,7 +66,8 @@ export function buildSummarizeRequest(params: SummarizeRequestParams): LLMReques
       maxChars: COMPACTION_LIMITS.summaryMaxChars,
       ...(params.instructions ? { instructions: params.instructions } : {}),
       hasPriorSummary: params.hasPriorSummary,
-    }),
+    }) + (params.validationError
+      ? `\nPrevious delta rejected: ${params.validationError.slice(0, 200)}. Correct that error.` : ''),
     messages: [buildSummaryUserMessage(params.digest, params.now)],
     maxTokens: COMPACTION_LIMITS.summaryOutputTokens,
     // PAIRED WITH `temperature: 0` ON PURPOSE: the Anthropic adapter deletes
@@ -102,6 +93,7 @@ export interface SummarizeCallParams extends SummarizeRequestParams {
    * THE CALLER ABORTS, NOT THIS MODULE. See the file header.
    */
   onTimeout(): void;
+  onUsage?(usage: TokenUsage): void;
 }
 
 export type SummarizeOutcome =
@@ -112,13 +104,23 @@ export type SummarizeOutcome =
 export async function runSummarizeCall(
   params: SummarizeCallParams,
 ): Promise<SummarizeOutcome> {
-  const timer = setTimeout(params.onTimeout, COMPACTION_LIMITS.callTimeoutMs);
+  const operation = new CompactionOperation(0, params.signal, COMPACTION_LIMITS.callTimeoutMs);
+  let charged = false;
   try {
-    const message = await params.complete(params.ref.providerId, buildSummarizeRequest(params));
+    const message = await operation.run(async () => {
+      const result = await params.complete(params.ref.providerId,
+        buildSummarizeRequest({ ...params, signal: operation.signal }));
+      if (result.usage && !charged) {
+        charged = true;
+        params.onUsage?.(result.usage);
+      }
+      return result;
+    }, COMPACTION_LIMITS.callTimeoutMs);
     return { ok: true, text: assistantText(message), usage: usageOf(message) };
   } catch (error) {
+    if (errorText(error) === 'timeout') params.onTimeout();
     return { ok: false, error };
   } finally {
-    clearTimeout(timer);
+    operation.settle();
   }
 }

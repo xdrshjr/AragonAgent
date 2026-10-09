@@ -10,6 +10,7 @@
 import type { ModelInfo } from './types.js';
 import type { ProviderRegistry } from './providers/index.js';
 import { DEFAULT_MAX_OUTPUT_TOKENS, learnModelCeiling } from './output-limits.js';
+import { catalogContextWindow, catalogModelId, type ContextWindowInfo } from './context-window.js';
 
 // ---------------------------------------------------------------------------
 // Discovery cache entry
@@ -18,6 +19,12 @@ import { DEFAULT_MAX_OUTPUT_TOKENS, learnModelCeiling } from './output-limits.js
 interface CacheEntry {
   models: ModelInfo[];
   timestamp: number;
+}
+
+interface PendingDiscovery {
+  promise: Promise<ModelInfo[]>;
+  signal?: AbortSignal;
+  token: symbol;
 }
 
 /** Cache TTL: 5 minutes. */
@@ -33,6 +40,7 @@ export class ModelRegistry {
 
   /** API-discovered models cache keyed by `${providerId}:${baseUrl}`. */
   private readonly discoveryCache = new Map<string, CacheEntry>();
+  private readonly pendingDiscovery = new Map<string, PendingDiscovery>();
 
   /** Optional reference to the provider registry for API discovery. */
   private providerRegistry: ProviderRegistry | undefined;
@@ -62,6 +70,32 @@ export class ModelRegistry {
     return models?.find((m) => m.id === modelId);
   }
 
+  /** Resolve context separately from price, scoped to the configured endpoint. */
+  getContextWindow(providerId: string, modelId: string, baseUrl?: string): ContextWindowInfo {
+    const discovered = this.discoveryCache.get(this.cacheKey(providerId, baseUrl))?.models
+      .find((m) => m.id.replace(/^models\//, '') === modelId.replace(/^models\//, ''));
+    if (discovered?.contextWindowSource === 'api' &&
+        Number.isSafeInteger(discovered.contextWindow) && discovered.contextWindow > 0) {
+      return { contextWindow: discovered.contextWindow, contextWindowSource: 'api' };
+    }
+    const id = catalogModelId(modelId);
+    const builtin = this.getModel(providerId, modelId) ?? this.getModels(providerId)
+      .find((m) => catalogModelId(m.id) === id) ?? [...this.builtinModels.values()]
+      .flat().find((m) => catalogModelId(m.id) === id);
+    const builtinWindow = builtin?.contextWindowSource !== 'fallback' &&
+      Number.isSafeInteger(builtin?.contextWindow) && (builtin?.contextWindow ?? 0) > 0
+      ? builtin?.contextWindow : undefined;
+    const window = builtinWindow ?? catalogContextWindow(id);
+    return window !== undefined
+      ? { contextWindow: window, contextWindowSource: 'catalog' }
+      : { contextWindow: 128_000, contextWindowSource: 'fallback' };
+  }
+
+  private cacheKey(providerId: string, baseUrl?: string): string {
+    const url = baseUrl || this.providerRegistry?.get(providerId)?.defaultBaseUrl || '';
+    return `${providerId}:${url.replace(/\/+$/, '')}`;
+  }
+
   /**
    * Discover models from the provider's API.  Results are cached for 5 min.
    *
@@ -71,55 +105,60 @@ export class ModelRegistry {
     providerId: string,
     apiKey: string,
     baseUrl?: string,
+    signal?: AbortSignal,
   ): Promise<ModelInfo[]> {
-    const cacheKey = `${providerId}:${baseUrl || ''}`;
+    if (signal?.aborted) return [];
+    const cacheKey = this.cacheKey(providerId, baseUrl);
     const cached = this.discoveryCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
       return cached.models;
     }
+    const pending = this.pendingDiscovery.get(cacheKey);
+    if (pending && !pending.signal?.aborted) return pending.promise;
 
     if (!this.providerRegistry) return [];
 
     const provider = this.providerRegistry.get(providerId);
     if (!provider) return [];
 
-    try {
-      const models = await provider.listModels(apiKey, baseUrl);
-      // Discovery outranks the static table (§4.1.2). The adapters that can
-      // report a REAL ceiling already learn it themselves; this feeds anything
-      // reached through the registry, including third-party providers.
-      //
-      // A ceiling that is EXACTLY the product default is skipped, because that
-      // is precisely what `listModels` returns when it has nothing to report —
-      // neither the Anthropic nor the OpenAI models endpoint carries an output
-      // ceiling, so both fall back to it (see the notes in their adapters).
-      // Learning it here at `'discovery'` rank would launder that placeholder
-      // into an assertion that outranks the static table, and would collapse the
-      // distinction `staticCeilingFor`'s `undefined` return exists to keep:
-      // "unknown" would become "capped at 64000", silently clamping an explicit
-      // larger request the user is entitled to make against a proxy. Skipping it
-      // costs nothing — AUTO tops out at the default anyway, and a genuinely
-      // over-large request is repaired by `output-limit-recovery.ts`.
-      for (const model of models) {
-        if (model.maxOutputTokens === DEFAULT_MAX_OUTPUT_TOKENS) continue;
-        learnModelCeiling(providerId, model.id, model.maxOutputTokens, 'discovery');
+    const token = Symbol();
+    const work: Promise<ModelInfo[]> = (async () => {
+      try {
+        const models = await provider.listModels(apiKey, baseUrl, signal);
+        if (signal?.aborted || this.pendingDiscovery.get(cacheKey)?.token !== token) return [];
+        // An output placeholder must not outrank the static ceiling table.
+        // Context provenance is resolved separately by getContextWindow().
+        for (const model of models) {
+          if (model.maxOutputTokens === DEFAULT_MAX_OUTPUT_TOKENS) continue;
+          learnModelCeiling(providerId, model.id, model.maxOutputTokens, 'discovery');
+        }
+        this.discoveryCache.set(cacheKey, { models, timestamp: Date.now() });
+        return models;
+      } catch {
+        return [];
       }
-      this.discoveryCache.set(cacheKey, { models, timestamp: Date.now() });
-      return models;
-    } catch {
-      return [];
+    })();
+    this.pendingDiscovery.set(cacheKey, { promise: work, signal, token });
+    try {
+      return await work;
+    } finally {
+      if (this.pendingDiscovery.get(cacheKey)?.promise === work) this.pendingDiscovery.delete(cacheKey);
     }
   }
 
   /** Invalidate the discovery cache for a provider (or all). */
   clearCache(providerId?: string): void {
     if (providerId) {
+      for (const key of this.pendingDiscovery.keys()) {
+        if (key.startsWith(`${providerId}:`)) this.pendingDiscovery.delete(key);
+      }
       for (const key of this.discoveryCache.keys()) {
         if (key.startsWith(`${providerId}:`)) {
           this.discoveryCache.delete(key);
         }
       }
     } else {
+      this.pendingDiscovery.clear();
       this.discoveryCache.clear();
     }
   }
@@ -139,6 +178,7 @@ export class ModelRegistry {
       name: modelId,
       provider: providerId,
       contextWindow: 128_000,
+      contextWindowSource: 'fallback',
       // The PRODUCT DEFAULT, not a private guess. An unknown model that claims a
       // ceiling nothing else agrees with is how one part of the system clamps
       // output the rest of it never asked for.
@@ -205,7 +245,8 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
     id: 'claude-opus-4-6',
     name: 'Claude Opus 4.6',
     provider: 'anthropic',
-    contextWindow: 200_000,
+    // https://platform.claude.com/docs/en/models/opus-4-6/overview
+    contextWindow: 1_000_000,
     maxOutputTokens: 64_000,
     supportsThinking: true,
     supportsTools: true,

@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "provider": "anthropic",
+  "model": "glm-5.1",
+  "baseUrl": "https://open.bigmodel.cn/api/anthropic",
+  "thinkingLevel": "medium",
+  "showThinking": false,
+  "liveToolOutput": true,
+  "maxTokens": null,
+  "contextWindow": null,
+  "theme": "auto",
+  "reducedMotion": false,
+  "exitTranscript": true,
+  "transcriptWindow": 300,
+  "transcriptRetain": 1000,
+  "renderGovernor": true,
+  "maxRenderIntervalMs": 320,
+  "diffRender": true,
+  "syncOutput": true,
+  "confirmTools": false,
+  "toolTimeoutMs": 180000,
+  "idleTimeoutMs": 210000,
+  "apiKeys": {
+    "anthropic": "d9b97a51dba24fdca60b88a46bd1d479.aUtClA9VTTZE6DVO"
+  },
+  "historyEnabled": true,
+  "density": "comfortable",
+  "hints": true,
+  "mouse": true,
+  "mouseSelect": true,
+  "paste": true,
+  "scrollResumeMs": 5000,
+  "planModeDefault": false,
+  "planModeMaxAskRounds": 4,
+  "planModeHumanTimeoutMs": 1800000,
+  "skills": {
+    "enabled": true,
+    "disabled": [],
+    "requireApproval": true,
+    "allowedHosts": [
+      "github.com",
+      "raw.githubusercontent.com",
+      "codeload.github.com",
+      "gitlab.com",
+      "objects.githubusercontent.com"
+    ],
+    "projectDirs": [
+      ".argon/skills",
+      ".claude/skills"
+    ],
+    "trustedProjectDirs": [],
+    "catalogMaxBytes": 6000,
+    "bodyMaxBytes": 30000,
+    "integrity": "warn",
+    "usageTracking": true,
+    "toolPolicy": "enforce"
+  },
+  "log": {
+    "level": "info",
+    "toFile": true,
+    "dir": "",
+    "maxFileBytes": 5242880,
+    "maxFiles": 10,
+    "redactSecrets": true,
+    "previewChars": 512
+  },
+  "team": {
+    "enabled": true,
+    "maxSubagents": 5,
+    "maxConcurrent": 3,
+    "subagentTimeoutMs": 300000,
+    "dispatchTimeoutMs": 900000,
+    "maxTurnsPerSubagent": 24
+  },
+  "todo": {
+    "enabled": true,
+    "panel": true,
+    "followThrough": "notify"
+  },
+  "retry": {
+    "enabled": true,
+    "maxRetries": 10,
+    "initialDelayMs": 1000,
+    "maxDelayMs": 30000,
+    "multiplier": 2,
+    "jitter": true,
+    "respectRetryAfter": true,
+    "maxElapsedMs": 240000,
+    "onPartialStream": true
+  },
+  "fast": {
+    "enabled": false,
+    "provider": "",
+    "model": "",
+    "baseUrl": "",
+    "thinkingLevel": "off",
+    "delegate": true,
+    "review": true,
+    "reviewEveryTurns": 5,
+    "reviewContextTurns": 3,
+    "reviewMaxChars": 280,
+    "reviewMaxPerSession": 40
+  },
+  "update": {
+    "mode": "auto",
+    "checkIntervalMs": 14400000,
+    "registry": "",
+    "distTag": "latest"
+  },
+  "compaction": {
+    "enabled": true,
+    "threshold": 0.9,
+    "warnThreshold": 0.75,
+    "keepRecentTurns": 4,
+    "useFastTier": true,
+    "onFailure": "truncate",
+    "subagents": true,
+    "archive": true
+  },
+  "bash": {
+    "background": true,
+    "autoBackground": true,
+    "startupSettleMs": 4000,
+    "readyTimeoutMs": 60000
+  }
+}

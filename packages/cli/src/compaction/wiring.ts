@@ -1,3 +1,5 @@
+import type { CompactionIdentity } from './memory-identity.js';
+import { shouldCompactAt } from './pressure.js';
 /**
  * `CompactionWiring` — the controller-side glue for context compaction
  * (context-auto-compaction §3.2.1 / §5.2).
@@ -203,6 +205,7 @@ export class CompactionWiring {
    * key, not an identity.
    */
   private readonly runId = mintRunId();
+  private overflowNotified = false;
 
   constructor(private readonly deps: CompactionWiringDeps) {
     this.enabled = deps.getConfig().compaction.enabled;
@@ -212,7 +215,10 @@ export class CompactionWiring {
         getMessages: deps.getMessages,
         getSystemPrompt: deps.getSystemPrompt,
         getModelInfo: () => deps.getModelInfoFor(this.mainRef()),
-        isWindowKnown: () => deps.isPricedModel(this.mainRef()),
+        isWindowKnown: () => {
+          const source = deps.getModelInfoFor(this.mainRef()).contextWindowSource;
+          return source === undefined ? deps.isPricedModel(this.mainRef()) : source !== 'fallback';
+        },
         getWindowOverride: () => deps.getConfig().contextWindow,
       });
     this.compactor = new Compactor({
@@ -242,7 +248,12 @@ export class CompactionWiring {
     // setter and `contextManager` is never reassigned; the LIVE switch is inside
     // `shouldCompact`, not in the identity of this object.
     this.port = {
-      shouldCompact: (probe) => this.enabled && this.compactor.shouldCompact(probe),
+      shouldCompact: (probe) => {
+        if (!this.enabled) return false;
+        const allowed = this.compactor.shouldCompact(probe);
+        if (probe.trigger === 'overflow' && !allowed) this.notifyOverflow();
+        return allowed;
+      },
       compact: (ctx) => this.compactor.compact(ctx),
     };
   }
@@ -270,6 +281,7 @@ export class CompactionWiring {
 
   dispose(): void {
     this.compactor.abort();
+    this.compactor.clearPendingManual();
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.listeners.clear();
@@ -285,6 +297,7 @@ export class CompactionWiring {
 
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
+    if (!enabled) this.compactor.abort();
     // Turning it back on is the user overriding guard 4, which is the only way
     // out of a self-disable short of a restart.
     if (enabled) this.compactor.clearSelfDisable();
@@ -295,6 +308,7 @@ export class CompactionWiring {
   onConfigChanged(enabled?: boolean): void {
     if (enabled !== undefined && enabled !== this.enabled) {
       this.enabled = enabled;
+      if (!enabled) this.compactor.abort();
       if (enabled) this.compactor.clearSelfDisable();
     }
     this.emit({ type: 'snapshot', snapshot: this.snapshot() });
@@ -325,8 +339,20 @@ export class CompactionWiring {
    * for such a session. A deep reset is idempotent, so both firing costs
    * nothing; deleting the controller's copy "to de-duplicate" reintroduces P0-2.
    */
-  onHistoryReplaced(): void {
-    this.meter.onHistoryReplaced();
+  onHistoryReplaced(identity?: CompactionIdentity): void {
+    this.compactor.onHistoryReplaced(identity);
+  }
+
+  getIdentity(): CompactionIdentity | undefined { return this.compactor.getIdentity(); }
+
+  private notifyOverflow(): void {
+    const p = this.meter.current();
+    if (this.overflowNotified || !Number.isFinite(p.occupied) || p.occupied < 0 ||
+        !Number.isFinite(p.contextWindow) || p.contextWindow <= 0 ||
+        shouldCompactAt(p, this.deps.getConfig().compaction.threshold)) return;
+    this.overflowNotified = true;
+    this.deps.notify('warn', 'Context limit reached before the configured compaction threshold. ' +
+      'Use /compact or correct contextWindow.');
   }
 
 
@@ -352,7 +378,7 @@ export class CompactionWiring {
         // SINK (AC-H12). It is real money on the summarizer's price table, and a
         // background repair inside a background worker is exactly the spend a
         // user would otherwise never see.
-        onUsage: (usage) => this.emit({ type: 'usage', usage }),
+        onUsage: (usage, billing) => this.emit({ type: 'usage', usage, ...billing }),
       });
   }
 
@@ -372,27 +398,7 @@ export class CompactionWiring {
     this.compactor.clearPendingManual();
   }
 
-  /**
-   * The IDLE `/compact` path (§4.4 / D-25).
-   *
-   * IT VALIDATES BEFORE IT SPLICES, AND THAT IS NOT OPTIONAL (P1-7). When the
-   * agent is idle there is no loop, so §3.3 step 5 does not run — and the only
-   * way to replace the history is `Agent.replaceMessages`, which validates
-   * nothing. D-4 declares that gate unbypassable and R-2 calls an invalid splice
-   * the worst possible outcome, so this path mirrors the engine's steps 3-5
-   * exactly, INCLUDING the failure vocabulary: the card, the log and
-   * `/compact status` cannot tell the two paths apart.
-   *
-   * No watchdog handling is needed — `runLoopWithLifecycle`'s `finally` already
-   * called `watchdog.stop()`, so nothing is armed while idle.
-   *
-   * ITS CALLER MUST ADOPT `messages` — THE ARCHIVE IS ALREADY WRITTEN BY THE
-   * TIME THIS RETURNS (hardening RV-7). This path settles `applied: true` here,
-   * one statement before the caller splices, so the "never archive a live
-   * history" rule holds only because that caller applies unconditionally. That is
-   * a fact about one call site rather than an invariant, which is why it is
-   * written down where it can be checked.
-   */
+  /** Prepare, validate and synchronously adopt before publishing a successful verdict. */
   async compactNow(args: {
     messages: readonly Message[];
     systemPrompt: string;
@@ -400,7 +406,12 @@ export class CompactionWiring {
     signal: AbortSignal;
     lastUsage?: TokenUsage;
     instructions?: string;
+    adopt?: (messages: Message[]) => void;
+    isCurrent?: () => boolean;
   }): Promise<{ ok: true; messages: Message[] } | { ok: false; reason: string }> {
+    if (!this.enabled) return { ok: false, reason: 'disabled' };
+    if (this.compactor.sessionTotals().inFlight) return { ok: false, reason: 'already_running' };
+    this.compactor.onRunStart();
     this.compactor.queueManual(args.instructions);
     // BOTH SIDES FROM CORE'S OWN ESTIMATOR, exactly as the in-loop path gets them
     // from `compaction_end` (§5.1). There is no engine event here to supply them,
@@ -440,6 +451,17 @@ export class CompactionWiring {
       return { ok: false, reason };
     }
 
+    if (args.signal.aborted || args.isCurrent?.() === false || !args.adopt) {
+      const reason = args.signal.aborted ? 'aborted' : 'stale_history';
+      this.settlePending({ applied: false, reason, tokensBefore, tokensAfter: tokensBefore });
+      return { ok: false, reason };
+    }
+    try { args.adopt(outcome.messages); }
+    catch (error) {
+      const reason = `adoption_failed: ${error instanceof Error ? error.message : String(error)}`;
+      this.settlePending({ applied: false, reason, tokensBefore, tokensAfter: tokensBefore });
+      return { ok: false, reason };
+    }
     this.settlePending({
       applied: true,
       tokensBefore,
@@ -488,6 +510,7 @@ export class CompactionWiring {
       ...(totals.declined > 0 ? { declined: totals.declined } : {}),
       tokensReclaimed: totals.tokensReclaimed,
       usage: totals.usage,
+      costUsd: totals.costUsd,
       pricingUnknown: totals.pricingUnknown,
       inFlight: totals.inFlight,
       selfDisabled: totals.selfDisabled,
@@ -567,9 +590,12 @@ export class CompactionWiring {
   private onAgentEvent(event: AgentEvent): void {
     if (event.type === 'agent_start') {
       this.compactor.onRunStart();
+      this.overflowNotified = false;
       return;
     }
+    if (event.type === 'agent_end') this.compactor.onRunEnd();
     if (event.type === 'turn_end') {
+      this.meter.onTurnEnd(event.usage);
       // THE MEASUREMENT IS THE METER'S (context-usage-gauge-accuracy §3.3.4). It
       // subscribes to `turn_end` on the same stream and recomputes the offset,
       // the prefix length and the pressure there; the two calls that used to
@@ -614,6 +640,7 @@ export class CompactionWiring {
     // engine cannot report `true` without a `replace` outcome, which means the
     // compactor's own record already exists — so its zeroed counts are never
     // rendered.
+    this.compactor.settleOperation(verdict);
     const record = this.pending ?? this.skeletonRecord();
     this.pending = null;
     this.open = null;
@@ -647,7 +674,6 @@ export class CompactionWiring {
       mode: verdict.applied ? record.mode : 'none',
     };
     if (verdict.applied) {
-      this.compactor.recordApplied(settled.tokensBefore, settled.tokensAfter);
       // SITE 1 OF THE FOUR INVALIDATION SITES (hardening §3.2.3), and THE LOAD-
       // BEARING LINE OF THE P0-1 FIX (context-usage-gauge-accuracy I-9).
       //
@@ -679,9 +705,8 @@ export class CompactionWiring {
    * archive a history that is still live" - and the two paths reach that verdict
    * at different moments relative to the splice. In loop, the ENGINE decides
    * after `validateHistory`, so this runs AFTER adoption. On the manual path the
-   * WIRING decides and `compactNow`'s caller adopts on the next statement, so
-   * this runs BEFORE adoption; `compactNow`'s doc comment carries that obligation
-   * for its one caller (RV-7).
+   * WIRING invokes the host adoption callback before settling, so both paths
+   * archive only histories that have actually been replaced.
    *
    * BEST-EFFORT AND SYNCHRONOUS-BUT-GUARDED. `writeArchive` never throws and
    * logs its own failure; a failed archive never affects the compaction, and it

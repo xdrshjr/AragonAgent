@@ -17,7 +17,7 @@ import process from 'node:process';
 import '../runtime/insecure-tls-warning.cjs';
 
 // Must precede every other dependency that imports Ink: CI detection is cached.
-import { render } from './ui/ink-runtime.js';
+import { renderTui as render } from './ui/ink-runtime.js';
 import React from 'react';
 import { Command } from 'commander';
 import { ModelProfileConfigError } from './config/model-profile-store.js';
@@ -101,6 +101,10 @@ import { createFrameDiffer } from './ui/frame-differ.js';
 import { wrapStdoutForFrames } from './ui/stdout-frame-writer.js';
 import { setFrameStatsProvider } from './commands/perf.js';
 import { tryCreateStdinFilter } from './input/stdin-filter.js';
+import {
+  enableKeyboardEnhancement,
+  NOOP_KEYBOARD_ENHANCEMENT,
+} from './input/keyboard-enhancement.js';
 import type { PasteBridge } from './input/limits.js';
 import { createScrollbarBridge } from './ui/scrollbar-controller.js';
 import { createPointerRouter } from './input/pointer-router.js';
@@ -110,7 +114,7 @@ import { supportsWindowsVtInput } from './ui/win-vt-input.js';
 import { forceWindowsVtInput } from './ui/win-vt-force.js';
 import { readExitSnapshot } from './ui/exit-snapshot.js';
 import { renderTranscriptText } from './ui/transcript-text.js';
-import { detectCapabilities } from './ui/capabilities.js';
+import { resolveTuiCapabilities } from './ui/capabilities.js';
 import { pickGlyphs } from './ui/glyphs.js';
 import { getTheme } from './ui/theme.js';
 import {
@@ -182,6 +186,8 @@ interface RawOpts {
   mouse?: boolean;
   mouseSelect?: boolean;
   paste?: boolean;
+  /** Mirror of the CliFlags pair: --keyboard-enhancement / --no-keyboard-enhancement. */
+  keyboardEnhancement?: boolean;
   skills?: boolean;
   skill?: string[];
   skillsYes?: boolean;
@@ -251,6 +257,10 @@ function toFlags(opts: RawOpts): CliFlags {
     // `CliFlags`, AND a line here; `config.test.ts` is the regression pin that
     // exists because `--no-mouse` shipped inert once already.
     paste: opts.paste,
+    // Site three of three for `--keyboard-enhancement` /
+    // `--no-keyboard-enhancement`, for the reason `paste` one line up
+    // records: the key is persisted and defaults to true.
+    keyboardEnhancement: opts.keyboardEnhancement,
     skills: opts.skills,
     skill: opts.skill,
     skillsYes: opts.skillsYes,
@@ -374,7 +384,7 @@ function makeController(
   confirmBridge: ConfirmBridge;
   humanInputBridge: HumanInputBridge;
 } {
-  const config = loadConfig(flags);
+  const config = loadConfig(flags, { interactive: opts.interactive });
   // The authoritative log level lands here (§4.4.5). `installLogging()` only
   // resolved a bootstrap level — it ran before commander and before `.env` were
   // readable — and without this hand-off the fully resolved one never applies.
@@ -439,6 +449,7 @@ function makeExecController(
   deps: { permission?: ToolPermission; appendSystemPrompt?: string },
 ): AgentController {
   const { controller } = makeController(flags, { interactive: false, ...deps });
+  void controller.refreshModelMetadata();
   const logger = getLogger();
   logger.info('cli', 'run_exec', {});
   logger.onFailure((reason) => process.stderr.write(`[log] ${reason}\n`));
@@ -550,9 +561,14 @@ function runInteractive(
     return;
   }
   const { controller, confirmBridge, humanInputBridge } = makeController(flags);
+  void controller.refreshModelMetadata();
   const config = controller.getConfig();
+  const caps = resolveTuiCapabilities({}, config.color);
   const logger = getLogger();
-  logger.info('cli', 'run_interactive', { mode: 'fullscreen', provider: config.provider, model: config.model });
+  logger.info('cli', 'run_interactive', {
+    mode: 'fullscreen', provider: config.provider, model: config.model,
+    unicode: caps.unicode, colorLevel: caps.colorLevel,
+  });
   attachAgentEvents(logger, controller);
   // The team stream is CLI-local (D-10), so `attachAgentEvents` cannot see it.
   // Without this a dispatch leaves NO trace in the log file at all — the wrong
@@ -625,11 +641,26 @@ function runInteractive(
   // advising the user about a mode they just disabled.
   const wantPaste = config.paste && !!process.stdin.isTTY;
   const pasteBridge: PasteBridge = { notify: null };
+  // --- Keyboard enhancement (Shift+Enter newline). --------------------------
+  //
+  // THE THIRD STREAM GATE, AND THE SAME DISCIPLINE AS THE OTHER TWO. On
+  // win32 the enhancement rides the SAME `vtInputSupported` measurement
+  // the mouse does: Node < 22.17 / < 24.2 never turns on
+  // `ENABLE_VIRTUAL_TERMINAL_INPUT`, the win32-input-mode records cannot
+  // reach the process, and pushing `?9001h` there would be a mode nobody
+  // can observe -- the exact gap the mouse gate closes for `?1000h`.
+  // Elsewhere the push is kitty disambiguate + modifyOtherKeys, which a
+  // terminal that implements neither ignores (verified byte-identical on
+  // conhost), so no capability gate is possible or needed there.
+  const wantEnhancedKeys =
+    config.keyboardEnhancement &&
+    !!process.stdin.isTTY &&
+    (process.platform !== 'win32' || vtInputSupported);
   const filter =
     process.stdin.isTTY
       ? tryCreateStdinFilter(
           process.stdin,
-          { mouse: wantMouse, paste: wantPaste },
+          { mouse: wantMouse, paste: wantPaste, enhancedKeys: wantEnhancedKeys },
           (reason: string) => logger.warn('cli', 'stdin_filter_failed', { reason }),
           pasteBridge,
         )
@@ -645,6 +676,8 @@ function runInteractive(
   const mouseOn = wantMouse && filter !== null;
   /** Same discipline for DEC 2004: already decided here, never re-derived. */
   const pasteOn = wantPaste && filter !== null;
+  /** Same discipline: the translation runs only when a filter fronts Ink. */
+  const enhancedKeysOn = wantEnhancedKeys && filter !== null;
   const disposeStdinFilter = (): void => filter?.dispose();
 
   // --- Drag-select (tui-selection-and-scroll-follow §4.4). ------------------
@@ -726,7 +759,7 @@ function runInteractive(
       process.stdout,
       renderTranscriptText(snapshot.entries, {
         // Same terminal the TUI just left, so the same glyph tier applies.
-        glyphs: pickGlyphs(detectCapabilities(process.env, process.stdout)),
+        glyphs: pickGlyphs(caps),
         usageTotal: snapshot.usageTotal,
         provider: snapshot.provider,
         model: snapshot.model,
@@ -738,6 +771,17 @@ function runInteractive(
       }),
     );
   };
+
+  // AFTER the filter, BEFORE the render: the enhanced encodings this mode
+  // turns on must never reach Ink un-translated, and the ordering invariant
+  // `stdin-filter.ts` states for `?1000h` / `?2004h` covers `?9001h`
+  // and the CSI-u pushes identically.
+  const keyboardEnhancement = enhancedKeysOn
+    ? enableKeyboardEnhancement(process.stdout, {
+        platform: process.platform,
+        vtInputSupported,
+      })
+    : NOOP_KEYBOARD_ENHANCEMENT;
 
   {
     // `mouse` here means "a mouse-parsing filter is installed", NOT "the user
@@ -755,7 +799,14 @@ function runInteractive(
       motion: mouseOn,
       bracketedPaste: pasteOn,
     });
-    const restore = (): void => screen?.restore();
+    // Input-encoding modes unwind FIRST, for the same reason the mouse
+    // reporting does inside `screen.restore()`: the terminal must stop
+    // sending enhanced encodings before anything else tears the reader
+    // down, or a keystroke taken in that instant survives into the shell.
+    const restore = (): void => {
+      keyboardEnhancement.restore();
+      screen?.restore();
+    };
 
     // Four idempotent restore paths (§4.4). The signal hook is NOT redundant:
     //   - `waitUntilExit().then()` is a microtask and may never be reached when
@@ -818,8 +869,8 @@ function runInteractive(
       // the SAME `copyText` door and the SAME bridge `onCopied` toast
       // funnel -- the controller keeps only the selection state machine.
       // Read at PAINT time, not captured: `/theme` rebuilds the theme mid-session.
-      theme: () => getTheme(config.theme, detectCapabilities(process.env, process.stdout)),
-      caps: detectCapabilities(process.env, process.stdout),
+      theme: () => getTheme(config.theme, caps),
+      caps,
       cols: () => process.stdout.columns ?? 80,
       // The STATIC half of the gate. The dynamic half — "no overlay is open" —
       // belongs to `App`, which owns that state and calls `setEnabled`.
@@ -916,6 +967,7 @@ function runInteractive(
       stdin: filter?.stdin ?? process.stdin,
       stdout: frameObserver.stdout,
     },
+    caps,
   );
 
   } catch (error) {
@@ -923,8 +975,9 @@ function runInteractive(
     throw error;
   }
 
-  // H1's primary disarm, and this is the earliest moment at which "this build
-  // STARTS" is proven: the module graph loaded, config resolved, Ink mounted
+  // H1's primary disarm. Let mount-time exit promises settle first: Ink may
+  // return from render after its error boundary has already unmounted the app.
+  // A live app on the next turn has loaded, resolved config, and mounted
   // (cli-auto-update-hardening section 5.1.4). It is what makes a long session
   // that is later `SIGKILL`ed - terminal window closed, machine slept badly, OOM
   // killer - still count as healthy.
@@ -934,7 +987,7 @@ function runInteractive(
   // never armed it this is one read and one string compare. Gating it would mean
   // a user who switches `mode` to `off` between the install and the next launch
   // leaves the guard armed with nothing able to disarm it.
-  markBootHealthy(VERSION);
+  setImmediate(() => { if (!interactiveClosed) markBootHealthy(VERSION); });
 
   if (updateEligible) {
     // DYNAMIC, and fire-and-forget AFTER `render()` (D-25). Dynamic because a
@@ -978,6 +1031,9 @@ function runInteractive(
     .waitUntilExit()
     .then(() => {
       interactiveClosed = true;
+      // Also cover a successful immediate exit when launched via dist/cli.js,
+      // which bypasses the launcher's code-zero boot-guard backstop.
+      markBootHealthy(VERSION);
       screen?.restore();
       // BEFORE `disposeStdinFilter()`, which clears the listener set it subscribed to,
       // and after `restore()` for the reason that call records: the terminal must
@@ -1014,6 +1070,7 @@ async function runOneShot(flags: CliFlags, prompt: string, quiet: boolean): Prom
   // install. The gate must know that up front rather than discovering a null
   // handler and defaulting to "yes" (§7.4 / AC-13).
   const { controller } = makeController(flags, { interactive: false });
+  void controller.refreshModelMetadata();
   const logger = getLogger();
   logger.info('cli', 'run_oneshot', { quiet });
   // Headless has no frame, so a logging failure can safely reach stderr — the
@@ -1035,10 +1092,15 @@ async function runOneShot(flags: CliFlags, prompt: string, quiet: boolean): Prom
   // `followThrough` is read off the REAL controller here rather than through
   // `HeadlessController`, which is deliberately the minimal surface a test can
   // satisfy with an object literal (todo-plan-followthrough §3.6).
-  const code = await runHeadless(controller, prompt, {
-    quiet,
-    followThrough: controller.getTodoConfig().followThrough,
-  });
+  let code: number;
+  try {
+    code = await runHeadless(controller, prompt, {
+      quiet,
+      followThrough: controller.getTodoConfig().followThrough,
+    });
+  } finally {
+    controller.dispose();
+  }
   // Flushed HERE and not inside `runHeadless`: that module is deliberately
   // injectable (its own controller interface, its own stdout/stderr) and has an
   // early `return 2`, so a singleton dependency in there would be both a new
@@ -1140,6 +1202,9 @@ const CONFIG_SET_KEYS = new Set([
   // `mouse` records: a key present here but absent there falls through every
   // case, writes nothing, and still prints `Set paste = false`.
   'paste',
+  // Listed here AND cased in the switch below, for the reason the note above
+  // `paste` records.
+  'keyboardEnhancement',
   'scrollResumeMs',
   'historyEnabled',
   'planModeDefault',
@@ -1397,6 +1462,9 @@ function runConfigSetValue(key: string, value: string): void {
       break;
     case 'paste':
       patch.paste = value === 'true' || value === '1';
+      break;
+    case 'keyboardEnhancement':
+      patch.keyboardEnhancement = value === 'true' || value === '1';
       break;
     // Clamped rather than rejected, for the same reason `planModeDefault` below
     // records: hardening only the READ path leaves a bad value on disk that
@@ -1679,6 +1747,15 @@ function buildProgram(): Command {
     // silence, and silently overriding a stored `false` on every run.
     .option('--paste', 'Collapse large pastes into a placeholder (the default)')
     .option('--no-paste', 'Treat pasted bytes as keystrokes (pre-0.6.3 behavior)')
+    // Same persisted-defaults-true trap as `--paste` above.
+    .option(
+      '--keyboard-enhancement',
+      'Make Shift+Enter insert a newline (the default where the terminal can)',
+    )
+    .option(
+      '--no-keyboard-enhancement',
+      'Never push keyboard-enhancement modes (Shift+Enter then needs a terminal binding)',
+    )
     .option('--no-exit-transcript', 'Do not replay the session summary after exiting')
     .option('--plan', 'Start the session in PLAN mode (read-only research + review)')
     .option('--no-plan', 'Start the session in BUILD mode (overrides planModeDefault)')

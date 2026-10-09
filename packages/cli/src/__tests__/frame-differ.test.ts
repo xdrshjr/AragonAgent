@@ -109,6 +109,31 @@ describe('frame differ — session start (P1-1)', () => {
     expect(differ.stats().framesFull).toBe(1);
     expect(differ.stats().framesDiffed).toBe(0);
   });
+
+  it('does not let a clearTerminal tall-frame write spend the seed exemption (A+)', () => {
+    const notices: string[] = [];
+    const differ = createFrameDiffer({
+      sync: false,
+      rows: () => ROWS,
+      onFirstFallback: () => notices.push('raised'),
+    });
+    // A shrink inside the mount window makes the session's very FIRST chunk
+    // Ink's tall-frame write (`ink.js:121`): clearTerminal + frame — no erase
+    // prefix, no trailing newline. Uncounted, whatever else happens.
+    expect(differ.transform(`${CSI}2J${CSI}3J${CSI}Htall frame`)).toBeNull();
+    expect(differ.stats().fallbacks).toBe(0);
+    // That write bypassed `this.log`, so log-update's own `previousLineCount`
+    // is still 0 and its first frame STILL carries no erase prefix: it is the
+    // genuine seed write (P1-1) and must receive the exemption the tall-frame
+    // chunk did not spend — not a counted fallback with its notice.
+    expect(differ.transform(frameBody(rowsOf(HEIGHT)))).toBeNull();
+    expect(differ.stats().fallbacks).toBe(0);
+    expect(notices).toHaveLength(0);
+    // The exemption is spent now: a second prefix-less write is foreign again.
+    expect(differ.transform('foreign\n')).toBeNull();
+    expect(differ.stats().fallbacks).toBe(1);
+    expect(notices).toHaveLength(1);
+  });
 });
 
 describe('frame differ — one changed line', () => {

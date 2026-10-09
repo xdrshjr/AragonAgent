@@ -1,93 +1,76 @@
 import stringWidth from 'string-width';
 import { interactionCopy as copy } from './interaction-copy.js';
 import { cleanStatusText } from './layout/status-layout.js';
+import { graphemes } from './editor-navigation.js';
+import type { StatusFeedback, EscapeAction } from './status-feedback.js';
 
 export interface ActionHintInput {
   cols: number; interactionPhase: 'idle' | 'starting' | 'running';
-  interruptHint?: string; selectionPending?: boolean; copyInFlight?: boolean;
-  copyCleanupPending?: boolean; completion?: 'none' | 'slash' | 'file';
-  services?: number; overlay?: string | null; hintsEnabled?: boolean;
-  toast?: string; updateAvailable?: boolean; exitHint?: string;
-  modeToggleKey?: string;
+  interruptHint?: string; interruptPhase?: 'ready' | 'armed' | 'stopping';
+  escapeAction?: EscapeAction; feedback?: StatusFeedback;
+  selectionPending?: boolean; copyInFlight?: boolean; copyCleanupPending?: boolean;
+  completion?: 'none' | 'slash' | 'file'; services?: number; overlay?: string | null;
+  hintsEnabled?: boolean; toast?: string; updateAvailable?: boolean; exitHint?: string; modeToggleKey?: string;
 }
-
-function escapeClause(input: ActionHintInput): string {
+export function escapeClause(input: ActionHintInput): string {
   if (input.overlay) return copy.close;
-  if (input.completion && input.completion !== 'none') return copy.closeCompletion;
-  if (input.interactionPhase === 'starting') return /again|confirm/i.test(input.interruptHint ?? '')
-    ? copy.cancelStartAgain : copy.cancelStart;
+  if (input.completion && input.completion !== 'none' || input.escapeAction === 'menu') return copy.closeCompletion;
+  if (input.escapeAction === 'force-stop' || input.interruptPhase === 'stopping') return copy.forceStop;
+  if (input.interactionPhase === 'starting') return input.interruptPhase === 'armed' ? copy.cancelStartAgain : copy.cancelStart;
   if (input.interactionPhase !== 'running') return '';
-  if (/force|\u5f3a\u5236/i.test(input.interruptHint ?? '')) return copy.forceStop;
-  if (/again|confirm|\u518d\u6309/i.test(input.interruptHint ?? '')) return copy.interruptAgain;
-  return copy.interrupt;
+  return input.interruptPhase === 'armed' ? copy.interruptAgain : copy.interrupt;
 }
-
-function contextClauses(input: ActionHintInput, escape: string): string[] {
+export function clipStatusText(text: string, cells: number): string {
+  let clipped = '';
+  for (const part of graphemes(cleanStatusText(text))) {
+    if (stringWidth(clipped + part.text) > cells) break;
+    clipped += part.text;
+  }
+  return clipped;
+}
+/** Ordered actions before width allocation. No interpretation of translated feedback text. */
+export function actionCandidates(input: ActionHintInput): string[] {
   if (input.overlay) {
-    if (input.overlay === 'confirm') return [escape, copy.approveTool, copy.rejectTool];
-    const selects = /question|model|session|settings/.test(input.overlay);
-    return [escape, selects ? copy.select : copy.scroll,
+    if (input.overlay === 'confirm') return [copy.approveTool, copy.rejectTool];
+    const selects = ['question', 'model', 'session', 'settings'].includes(input.overlay);
+    return [selects ? copy.select : copy.scroll,
       ...(selects ? [input.overlay === 'settings' ? copy.saveSettings : copy.confirm] : [])];
   }
+  const actions: string[] = [];
+  if (input.selectionPending) actions.push(copy.copy);
+  else if (input.services) actions.push(copy.stopServicesShort);
   if (input.completion && input.completion !== 'none') {
-    const candidates: string[] = input.completion === 'slash'
-      ? [copy.executeCommand, escape, copy.complete, copy.select, copy.newline]
-      : [copy.complete, escape, copy.select, copy.newline];
-    if (input.completion === 'file' && input.interactionPhase !== 'starting') candidates.push(
-      input.interactionPhase === 'running' ? copy.enqueue : copy.send);
-    return candidates;
+    actions.push(...(input.completion === 'slash' ? [copy.executeCommand] : []), copy.complete, copy.select);
+    return actions;
   }
-  if (input.interactionPhase === 'starting') return [copy.startingHint, escape];
-  const running = input.interactionPhase === 'running';
-  const narrow = input.cols < 72;
-  return [running ? (narrow ? copy.enqueue : copy.enqueueLong) : (narrow ? copy.send : copy.sendLong),
-    narrow ? copy.newline : copy.newlineLong, ...(escape ? [escape] : [])];
+  if (input.hintsEnabled !== false && input.interactionPhase !== 'starting') actions.push(
+    input.interactionPhase === 'running' ? copy.enqueue : copy.send,
+    input.cols < 72 ? copy.newline : copy.newlineLong);
+  return actions;
 }
-
-function fitClauses(candidates: readonly string[], budget: number): string[] {
-  const result: string[] = [];
-  for (const text of candidates.filter(Boolean)) {
-    if (stringWidth([...result, text].join(' | ')) <= budget) result.push(text);
-  }
-  return result;
-}
-
-/** Esc describes its actual owner, including while transient feedback has the row. */
 export function buildActionClauses(input: ActionHintInput): readonly string[] {
   const budget = Math.max(0, Math.floor(input.cols) - 1);
   const escape = escapeClause(input);
-  const copyFeedback = input.copyCleanupPending
-    ? (input.toast?.includes(copy.copyFailed) ? input.toast : copy.copyCleanup)
-    : input.copyInFlight ? copy.copying : '';
-  const feedback = input.exitHint || copyFeedback || input.toast || '';
+  const result: string[] = [];
+  const feedback = input.feedback?.text || input.exitHint || (input.copyCleanupPending ? copy.copyCleanup
+    : input.copyInFlight ? copy.copying : input.toast) || '';
+  const reserve = escape ? stringWidth(escape) + 3 : 0;
   if (feedback) {
-    const reserved = escape ? [escape] : [];
-    const remaining = budget - stringWidth(reserved.join(' | ')) - (reserved.length ? 3 : 0);
-    let text = cleanStatusText(feedback);
-    if (stringWidth(text) > remaining) {
-      const minimum = text.includes(copy.copyFailed) ? copy.copyFailed : '';
-      let clipped = '';
-      for (const char of text) {
-        if (stringWidth(clipped + char) > remaining) break;
-        clipped += char;
-      }
-      text = minimum && stringWidth(minimum) <= remaining ? minimum : clipped;
-    }
-    return fitClauses([text, ...reserved], budget);
+    const text = clipStatusText(feedback, Math.max(0, budget - reserve));
+    if (text) result.push(text);
   }
-  const clauses = contextClauses(input, escape);
-  if (input.selectionPending) clauses.unshift(copy.copy);
-  if (input.services && !input.selectionPending) clauses.unshift(input.cols < 72
-    ? `${copy.stopServicesShort} ${input.services}` : `${copy.services} ${input.services} ${copy.stopServices}`);
-  if (input.updateAvailable && input.interactionPhase === 'idle' && !input.overlay) clauses.unshift(copy.update);
-  if (!input.selectionPending && !input.services) clauses.push(copy.exit);
-  if (input.hintsEnabled !== false && !input.overlay) clauses.push(copy.shiftNewline,
-    `${(input.modeToggleKey ?? 'shift+tab').split('+').map((key) =>
-      key.length === 1 ? key.toUpperCase() : key[0]!.toUpperCase() + key.slice(1).toLowerCase()).join('+')} ${copy.modeLabel}`,
-    copy.help, '/ commands', '@ files');
-  // Reserve Esc before lower-priority clauses, but preserve the documented display order.
-  if (!escape) return fitClauses(clauses, budget);
-  const selected = fitClauses(clauses.filter((clause) => clause !== escape),
-    budget - stringWidth(escape) - 3);
-  return clauses.filter((clause) => clause === escape || selected.includes(clause));
+  const add = (text: string, remaining = budget): void => {
+    if (stringWidth([...result, text].join(' | ')) <= remaining) result.push(cleanStatusText(text));
+  };
+  if (!feedback) {
+    for (const action of actionCandidates(input)) add(action, budget - reserve);
+  }
+  if (escape) add(escape);
+  if (!feedback && input.hintsEnabled !== false && !input.overlay) {
+    if (input.updateAvailable) add(copy.update);
+    add(copy.exit);
+    add((input.modeToggleKey ?? 'Shift+Tab') + ' ' + copy.modeLabel);
+    add(copy.help);
+  }
+  return result;
 }

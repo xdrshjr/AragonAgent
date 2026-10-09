@@ -67,3 +67,10 @@ export function detectCapabilities(env: EnvLike, _stdout?: StdoutLike): TermCapa
     unicode: detectUnicode(env),
   };
 }
+
+/** Full TUI styling is a policy, not a guess based on inherited shell markers. */
+export function resolveTuiCapabilities(env: EnvLike, color?: boolean): TermCapabilities {
+  const disabled = color === false || env.NO_COLOR !== undefined ||
+    env.FORCE_COLOR === '0' || env.FORCE_COLOR === 'false';
+  return { unicode: true, colorLevel: disabled ? 0 : 3 };
+}

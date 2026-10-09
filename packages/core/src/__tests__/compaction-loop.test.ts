@@ -380,6 +380,32 @@ describe('P1-1 — lastUsage is assigned, not merely declared', () => {
 });
 
 describe('the reactive path (§3.5)', () => {
+  it('clears pre-compaction usage before an overflow checkpoint', async () => {
+    let turn = 0;
+    const probes: CompactionProbe[] = [];
+    const registry = registryOf(() => (async function* () {
+      turn += 1;
+      if (turn === 1) {
+        const message: AssistantMessage = {
+          role: 'assistant', usage,
+          content: [{ type: 'tool_call', toolCallId: 'u', toolName: 'noop', args: {} }],
+        };
+        yield { type: 'done', message, usage } as StreamEvent;
+      } else { throw overflowError(); }
+    })());
+    const manager: ContextManager = {
+      shouldCompact: (probe) => {
+        probes.push(probe);
+        return probe.turnIndex === 2 && probe.trigger === 'pressure';
+      },
+      compact: async () => ({ action: 'replace', mode: 'summarized',
+        messages: [{ role: 'user', content: 'memory' }] }),
+    };
+    const agent = agentWith(registry, { contextManager: manager });
+    await agent.prompt('task').catch(() => {});
+    expect(probes.find((probe) => probe.trigger === 'overflow')).toBeDefined();
+    expect(probes.find((probe) => probe.trigger === 'overflow')?.lastUsage).toBeUndefined();
+  });
   it('recovers: one compaction, two requests, run completes (AC-11)', async () => {
     let attempts = 0;
     const registry = registryOf(() =>

@@ -12,6 +12,7 @@ import type { AgentEvent, ModelInfo } from '@aragon-agent/core';
 import { ExecRunner, singlePrompt, type ExecRunnerController } from '../exec/runner.js';
 import { StreamJsonEmitter } from '../exec/emitter.js';
 import type { ExecEvent } from '../exec/events.js';
+import type { CompactionEvent } from '../compaction/types.js';
 
 const MODEL: ModelInfo = {
   id: 'm',
@@ -126,6 +127,46 @@ function makeRunner(
 }
 
 describe('event translation', () => {
+  it('retains billed compaction usage separately with cache terms and unknown pricing', () => {
+    const out = sink();
+    const { controller } = makeStub();
+    let publish!: (event: CompactionEvent) => void;
+    controller.subscribeCompaction = (listener) => { publish = listener; return () => {}; };
+    const runner = makeRunner(out.stream);
+    runner.attach(controller);
+    publish({ type: 'usage', usage: { inputTokens: 100, outputTokens: 10,
+      cacheReadTokens: 50, cacheWriteTokens: 25 }, costUsd: 1.25, pricingUnknown: false });
+    publish({ type: 'usage', usage: { inputTokens: 5, outputTokens: 1 },
+      costUsd: 0, pricingUnknown: true });
+    expect(runner.stats().compactionBilling).toEqual({
+      usage: { inputTokens: 105, outputTokens: 11, cacheReadTokens: 50, cacheWriteTokens: 25 },
+      costUsd: 1.25, pricingUnknown: true,
+    });
+    expect(runner.stats().usage.cacheReadTokens).toBe(50);
+    runner.detach();
+  });
+  it.each([false, true])('keeps compaction decision fields optional: %s', (metadata) => {
+    const out = sink();
+    const { controller } = makeStub();
+    let publish: ((event: CompactionEvent) => void) | undefined;
+    controller.subscribeCompaction = (listener) => { publish = listener; return () => {}; };
+    const runner = makeRunner(out.stream);
+    runner.attach(controller);
+    const decision = { occupied: 90, contextWindow: 100, threshold: 0.9,
+      source: 'usage' as const, deltaTokens: 0 };
+    publish!({ type: 'compaction_end', record: {
+      index: 1, trigger: 'manual', mode: 'summarized', applied: true,
+      messagesBefore: 10, messagesAfter: 4, tokensBefore: 90, tokensAfter: 40,
+      model: 'summary', durationMs: 1, ...(metadata ? { decision, memoryVersion: 2 as const } : {}),
+    } });
+    const event = out.lines().find((item) => item.type === 'compaction');
+    if (metadata) expect(event).toMatchObject({ decision, memoryVersion: 2 });
+    else {
+      expect(event).not.toHaveProperty('decision');
+      expect(event).not.toHaveProperty('memoryVersion');
+    }
+    runner.detach();
+  });
   it('emits user, assistant, tool_call and tool_result in order', async () => {
     const out = sink();
     const { controller } = makeStub({

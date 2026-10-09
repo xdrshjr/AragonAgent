@@ -114,6 +114,7 @@ export interface SettingsValues {
 }
 
 interface SettingsScreenProps {
+  isActive?: boolean;
   initial: SettingsValues;
   /** Resolved keys per provider so switching providers reloads the right key. */
   apiKeys: Record<string, string | undefined>;
@@ -418,6 +419,7 @@ export function SettingsScreen(props: SettingsScreenProps): React.ReactElement {
 }
 
 function LegacySettingsScreen({
+  isActive = true,
   initial,
   apiKeys,
   maxRows,
@@ -434,6 +436,7 @@ function LegacySettingsScreen({
   const glyphs = pickGlyphs(caps);
 
   const field = FIELDS[index]!;
+  const focusedOffset = useProfileScroll({ maxRows, cols, scrollOffset, onScrollClamp, theme, caps }, index);
 
   const cycle = (dir: 1 | -1) => {
     if (field.kind !== 'enum' || !field.options) return;
@@ -454,6 +457,7 @@ function LegacySettingsScreen({
   };
 
   useInput((input, key) => {
+    if (!isActive) return;
     if (key.escape) return; // App closes the overlay.
 
     if (key.upArrow) {
@@ -601,7 +605,7 @@ function LegacySettingsScreen({
       maxRows={maxRows}
       cols={cols}
       rows={rows}
-      scrollOffset={scrollOffset}
+      scrollOffset={focusedOffset}
       onScrollClamp={onScrollClamp}
       theme={theme}
       caps={caps}
@@ -796,6 +800,7 @@ function activateRootSetting(props: ProfileSettingsProps, view: ProfileSettingsS
 function useRootSettingsInput(props: ProfileSettingsProps, view: ProfileSettingsState): void {
   const { index, count, field, readError, persisted, values, state, setIndex, setValues } = view;
   useInput((input, key) => {
+    if (props.isActive === false) return;
     if (key.escape) { cancelProfileSettings(props, view); return; }
     if (key.ctrl && input === 's') { saveProfileSettings(props, view); return; }
     if (key.upArrow || (key.tab && key.shift)) { setIndex((index - 1 + count) % count); return; }
@@ -822,6 +827,7 @@ function useSettingsConfirmationInput(props: ProfileSettingsProps,
   view: ProfileSettingsState): void {
   const { state, dispatch, confirmIndex, setConfirmIndex, reloadPending, confirming } = view;
   useInput((_input, key) => {
+    if (props.isActive === false) return;
     if (key.escape) { dispatch({ type: 'page', page: state.page === 'delete-confirm'
       ? 'manager' : 'root' }); return; }
     if (key.upArrow || key.downArrow || key.leftArrow || key.rightArrow || key.tab) {
@@ -848,7 +854,7 @@ function renderSettingsConfirmation(props: ProfileSettingsProps,
     hint="Enter choose | Esc continue" rows={labels
       .map((label, at) => <Text key={label} wrap="truncate" color={props.theme.primary}>
         {confirmIndex === at ? `${glyphs.caret} ` : '  '}{label}
-      </Text>)} scrollOffset={0} />;
+      </Text>)} scrollOffset={confirmIndex} />;
 }
 
 function renderProfileSubpage(props: ProfileSettingsProps,

@@ -7,6 +7,7 @@ import {
   type ProviderRegistry,
 } from '@aragon-agent/core';
 import { TeamRuntime } from '../team/runtime.js';
+import { buildProjectGuidanceBlock } from '../agent/project-guidance-prompt.js';
 import { TeamHumanQueue } from '../team/human-queue.js';
 import { createTaskTool } from '../team/task-tool.js';
 import { normalizeSubagentSpecs } from '../team/normalize.js';
@@ -206,6 +207,38 @@ function runtimeWith(
   );
   return { runtime, specs, census, agents };
 }
+
+describe('TeamRuntime project guidance', () => {
+  it.each([false, true])('PG-07: passes guidance to a readOnly=%s child', async (readOnly) => {
+    const prompts: string[] = [];
+    const census = { live: 0, peak: 0 };
+    const runtime = new TeamRuntime({
+      getConfig: () => config(),
+      providerRegistry: {} as ProviderRegistry,
+      getCwd: () => process.cwd(),
+      getMode: () => 'build',
+      getApiKey: () => 'k',
+      agentFactory: (agentConfig) => {
+        prompts.push(agentConfig.systemPrompt ?? '');
+        return new StubAgent({ summary: 'done' }, census);
+      },
+    });
+    const { specs } = normalizeSubagentSpecs([
+      { label: 'reader', description: 'Inspect module', prompt: 'Explain module', readOnly },
+    ], 10);
+    const outcome = await runtime.dispatch(specs, specs.length);
+
+    expect(outcome.runs.map((run) => run.phase)).toEqual(['done']);
+    expect(census.live).toBe(0);
+    expect(prompts).toHaveLength(1);
+    const prompt = prompts[0]!;
+    expect(prompt).toContain(buildProjectGuidanceBlock());
+    expect(prompt.match(/<project_guidance>/g)).toHaveLength(1);
+    expect(prompt.match(/<\/project_guidance>/g)).toHaveLength(1);
+    expect(prompt.match(/<subagent_role>/g)).toHaveLength(1);
+    expect(prompt.includes('<plan_mode>')).toBe(readOnly);
+  });
+});
 
 describe('TeamRuntime slot pool', () => {
   it('never runs more than maxConcurrent children at once (AC-1)', async () => {

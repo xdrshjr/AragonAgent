@@ -20,7 +20,8 @@
  * itself. Manual-test row 9 is the same check by hand.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CommandContext } from '../commands/registry.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,6 +29,8 @@ import process from 'node:process';
 
 const HOME = mkdtempSync(join(tmpdir(), 'aragon-compaction-config-'));
 process.env.ARAGON_HOME = HOME;
+
+const { formatCompactionStatus, runCompactCommand } = await import('../compaction/command.js');
 
 const { DEFAULT_COMPACTION_CONFIG } = await import('../config/schema.js');
 const { applyCompactionConfigSet, COMPACTION_CONFIG_SET_KEYS } = await import(
@@ -46,6 +49,92 @@ const ENV_KEYS = [
   'ARAGON_COMPACTION_ARCHIVE',
 ];
 
+describe('precise compaction command feedback', () => {
+  function context(args = '') {
+    return {
+      args, notify: vi.fn(), toast: vi.fn(), persistConfig: vi.fn(),
+      state: { status: 'idle', entries: [] },
+      controller: {
+        isCompactionRegistered: () => true, isCompactionEnabled: () => true,
+        getCompactionConfig: () => ({ ...DEFAULT_COMPACTION_CONFIG, onFailure: 'truncate' }),
+        getCompactionSnapshot: () => ({ live: true, model: 'model', compactions: 0,
+          generation: 0, usage: { inputTokens: 0, outputTokens: 0 }, tokensReclaimed: 0,
+          pressure: { occupied: 89999, contextWindow: 100000, ratio: 0.89999,
+            source: 'usage', deltaTokens: 0, windowKnown: true } }),
+        getCompactionSummarizerRef: () => null, getCompactionRunId: () => null,
+        compactNow: vi.fn(async () => ({ ok: false, reason: 'protected_budget_exceeded' })),
+        queueCompaction: vi.fn(),
+        isCompactionBusy: () => false,
+        setCompactionConfig: vi.fn((patch: object) => ({ ...DEFAULT_COMPACTION_CONFIG, ...patch })),
+        setCompactionEnabled: vi.fn(),
+      },
+    };
+  }
+
+  it('shows raw tokens, exact threshold and preservation for legacy truncate', () => {
+    const text = formatCompactionStatus(context() as unknown as CommandContext);
+    expect(text).toContain('89999 / 100000');
+    expect(text).toContain('90.00%');
+    expect(text).toContain('90000 tokens');
+    expect(text).toContain('Automatic trigger: occupancy >=');
+    expect(text).toContain('legacy truncate configured; preserving history');
+    expect(text).not.toContain('headroom drops');
+  });
+
+  it('reports the accumulated call cost without repricing it using current preferences', () => {
+    const ctx = context();
+    const snapshot = ctx.controller.getCompactionSnapshot();
+    ctx.controller.getCompactionSnapshot = () => ({ ...snapshot, costUsd: 1.25 });
+    expect(formatCompactionStatus(ctx as unknown as CommandContext)).toContain('$1.25');
+  });
+
+  it.each(['idle', 'running'])('rejects oversized instructions while %s without replacing a request', async (status) => {
+    const ctx = context('x'.repeat(4001));
+    ctx.state.status = status;
+    await runCompactCommand(ctx as unknown as CommandContext);
+    expect(ctx.controller.compactNow).not.toHaveBeenCalled();
+    expect(ctx.controller.queueCompaction).not.toHaveBeenCalled();
+    expect(ctx.notify).toHaveBeenCalledWith('warn', expect.stringContaining('4000'));
+  });
+
+  it.each(['status', 'history', 'show 1', 'on', 'off', 'threshold 80%', 'keep 2'])(
+    'never queues or starts a summary for %s', async (args) => {
+      const ctx = context(args);
+      await runCompactCommand(ctx as unknown as CommandContext);
+      expect(ctx.controller.compactNow).not.toHaveBeenCalled();
+      expect(ctx.controller.queueCompaction).not.toHaveBeenCalled();
+    },
+  );
+
+  it('accepts the instruction limit and reports preservation on refusal', async () => {
+    const ctx = context('x'.repeat(4000));
+    await runCompactCommand(ctx as unknown as CommandContext);
+    expect(ctx.controller.compactNow).toHaveBeenCalledWith('x'.repeat(4000));
+    expect(ctx.notify).toHaveBeenCalledWith('warn',
+      'History preserved: protected_budget_exceeded.');
+  });
+
+  it('does not announce another queued operation while compaction is busy', async () => {
+    const ctx = context('focus on failures');
+    ctx.state.status = 'running';
+    ctx.controller.isCompactionBusy = () => true;
+    await runCompactCommand(ctx as unknown as CommandContext);
+    expect(ctx.controller.queueCompaction).not.toHaveBeenCalled();
+    expect(ctx.controller.compactNow).not.toHaveBeenCalled();
+    expect(ctx.notify).toHaveBeenCalledWith('info', 'Compaction is already running.');
+  });
+
+  it('does not queue a manual request during an in-loop summary', async () => {
+    const ctx = context();
+    ctx.state.status = 'running';
+    const snapshot = ctx.controller.getCompactionSnapshot();
+    ctx.controller.getCompactionSnapshot = () => ({ ...snapshot, inFlight: true });
+    await runCompactCommand(ctx as unknown as CommandContext);
+    expect(ctx.controller.queueCompaction).not.toHaveBeenCalled();
+    expect(ctx.notify).toHaveBeenCalledWith('info', 'Compaction is already running.');
+  });
+});
+
 beforeEach(() => {
   for (const key of ENV_KEYS) delete process.env[key];
   writeConfigFile(loadPersistedConfig());
@@ -57,6 +146,11 @@ afterEach(() => {
 });
 
 describe('both store.ts merges know about the section', () => {
+  it('preserves history by default and still reads legacy truncate configuration', () => {
+    expect(DEFAULT_COMPACTION_CONFIG.onFailure).toBe('stop');
+    updatePersistedConfig({ compaction: { onFailure: 'truncate' } as never });
+    expect(loadConfig({}).compaction.onFailure).toBe('truncate');
+  });
   it('READ half: a config file with no `compaction` key still resolves the section', () => {
     // Without it `config.compaction.enabled` reads `undefined`, which is FALSY —
     // so a feature that is `true` by default would arrive OFF for every existing

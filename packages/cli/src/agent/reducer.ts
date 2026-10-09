@@ -227,6 +227,8 @@ export type Entry =
   | {
       id: string;
       kind: 'compaction';
+      decision?: CompactionRecord['decision'];
+      memoryVersion?: CompactionRecord['memoryVersion'];
       /** 1-based within the session, so the card can name itself. */
       index: number;
       trigger: CompactionUiTrigger;
@@ -1791,6 +1793,8 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
               tokensAfter: record.tokensAfter,
               ...(record.summary !== undefined ? { summary: record.summary } : {}),
               ...(record.tailRelief ? { tailRelief: record.tailRelief } : {}),
+              ...(record.decision ? { decision: record.decision } : {}),
+              ...(record.memoryVersion ? { memoryVersion: record.memoryVersion } : {}),
               model: record.model,
               durationMs: record.durationMs,
               // SETTLED. `Transcript`'s boundary is monotonic, so a card that
@@ -1826,6 +1830,8 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
         tokensAfter: record.tokensAfter,
         ...(record.summary !== undefined ? { summary: record.summary } : {}),
         ...(record.tailRelief ? { tailRelief: record.tailRelief } : {}),
+        ...(record.decision ? { decision: record.decision } : {}),
+        ...(record.memoryVersion ? { memoryVersion: record.memoryVersion } : {}),
         model: record.model,
         durationMs: record.durationMs,
         live: false,
@@ -1868,6 +1874,7 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
         prev.source === next.source &&
         prev.deltaTokens === next.deltaTokens &&
         prev.windowKnown === next.windowKnown &&
+        prev.windowSource === next.windowSource &&
         prev.windowOverridden === next.windowOverridden
       ) {
         return state;

@@ -121,7 +121,10 @@ function harness(opts: HarnessOpts = {}) {
 
   const events: CompactionEvent[] = [];
   const notices: Array<{ level: NoticeLevel; text: string }> = [];
-  const answers = [...(opts.answers ?? ['## Task\nthe summary'])];
+  const valid = JSON.stringify({ schemaVersion: 2, additions: [{ section: 'facts', text: 'Answer',
+    sources: [{ messageId: 'g1:m1', role: 'assistant', excerpt: 'answer 0' }] }] });
+  const answers = [...(opts.answers ?? [valid])];
+  let messages: readonly Message[] = [];
 
   const deps: CompactorDeps = {
     getConfig: () => config,
@@ -129,10 +132,10 @@ function harness(opts: HarnessOpts = {}) {
     getApiKey: () => 'k',
     getModelInfoFor: () => info,
     isPricedModel: () => true,
-    getMessages: () => [],
+    getMessages: () => messages,
     getSystemPrompt: () => '',
     complete: async (_providerId: string, _request: LLMRequest): Promise<AssistantMessage> => {
-      const next = answers.length > 0 ? answers.shift()! : '## Task\nthe summary';
+      const next = answers.length > 0 ? answers.shift()! : valid;
       if (next === null) throw new Error('summarizer exploded');
       return {
         role: 'assistant',
@@ -153,7 +156,18 @@ function harness(opts: HarnessOpts = {}) {
       return e.type === 'compaction_end';
     });
 
-  return { compactor: new Compactor(deps), config, events, notices, starts, ends };
+  const compactor = new Compactor(deps);
+  const compact = compactor.compact.bind(compactor);
+  compactor.compact = async (context) => {
+    messages = context.messages;
+    const outcome = await compact(context);
+    if (outcome.action === 'replace') messages = outcome.messages;
+    compactor.settleOperation({ applied: outcome.action === 'replace',
+      ...(outcome.action === 'keep' ? { reason: outcome.reason } : {}),
+      tokensBefore: 30000, tokensAfter: outcome.action === 'replace' ? 10000 : 30000 });
+    return outcome;
+  };
+  return { compactor, config, events, notices, starts, ends };
 }
 
 function ctx(messages: Message[], over: Partial<CompactionContext> = {}): CompactionContext {
@@ -234,49 +248,32 @@ describe('AC-Q3 / AC-Q4: a compaction that commits announces, and the numbers st
   });
 });
 
-describe('AC-Q5 / AC-Q6: manual and overflow are byte-identical to the round before', () => {
-  it('AC-Q5: a queued /compact that finds nothing to drop still reports', async () => {
-    // THE QUEUED FORM HAS NO OTHER SURFACE. `/compact` typed while the agent runs
-    // arrives at the loop as an ordinary checkpoint; a silent decline there is a
-    // command that did nothing and said nothing.
-    const { compactor, starts, ends } = harness();
+describe('preflight rejection preserves history without announcing paid work', () => {
+  it('manual with no safe head gives actionable feedback without a card', async () => {
+    const { compactor, starts, ends, notices } = harness();
     compactor.queueManual();
-    await compactor.compact(ctx(nothingToDrop()));
-
-    expect(starts()).toHaveLength(1);
-    expect(starts()[0]!.trigger).toBe('manual');
-    expect(ends()).toHaveLength(1);
-    expect(ends()[0]!.record.applied).toBe(false);
-    expect(ends()[0]!.record.reason).toBe('nothing_to_drop');
+    expect(await compactor.compact(ctx(nothingToDrop()))).toMatchObject({ action: 'keep' });
+    expect(starts()).toHaveLength(0);
+    expect(ends()).toHaveLength(0);
+    expect(notices[0]?.text).toContain('History preserved: nothing_to_drop');
   });
 
-  it('AC-Q6: an overflow attempt that finds nothing to drop still reports', async () => {
-    // THE PROVIDER HAS ALREADY REFUSED THE REQUEST. If this compaction cannot
-    // recover, the card is the only place that says why the run is about to die.
+  it('overflow with no safe head preserves history and creates no summary card', async () => {
     const { compactor, starts, ends } = harness();
-    await compactor.compact(ctx(nothingToDrop(), { trigger: 'overflow' }));
-
-    expect(starts()).toHaveLength(1);
-    expect(starts()[0]!.trigger).toBe('overflow');
-    expect(ends()).toHaveLength(1);
-    expect(ends()[0]!.record.applied).toBe(false);
-    expect(ends()[0]!.record.reason).toBe('nothing_to_drop');
+    expect(await compactor.compact(ctx(nothingToDrop(), { trigger: 'overflow' })))
+      .toMatchObject({ action: 'keep' });
+    expect(starts()).toHaveLength(0);
+    expect(ends()).toHaveLength(0);
   });
-});
 
-describe('AC-Q7 / AC-Q8: every post-commit outcome still speaks', () => {
-  it('AC-Q7: relief-only announces at commit point A, naming no model', async () => {
-    // RELIEF CHANGES THE HISTORY THE RUN CONTINUES FROM - a bounded, announced
-    // data loss - so it is announced even though no model was called. Naming a
-    // model on the start event would claim a call that never ran.
-    const { compactor, starts, ends } = harness({ contextWindow: 32_000, maxTokens: 4_096 });
-    await compactor.compact(ctx(unsplittable()));
-
-    expect(starts()).toHaveLength(1);
-    expect(starts()[0]!.model).toBe('');
-    expect(ends()).toHaveLength(1);
-    expect(ends()[0]!.record.mode).toBe('relieved');
-    expect(ends()[0]!.record.applied).toBe(true);
+  it('oversized retained tool results are never relieved or reported as success', async () => {
+    const { compactor, starts, ends } = harness({ contextWindow: 32000 });
+    const history = unsplittable();
+    const original = JSON.stringify(history);
+    expect(await compactor.compact(ctx(history))).toMatchObject({ action: 'keep' });
+    expect(JSON.stringify(history)).toBe(original);
+    expect(starts()).toHaveLength(0);
+    expect(ends()).toHaveLength(0);
   });
 
   it('AC-Q8: a post-commit summarize failure announces AND notifies', async () => {
@@ -292,8 +289,8 @@ describe('AC-Q7 / AC-Q8: every post-commit outcome still speaks', () => {
     expect(starts()).toHaveLength(1);
     expect(ends()).toHaveLength(1);
     expect(ends()[0]!.record.applied).toBe(false);
-    expect(ends()[0]!.record.reason).toMatch(/^summarize_failed:/);
-    expect(notices.filter((n) => n.level === 'error')).toHaveLength(1);
+    expect(ends()[0]!.record.reason).toContain('summarizer exploded');
+    expect(notices.filter((n) => n.text.includes('success'))).toHaveLength(0);
   });
 });
 
@@ -340,7 +337,7 @@ describe('AC-Q10: guard 4 still speaks, and it is the surviving signal', () => {
     expect(compactor.isSelfDisabled()).toBe(true);
     const warns = notices.filter((n) => n.level === 'warn');
     expect(warns).toHaveLength(1);
-    expect(warns[0]!.text).toContain('keepRecentTurns');
+    expect(warns[0]!.text).toContain('nothing_to_drop');
     // And it said so without ever opening a card.
     expect(starts()).toHaveLength(0);
     expect(ends()).toHaveLength(0);
@@ -355,6 +352,7 @@ describe('AC-Q11: the guards still count ATTEMPTS, not announcements', () => {
     const { compactor } = harness();
     await compactor.compact(ctx(nothingToDrop(), { turnIndex: 5 }));
 
+    compactor.onTurnEnd(OVER_THRESHOLD, [], '');
     const probe = { messageCount: 2, trigger: 'pressure' as const, lastUsage: OVER_THRESHOLD };
     expect(compactor.shouldCompact({ ...probe, turnIndex: 6 })).toBe(false);
     // NON-VACUOUS: the same probe one turn later, once the cooldown is served.
@@ -372,6 +370,7 @@ describe('AC-Q11: the guards still count ATTEMPTS, not announcements', () => {
     }
 
     expect(compactor.isSelfDisabled()).toBe(false);
+    compactor.onTurnEnd(OVER_THRESHOLD, [], '');
     const probe = { messageCount: 2, trigger: 'pressure' as const, lastUsage: OVER_THRESHOLD };
     expect(compactor.shouldCompact({ ...probe, turnIndex: 999 })).toBe(false);
   });
