@@ -293,7 +293,7 @@ const COMMANDS: SlashCommand[] = [
         return;
       }
       if (arg.length > 0 && arg !== 'on' && arg !== 'off' && arg !== 'unr' && arg !== 'unrestricted') {
-        ctx.notify('warn', `Unknown argument "${arg}" - use /plan [on|off|status].`);
+        ctx.notify('warn', `Unknown argument "${arg}" - use /plan [on|off|unr|status].`);
         return;
       }
       const current = ctx.controller.getAgentMode();

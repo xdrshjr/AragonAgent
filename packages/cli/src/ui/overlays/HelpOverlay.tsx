@@ -33,7 +33,7 @@ function keyRows(times: string): [string, string][] {
     // terminal (`showHint`) and `hints: false`. A key that only exists behind
     // either of them is a key the affected user never learns about, which is the
     // one-shot notice's failure repeated with a different switch.
-    ['Shift+Tab / Ctrl+P', 'Toggle plan mode (same as /plan)'],
+    ['Shift+Tab / Ctrl+P', 'Cycle mode: BUILD -> PLAN -> UNRESTRICTED (same as /plan)'],
     [`Ctrl+C ${times}2`, 'Exit'],
     ['Ctrl+L', 'Redraw the frame'],
     ['Ctrl+T', 'Show/hide thinking (off by default)'],
@@ -71,7 +71,7 @@ const COMMANDS: [string, string][] = [
   ['/help', 'Show this help'],
   ['/model', 'Open the model picker'],
   ['/settings', 'Open the settings screen'],
-  ['/plan [on|off|status]', 'Toggle plan mode (same as Shift+Tab)'],
+  ['/plan [on|off|unr|status]', 'Cycle or set mode (same as Shift+Tab)'],
   ['/theme <name>', 'auto | warm | cool | light'],
   ['/thinking <level>', 'Set thinking level'],
   ['/max-tokens [n|auto]', 'Output token cap; no argument reports the effective one'],
@@ -107,12 +107,12 @@ const SKILL_ROWS: [string, string][] = [
 ];
 
 const PLAN_ROWS: [string, string][] = [
-  ['Shift+Tab / /plan', 'Switch between BUILD (do it now) and PLAN (research first)'],
+  ['Shift+Tab / /plan', 'Cycle BUILD (do it now) -> PLAN (research first) -> UNRESTRICTED (operator package)'],
   // A ROW OF ITS OWN, not a third name on the line above: the reader who needs
   // this one is the reader whose `Shift+Tab` does nothing, and what they need is
   // the reason, not another synonym. Listing the key in both places instead just
   // says it twice and explains it nowhere.
-  ['Ctrl+P', 'The same toggle, for Windows consoles that deliver Shift+Tab as a plain Tab'],
+  ['Ctrl+P', 'The same mode cycle, for Windows consoles that deliver Shift+Tab as a plain Tab'],
   ['In PLAN mode', 'write_file, edit_file, bash, skill_install and skill_create are refused'],
   ['bash', 'Refused in full, including git status - use read_file / glob / grep'],
   ['ask_user', 'The agent asks 1-5 multiple-choice questions; Enter takes the recommendation'],
