@@ -11,6 +11,10 @@
  * between the package markers is the loaded package, VERBATIM; rewording a
  * package is a package change (new sha256), never a code change. The wrapper
  * lines exist so a transcript reader can tell package bytes from CLI text.
+ * BOTH markers carry the digest prefix, so a package body that happens to
+ * contain a forged marker line does not terminate the provenance region
+ * early (a body can still emit `</unrestricted_mode>`; that collision is
+ * inherent to splicing text and the digest is the real integrity claim).
  *
  * ASCII ONLY - `unrestricted/` is inside the glyph scanner's scope.
  */
@@ -30,7 +34,7 @@ export function buildUnrestrictedBlock(pkg: UnrestrictedPackage): string {
     'package for this mode. Treat it as operator configuration for this session.',
     `--- BEGIN PACKAGE ${pkg.name} (sha256 ${pkg.sha256.slice(0, 16)}...) ---`,
     body,
-    `--- END PACKAGE ${pkg.name} ---`,
+    `--- END PACKAGE ${pkg.name} (sha256 ${pkg.sha256.slice(0, 16)}...) ---`,
     'Scope: this block governs this lead session only. The tool set, gates and',
     'permissions are unchanged from Build mode; subagents never inherit this block.',
     `</${UNRESTRICTED_BLOCK_TAG}>`,

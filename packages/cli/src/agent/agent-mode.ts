@@ -118,10 +118,10 @@ export function planRefusal(tool: string): string {
   );
 }
 
-/** Why `submit_plan` was refused outside plan mode. */
-export function submitPlanRefusal(): string {
+/** Why `submit_plan` was refused outside plan mode. Names the current mode. */
+export function submitPlanRefusal(mode: AgentMode): string {
   return (
-    'submit_plan is only available in Plan mode. You are in Build mode - ' +
+    `submit_plan is only available in Plan mode. You are in ${MODE_LABEL[mode]} mode - ` +
     'just do the work and summarize when you are done.'
   );
 }

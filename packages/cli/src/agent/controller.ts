@@ -1443,8 +1443,8 @@ export class AgentController {
     } else if (next === 'unrestricted' && !this.unrestricted.ok) {
       // REFUSED, NOT ADOPTED: an UNRESTRICTED badge the prompt cannot honour
       // is exactly the lie `AgentModeState` exists to prevent. Return the
-      // unchanged state; the UI reads it back and says why.
-      this.pendingMode = null;
+      // unchanged state - INCLUDING any pending deferral, which a refused
+      // request must not cancel; the UI reads it back and says why.
     } else if (this.effectiveMode === next) {
       // Already there. Clear any stale deferral rather than queueing a second.
       this.pendingMode = null;

@@ -4,7 +4,14 @@
  * A package is one Markdown file, byte-stable, validated against a sha256
  * manifest when one is present - the same discipline the gpt-instruct
  * archives use (byte-identical prompt + published digest), so a transcript
- * that names a package name and digest pins exactly one prompt body.
+ * that names a package name and digest pins exactly one prompt file.
+ *
+ * THE DIGEST PINS RAW FILE BYTES. The file is read once as a Buffer; the
+ * sha256 and the MAX_PACKAGE_BYTES cap both measure that Buffer, and only
+ * then is it decoded to text. A digest produced the natural way
+ * (`sha256sum file.md`) therefore matches, and two files that differ only in
+ * invalid UTF-8 sequences still get different digests (decoding first would
+ * collapse both to U+FFFD replacements).
  *
  * Directory layout (default `<aragon home>/unrestricted`, override with
  * `ARAGON_UNRESTRICTED_DIR`):
@@ -16,21 +23,27 @@
  *                                  "sha256": "<64 hex>", "bytes": <n> } } }
  *
  * Without a manifest the SINGLE .md file in the directory is used; more than
- * one without a manifest is ambiguous and refused rather than guessed. A
- * manifest without a `default` is likewise refused for the same reason.
+ * one without a manifest is ambiguous and refused rather than guessed. With a
+ * manifest, the DEFAULT ENTRY's failures are reported truthfully (a declared
+ * package whose file is missing is `unreadable`, not "no package"); the
+ * package's NAME is the manifest key, because that is the operator's
+ * vocabulary - the file name is only a fallback.
  *
- * The loader is total: every failure is a typed value, never a throw, so the
- * controller can refuse mode entry (and say why) instead of catching.
+ * `file` must be a PLAIN FILE NAME. The directory is the boundary: a manifest
+ * entry pointing outside it (`../x.md`, absolute paths) is `bad_manifest`,
+ * never a read. The loader is total: every failure is a typed value, never a
+ * throw, so the controller can refuse mode entry (and say why) instead of
+ * catching.
  *
  * ASCII ONLY - `unrestricted/` is inside the glyph scanner's scope.
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import type { PathLike } from 'node:fs';
 import { MAX_PACKAGE_BYTES, MAX_PACKAGES, UNRESTRICTED_DIR_ENV } from './limits.js';
 
-/** One validated instruction package. `sha256` pins the exact bytes. */
+/** One validated instruction package. `sha256` pins the exact file bytes. */
 export interface UnrestrictedPackage {
   name: string;
   body: string;
@@ -71,8 +84,27 @@ export function defaultUnrestrictedDir(home: string, env: Record<string, string 
   return `${home.replace(/[\\/]+$/, '')}/unrestricted`;
 }
 
-function sha256Hex(bytes: Buffer | string): string {
+function sha256Hex(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+/**
+ * A plain file name, nothing else: no separators, no `.`/`..`, no drive
+ * letters. This is the path-traversal guard - the package directory is the
+ * boundary, and a manifest that names anything outside it is refused.
+ */
+function isPlainFileName(value: string): boolean {
+  return (
+    value.length > 0 &&
+    !value.includes('/') &&
+    !value.includes('\\') &&
+    value !== '.' &&
+    value !== '..'
+  );
+}
+
+function joinUnder(dir: string, file: string): string {
+  return `${dir.replace(/[\\/]+$/, '')}/${file}`;
 }
 
 /**
@@ -82,7 +114,13 @@ function sha256Hex(bytes: Buffer | string): string {
  * (mode toggle, `/plan status` surfaces) needs a yes/no answer immediately.
  */
 export function loadUnrestrictedPackage(dir: PathLike): UnrestrictedLoadResult {
-  if (!existsSync(dir)) return { ok: false, failure: { kind: 'no_dir' } };
+  let stats;
+  try {
+    stats = statSync(dir);
+  } catch {
+    return { ok: false, failure: { kind: 'no_dir' } };
+  }
+  if (!stats.isDirectory()) return { ok: false, failure: { kind: 'no_dir' } };
 
   let entries: string[];
   try {
@@ -91,18 +129,16 @@ export function loadUnrestrictedPackage(dir: PathLike): UnrestrictedLoadResult {
     return { ok: false, failure: { kind: 'no_dir' } };
   }
 
-  const mdFiles = entries.filter((name) => name.toLowerCase().endsWith('.md'));
-  if (mdFiles.length === 0) return { ok: false, failure: { kind: 'no_package' } };
-
-  const manifestPath = `${String(dir).replace(/[\\/]+$/, '')}/manifest.json`;
-  if (!existsSync(manifestPath)) {
+  if (!entries.includes('manifest.json')) {
+    const mdFiles = entries.filter((name) => name.toLowerCase().endsWith('.md'));
+    if (mdFiles.length === 0) return { ok: false, failure: { kind: 'no_package' } };
     if (mdFiles.length > 1) return { ok: false, failure: { kind: 'ambiguous', count: mdFiles.length } };
-    return readPackage(String(dir), mdFiles[0]!, undefined);
+    return readPackage(String(dir), mdFiles[0]!, undefined, undefined);
   }
 
   let manifest: ParsedManifest;
   try {
-    manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as ParsedManifest;
+    manifest = JSON.parse(readFileSync(joinUnder(String(dir), 'manifest.json'), 'utf8')) as ParsedManifest;
   } catch {
     return { ok: false, failure: { kind: 'bad_manifest' } };
   }
@@ -125,42 +161,43 @@ export function loadUnrestrictedPackage(dir: PathLike): UnrestrictedLoadResult {
   if (entry === undefined || typeof entry !== 'object' || entry === null) {
     return { ok: false, failure: { kind: 'unknown_default', name: defaultName } };
   }
-  if (typeof entry.file !== 'string' || entry.file.length === 0) {
+  if (typeof entry.file !== 'string' || !isPlainFileName(entry.file)) {
+    // A missing `file` is a broken manifest; one that escapes the directory
+    // (`../x.md`, `C:\x.md`) is refused exactly as firmly - the boundary is
+    // the contract, not a suggestion.
     return { ok: false, failure: { kind: 'bad_manifest' } };
   }
 
-  return readPackage(String(dir), entry.file, entry);
+  return readPackage(String(dir), entry.file, entry, defaultName);
 }
 
 function readPackage(
   dir: string,
   file: string,
   entry: ManifestEntry | undefined,
+  manifestName: string | undefined,
 ): UnrestrictedLoadResult {
-  const name = file.replace(/\.md$/i, '');
-  const path = `${dir.replace(/[\\/]+$/, '')}/${file}`;
+  // The manifest key is the operator's name for the package; the file name is
+  // only the no-manifest fallback.
+  const name = manifestName ?? file.replace(/\.md$/i, '');
+  if (!isPlainFileName(file)) return { ok: false, failure: { kind: 'bad_manifest' } };
 
-  let bytes: number;
+  let raw: Buffer;
   try {
-    bytes = statSync(path).size;
+    raw = readFileSync(joinUnder(dir, file));
   } catch {
     return { ok: false, failure: { kind: 'unreadable', name } };
   }
-  if (bytes > MAX_PACKAGE_BYTES) {
-    return { ok: false, failure: { kind: 'too_large', name, bytes } };
+  if (raw.length > MAX_PACKAGE_BYTES) {
+    return { ok: false, failure: { kind: 'too_large', name, bytes: raw.length } };
   }
 
-  let body: string;
-  try {
-    body = readFileSync(path, 'utf8');
-  } catch {
-    return { ok: false, failure: { kind: 'unreadable', name } };
-  }
-
-  const actual = sha256Hex(body);
+  const actual = sha256Hex(raw);
   if (typeof entry?.sha256 === 'string' && entry.sha256.length > 0 && entry.sha256 !== actual) {
     return { ok: false, failure: { kind: 'hash_mismatch', name, expected: entry.sha256, actual } };
   }
 
-  return { ok: true, pkg: { name, body, sha256: actual, bytes: Buffer.byteLength(body, 'utf8') } };
+  // Decode AFTER every byte-level check: invalid sequences become U+FFFD in
+  // the body, but the digest above still pins the original file bytes.
+  return { ok: true, pkg: { name, body: raw.toString('utf8'), sha256: actual, bytes: raw.length } };
 }

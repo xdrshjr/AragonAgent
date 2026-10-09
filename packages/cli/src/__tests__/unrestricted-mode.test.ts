@@ -53,10 +53,17 @@ describe('buildUnrestrictedBlock', () => {
     expect(block).toContain('<unrestricted_mode>');
     expect(block).toContain('</unrestricted_mode>');
     expect(block).toContain(`--- BEGIN PACKAGE test-pkg (sha256 ${PKG.sha256.slice(0, 16)}...) ---`);
-    expect(block).toContain(`--- END PACKAGE test-pkg ---`);
+    // BOTH markers carry the digest prefix: a body that contains a forged
+    // plain marker line cannot terminate the provenance region early.
+    expect(block).toContain(
+      `--- END PACKAGE test-pkg (sha256 ${PKG.sha256.slice(0, 16)}...) ---`,
+    );
+    expect(block).not.toContain('--- END PACKAGE test-pkg ---');
     // The body rides inside the markers, unmodified: a transcript that names
     // this package and digest pins exactly these bytes.
-    expect(block).toContain(`---\n${BODY.slice(0, -1)}\n--- END PACKAGE test-pkg ---`);
+    expect(block).toContain(
+      `---\n${BODY.slice(0, -1)}\n--- END PACKAGE test-pkg (sha256 ${PKG.sha256.slice(0, 16)}...) ---`,
+    );
     expect(block).toContain(BODY);
     expect(block).toContain(`package test-pkg | ${PKG.bytes} bytes | sha256 ${PKG.sha256}`);
   });
@@ -193,6 +200,93 @@ describe('loadUnrestrictedPackage', () => {
     );
     const result = loadUnrestrictedPackage(dir);
     expect(result).toEqual({ ok: false, failure: { kind: 'unknown_default', name: 'ghost' } });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('names the package by its manifest key, not its file name', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'one.md'), BODY, 'utf8');
+    writeFileSync(
+      join(dir, 'manifest.json'),
+      JSON.stringify({
+        schema: 1,
+        default: 'prod',
+        packages: { prod: { file: 'one.md', sha256: PKG.sha256 } },
+      }),
+      'utf8',
+    );
+    const result = loadUnrestrictedPackage(dir);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.pkg.name).toBe('prod');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('refuses a manifest entry whose file escapes the directory', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'one.md'), BODY, 'utf8');
+    writeFileSync(
+      join(dir, 'manifest.json'),
+      JSON.stringify({
+        schema: 1,
+        default: 'one',
+        packages: { one: { file: '../outside.md', sha256: PKG.sha256 } },
+      }),
+      'utf8',
+    );
+    const result = loadUnrestrictedPackage(dir);
+    expect(result).toEqual({ ok: false, failure: { kind: 'bad_manifest' } });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('refuses a manifest entry naming an absolute path', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'one.md'), BODY, 'utf8');
+    writeFileSync(
+      join(dir, 'manifest.json'),
+      JSON.stringify({
+        schema: 1,
+        default: 'one',
+        packages: { one: { file: 'C:\\evil.md', sha256: PKG.sha256 } },
+      }),
+      'utf8',
+    );
+    const result = loadUnrestrictedPackage(dir);
+    expect(result).toEqual({ ok: false, failure: { kind: 'bad_manifest' } });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reports the DEFAULT ENTRY as unreadable when its file is missing', () => {
+    // With a manifest present, the truthful failure is about the declared
+    // package, not a bare "no package in this directory".
+    const dir = tempDir();
+    writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ schema: 1, default: 'gone', packages: { gone: { file: 'gone.md' } } }), 'utf8');
+    const result = loadUnrestrictedPackage(dir);
+    expect(result).toEqual({ ok: false, failure: { kind: 'unreadable', name: 'gone' } });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('hashes RAW FILE BYTES, so a binary-tailed package with a raw digest loads', () => {
+    const dir = tempDir();
+    // Invalid UTF-8 in the tail: decoding first would collapse both the
+    // digest input and the size, and a `sha256sum`-produced manifest
+    // digest would never match.
+    const raw = Buffer.concat([Buffer.from(BODY, 'utf8'), Buffer.from([0xff, 0xfe])]);
+    writeFileSync(join(dir, 'bin.md'), raw);
+    writeFileSync(
+      join(dir, 'manifest.json'),
+      JSON.stringify({
+        schema: 1,
+        default: 'bin',
+        packages: { bin: { file: 'bin.md', sha256: createHash('sha256').update(raw).digest('hex') } },
+      }),
+      'utf8',
+    );
+    const result = loadUnrestrictedPackage(dir);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.pkg.bytes).toBe(raw.length);
+      expect(result.pkg.body).toContain('\uFFFD');
+    }
     rmSync(dir, { recursive: true, force: true });
   });
 

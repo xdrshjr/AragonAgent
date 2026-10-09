@@ -481,7 +481,7 @@ function withPlanModeGate(tool: AgentTool, getMode: () => AgentMode): AgentTool 
       // see just burns a turn. `submit_plan` mutates the session mode and only
       // means something while a plan is being reviewed.
       if (mode !== 'plan' && tool.name === 'submit_plan') {
-        return errorResult(submitPlanRefusal());
+        return errorResult(submitPlanRefusal(mode));
       }
       return original(id, params, ctx);
     },

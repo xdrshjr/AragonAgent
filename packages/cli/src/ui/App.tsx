@@ -113,6 +113,15 @@ import { CommandRegistry, runSlashInput, type CommandContext } from '../commands
 import { registerBuiltinCommands } from '../commands/builtins.js';
 import { makeSkillsCommand, registerSkillCommands } from '../commands/skills.js';
 import { MODE_LABEL, MODE_TOGGLE_KEYS, nextMode, type AgentMode } from '../agent/agent-mode.js';
+
+/**
+ * The research-use warning shown on EVERY entry into unrestricted mode,
+ * immediate or deferred - one string so the two paths cannot drift apart
+ * and quietly stop warning.
+ */
+function unrestrictedEntryWarning(pkgName: string | null): string {
+  return `UNRESTRICTED mode (${pkgName ?? 'package'}). Research use only; provider accounts may be at risk.`;
+}
 import type { SelectionBridge } from './selection/selection-controller.js';
 import { createClipboardCoordinator } from './clipboard-task.js';
 import { QueuePanel } from './QueuePanel.js';
@@ -757,15 +766,26 @@ export function App({
         }, decision.graceMs);
       }
 
-      // A deferred `plan -> build` becomes real here and nowhere else (§3.2).
+      // A deferred mode switch becomes real here and nowhere else (§3.2).
+      // A deferred UNRESTRICTED adoption gets the SAME research-use warning
+      // as an immediate entry - the deferral merely delayed the posture
+      // change, not the user's duty to notice it.
       const applied = controller.applyPendingMode();
       if (applied) {
         dispatch({ type: 'setAgentMode', mode: applied.effective, pending: null });
-        dispatch({
-          type: 'pushToast',
-          level: 'info',
-          text: `${MODE_LABEL[applied.effective]} mode.`,
-        });
+        if (applied.effective === 'unrestricted') {
+          dispatch({
+            type: 'pushToast',
+            level: 'warn',
+            text: unrestrictedEntryWarning(controller.getUnrestrictedStatus().pkg?.name ?? null),
+          });
+        } else {
+          dispatch({
+            type: 'pushToast',
+            level: 'info',
+            text: `${MODE_LABEL[applied.effective]} mode.`,
+          });
+        }
       }
     });
     return () => {
@@ -1539,19 +1559,18 @@ export function App({
   const applyMode = (next: AgentMode, opts: { force?: boolean; silent?: boolean } = {}) => {
     const applied = controller.setAgentMode(next, opts.force ? { force: true } : {});
     dispatch({ type: 'setAgentMode', mode: applied.effective, pending: applied.pending });
-    if (opts.silent) return applied;
     if (next === 'unrestricted' && applied.effective !== 'unrestricted' && !applied.pending) {
+      // BEFORE the silent early-return: a refused entry is a problem the
+      // user must hear about even on the silent path. No silent caller can
+      // reach it today (the plan approval forces 'build'); this is a guard.
       toast('error', `No unrestricted package in ${controller.getUnrestrictedStatus().dir} - mode not entered.`);
       return applied;
     }
+    if (opts.silent) return applied;
     if (applied.pending) {
       toast('info', `${MODE_LABEL[applied.pending]} mode applies after this run.`);
     } else if (applied.effective === 'unrestricted') {
-      const pkg = controller.getUnrestrictedStatus().pkg;
-      toast(
-        'warn',
-        `UNRESTRICTED mode (${pkg ? pkg.name : 'package'}). Research use only; provider accounts may be at risk.`,
-      );
+      toast('warn', unrestrictedEntryWarning(controller.getUnrestrictedStatus().pkg?.name ?? null));
     } else {
       toast('info', `${MODE_LABEL[applied.effective]} mode.`);
     }
