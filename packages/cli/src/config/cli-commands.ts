@@ -27,6 +27,7 @@ import {
   clampFastConfig,
   clampRetryConfig,
   clampCompactionConfig,
+  clampTeamConfig,
   parseThresholdInput,
   clampUpdateConfig,
   coercePositiveInt,
@@ -74,6 +75,8 @@ export const TEAM_CONFIG_SET_KEYS = [
   'team.subagentTimeoutMs',
   'team.dispatchTimeoutMs',
   'team.maxTurnsPerSubagent',
+  'team.overseer',
+  'team.overseerIntervalMs',
 ] as const;
 
 /**
@@ -114,7 +117,6 @@ export const FAST_CONFIG_SET_KEYS = [
   'fast.model',
   'fast.baseUrl',
   'fast.thinkingLevel',
-  'fast.delegate',
   'fast.review',
   'fast.reviewEveryTurns',
   'fast.reviewContextTurns',
@@ -219,25 +221,34 @@ export function applyTeamConfigSet(key: string, value: string): Partial<Persiste
   const patch = (team: Partial<TeamConfig>): Partial<PersistedConfig> =>
     ({ team } as Partial<PersistedConfig>);
 
+  // EVERY NUMERIC KEY ROUTES THROUGH `clampTeamConfig`, not through
+  // `coercePositiveInt`, for the reason `applyRetryConfigSet` records one block
+  // below: `coercePositiveInt` returns its fallback for `n <= 0`, so
+  // `config set team.subagentTimeoutMs 0` would write 300000 (the old default)
+  // instead of the documented NO-LIMIT value, silently. The caller echoes the
+  // STORED value, which is what makes an out-of-range input visible.
+  const clampOne = <K extends keyof TeamConfig>(field: K): Partial<TeamConfig> => {
+    const merged = clampTeamConfig({ ...DEFAULT_TEAM_CONFIG, [field]: value });
+    return { [field]: merged[field] } as Partial<TeamConfig>;
+  };
+
   switch (key) {
     case 'team.enabled':
       return patch({ enabled: isTrue(value) });
     case 'team.maxSubagents':
-      return patch({ maxSubagents: coercePositiveInt(value, DEFAULT_TEAM_CONFIG.maxSubagents) });
+      return patch(clampOne('maxSubagents'));
     case 'team.maxConcurrent':
-      return patch({ maxConcurrent: coercePositiveInt(value, DEFAULT_TEAM_CONFIG.maxConcurrent) });
+      return patch(clampOne('maxConcurrent'));
     case 'team.subagentTimeoutMs':
-      return patch({
-        subagentTimeoutMs: coercePositiveInt(value, DEFAULT_TEAM_CONFIG.subagentTimeoutMs),
-      });
+      return patch(clampOne('subagentTimeoutMs'));
     case 'team.dispatchTimeoutMs':
-      return patch({
-        dispatchTimeoutMs: coercePositiveInt(value, DEFAULT_TEAM_CONFIG.dispatchTimeoutMs),
-      });
+      return patch(clampOne('dispatchTimeoutMs'));
     case 'team.maxTurnsPerSubagent':
-      return patch({
-        maxTurnsPerSubagent: coercePositiveInt(value, DEFAULT_TEAM_CONFIG.maxTurnsPerSubagent),
-      });
+      return patch(clampOne('maxTurnsPerSubagent'));
+    case 'team.overseer':
+      return patch({ overseer: isTrue(value) });
+    case 'team.overseerIntervalMs':
+      return patch(clampOne('overseerIntervalMs'));
     default:
       return null;
   }
@@ -321,8 +332,6 @@ export function applyFastConfigSet(key: string, value: string): Partial<Persiste
       return patch(clampOne('baseUrl'));
     case 'fast.thinkingLevel':
       return patch(clampOne('thinkingLevel'));
-    case 'fast.delegate':
-      return patch({ delegate: isTrue(value) });
     case 'fast.review':
       return patch({ review: isTrue(value) });
     case 'fast.reviewEveryTurns':

@@ -119,6 +119,7 @@ function config(overrides: Partial<CliConfig> = {}): CliConfig {
     cwd: join(tmp.root, 'a'),
     color: true,
     ...overrides,
+    keyboardEnhancement: overrides.keyboardEnhancement ?? false,
   };
 }
 

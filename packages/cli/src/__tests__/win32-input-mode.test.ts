@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { ENTER_NEWLINE_FRAME } from '../input/limits.js';
+import { ENTER_NEWLINE_FRAME, INDEX_KEY_FRAME } from '../input/limits.js';
 import {
   splitWin32KeySequences,
   translateWin32Key,
@@ -77,6 +77,18 @@ describe('translateWin32Key (translated === baseline bytes)', () => {
     ['Esc', rec(27, 1, 27, 0), ESC],
     ['Tab', rec(9, 15, 9, 0), '\t'],
     ['Shift+Tab', rec(9, 15, 9, 16), `${ESC}[Z`],
+    // Windows synthesises the SAME Tab char 0x09 for Ctrl+I, but the vk is
+    // NOT agreed on: consoles that cook the chord down send VK_TAB (9),
+    // while the physical-key rule every Ctrl+letter probe capture follows
+    // (Ctrl+A -> vk 65, Ctrl+J -> vk 74) sends the LETTER key 0x49. Both
+    // rows below are real shapes; the tell-apart from plain Tab is ctrl,
+    // and the translator is the ONLY layer that can hand the app a
+    // distinct intent (INDEX frame).
+    ['Ctrl+I (VK_TAB shape)', rec(9, 15, 9, 8), INDEX_KEY_FRAME],
+    // Ctrl+Shift+I keeps the Shift+Tab shape: the shift meaning wins.
+    ['Ctrl+Shift+I (VK_TAB shape)', rec(9, 15, 9, 24), `${ESC}[Z`],
+    ['Ctrl+I (letter vk shape)', rec(73, 23, 9, 8), INDEX_KEY_FRAME],
+    ['Ctrl+Shift+I (letter vk shape)', rec(73, 23, 9, 24), `${ESC}[Z`],
     ['Up', rec(38, 72, 0, 0), `${ESC}[A`],
     ['Shift+Up', rec(38, 72, 0, 16), `${ESC}[1;2A`],
     ['Ctrl+Up', rec(38, 72, 0, 8), `${ESC}[1;5A`],

@@ -638,12 +638,59 @@ export interface TeamConfig {
    * failed subagent.
    */
   maxConcurrent: number;
-  /** One child's wall clock before its own abort. */
+  /**
+   * One child's wall clock before its own abort. `0` (the default) means NO
+   * ceiling: a subagent runs until it finishes or is aborted, exactly like
+   * the lead, whose only in-run ceiling is the event-silence idle watchdog
+   * a child already keeps. A wedged child still dies on its OWN watchdog.
+     *
+     * WITH `team.overseer` ON (the default) this NEVER aborts anything
+     * (subagent-overseer-v2 D-4): a positive value is only a COMPATIBILITY
+     * SOURCE for the supervisor's first cadence check, honouring users who
+     * already treated it as a trigger point. The only hard abort left is
+     * the legacy regime (`team.overseer: false`).
+   */
   subagentTimeoutMs: number;
-  /** The whole dispatch's wall clock. Also the `task` tool-timeout override. */
+  /**
+   * The whole dispatch's wall clock, and the `task` tool-timeout override.
+   * `0` (the default) means NO ceiling: the executor override of `0` arms no
+   * timer (see Core `ToolExecutor`), so the fan-out lasts as long as its
+   * slowest child and only an Esc ends it early.
+   */
   dispatchTimeoutMs: number;
-  /** Runaway-loop cap: turns one child may take before it is stopped. */
+  /**
+   * Runaway-loop cap: turns one child may take before it is stopped.
+   * `0` (the default) means NO cap - the same exposure the lead has, and
+   * the deliberate trade of "subagents as capable as the main agent".
+   */
   maxTurnsPerSubagent: number;
+  /**
+   * The dispatch supervisor (team-overseer / subagent-overseer-v2): time
+   * ceilings on children become inspection triggers for a fast-tier
+   * supervisor that decides wait / nudge / replace / abandon, instead of
+   * aborts. Default TRUE.
+   *
+   * READ PER DISPATCH. The supervisor ticks on a cadence ladder over every
+   * live child, and NO timeout is a death sentence while this is on: with
+   * the fast tier missing a tick degrades to an announced unassisted wait,
+   * never a kill. With this FALSE, children run exactly the pre-feature
+   * legacy regime: `subagentTimeoutMs` is a hard abort and silence is the
+   * child's own watchdog.
+   */
+  overseer: boolean;
+  /**
+   * Supervisor cadence BASE, in milliseconds (subagent-overseer-v2 D-8).
+   * `0` (the default) = the structural default
+   * (`TEAM_LIMITS.overseerDefaultCheckMs`, 300 s).
+   *
+   * EFFECTIVE FIRST CHECK, derived read-only and never written back:
+   * `overseerIntervalMs > 0` wins; otherwise a positive
+   * `subagentTimeoutMs` is honoured (users who already treated it as a
+   * trigger point); otherwise the structural default. Later checks grow
+   * by `overseerCadenceRatio` (1.6), clamped to [60 s, 900 s]. Only
+   * meaningful while `team.overseer` is true.
+   */
+  overseerIntervalMs: number;
 }
 
 /**
@@ -661,16 +708,27 @@ export const DEFAULT_TEAM_CONFIG: TeamConfig = {
   enabled: true,
   maxSubagents: 5,
   maxConcurrent: 3,
-  subagentTimeoutMs: 300_000,
-  dispatchTimeoutMs: 900_000,
-  maxTurnsPerSubagent: 24,
+  // 0 = NO LIMIT. Subagents run under the same regime as the lead: no
+  // wall clock, no turn cap; only the idle watchdog and the user's Esc.
+  subagentTimeoutMs: 0,
+  dispatchTimeoutMs: 0,
+  maxTurnsPerSubagent: 0,
+  // The dispatch supervisor, default ON (team-overseer): ceilings become
+  // inspections; the fast-tier supervisor decides what to do.
+  overseer: true,
+  // 0 = the structural cadence default (300 s). See the field docstring.
+  overseerIntervalMs: 0,
 };
 
 const SUBAGENTS_RANGE = { min: 1, max: HARD_MAX_SUBAGENTS };
 const CONCURRENT_RANGE = { min: 1, max: HARD_MAX_SUBAGENTS };
-const SUBAGENT_TIMEOUT_RANGE = { min: 30_000, max: 1_800_000 };
-const DISPATCH_TIMEOUT_RANGE = { min: 60_000, max: 3_600_000 };
-const TURNS_RANGE = { min: 4, max: 100 };
+// `min: 0` is the documented OFF SWITCH for each bound, so these MUST use
+// `clampIntAllowingZero`: plain `clampInt` folds `0` back to the fallback
+// ("my setting won't stick"), the exact trap `scrollResumeMs` records above.
+const SUBAGENT_TIMEOUT_RANGE = { min: 0, max: 1_800_000 };
+const DISPATCH_TIMEOUT_RANGE = { min: 0, max: 3_600_000 };
+const OVERSEER_INTERVAL_RANGE = { min: 0, max: 3_600_000 };
+const TURNS_RANGE = { min: 0, max: 100 };
 
 /**
  * THE single gate for every team-config read AND write, mirroring
@@ -695,20 +753,26 @@ export function clampTeamConfig(raw: unknown): TeamConfig {
       maxSubagents,
       clampInt(src.maxConcurrent, DEFAULT_TEAM_CONFIG.maxConcurrent, CONCURRENT_RANGE),
     ),
-    subagentTimeoutMs: clampInt(
+    subagentTimeoutMs: clampIntAllowingZero(
       src.subagentTimeoutMs,
       DEFAULT_TEAM_CONFIG.subagentTimeoutMs,
       SUBAGENT_TIMEOUT_RANGE,
     ),
-    dispatchTimeoutMs: clampInt(
+    dispatchTimeoutMs: clampIntAllowingZero(
       src.dispatchTimeoutMs,
       DEFAULT_TEAM_CONFIG.dispatchTimeoutMs,
       DISPATCH_TIMEOUT_RANGE,
     ),
-    maxTurnsPerSubagent: clampInt(
+    maxTurnsPerSubagent: clampIntAllowingZero(
       src.maxTurnsPerSubagent,
       DEFAULT_TEAM_CONFIG.maxTurnsPerSubagent,
       TURNS_RANGE,
+    ),
+    overseer: bool(src.overseer, DEFAULT_TEAM_CONFIG.overseer),
+    overseerIntervalMs: clampIntAllowingZero(
+      src.overseerIntervalMs,
+      DEFAULT_TEAM_CONFIG.overseerIntervalMs,
+      OVERSEER_INTERVAL_RANGE,
     ),
   };
 }
@@ -993,8 +1057,6 @@ export interface FastConfig {
   /** Applied to fast-tier children and to the review call. Defaults to `'off'`:
    *  a "fast" model asked to think for 32 768 tokens is not fast (D-13). */
   thinkingLevel: ThinkingLevel;
-  /** Allow `model: "fast"` on `task`. */
-  delegate: boolean;
   /** Run the periodic asynchronous review. */
   review: boolean;
   /** Completed turns between reviews. */
@@ -1033,7 +1095,6 @@ export const DEFAULT_FAST_CONFIG: FastConfig = {
   model: '',
   baseUrl: '',
   thinkingLevel: 'off',
-  delegate: true,
   review: true,
   reviewEveryTurns: 5,
   reviewContextTurns: 3,
@@ -1078,7 +1139,6 @@ export function clampFastConfig(raw: unknown): FastConfig {
     model: text(src.model, DEFAULT_FAST_CONFIG.model),
     baseUrl: text(src.baseUrl, DEFAULT_FAST_CONFIG.baseUrl),
     thinkingLevel: clampThinkingLevel(src.thinkingLevel, DEFAULT_FAST_CONFIG.thinkingLevel),
-    delegate: bool(src.delegate, DEFAULT_FAST_CONFIG.delegate),
     review: bool(src.review, DEFAULT_FAST_CONFIG.review),
     reviewEveryTurns: clampInt(
       src.reviewEveryTurns,
@@ -1272,10 +1332,13 @@ export interface CompactionConfig {
    * (context-auto-compaction-hardening §3.4 / W3). Default TRUE.
    *
    * IT REVERSES D-15, WHOSE PREMISE IS MEASURABLY FALSE at the configured bounds:
-   * `team.maxTurnsPerSubagent` is 24 and `team.dispatchTimeoutMs` is 900 000, and
-   * 24 turns over fifteen minutes is the same profile as the lead run this
-   * feature exists for. When a child overflows today its history is discarded and
-   * the lead receives one partial sentence for the whole dispatch.
+   * D-15 measured `team.maxTurnsPerSubagent` 24 and `team.dispatchTimeoutMs`
+   * 900 000, where 24 turns over fifteen minutes is already the same profile
+   * as the lead run this feature exists for — and the parity defaults of
+   * 2ff15a9c3 later removed both ceilings (0 = no turn cap, no wall clock),
+   * which makes the premise falser still, not truer. When a child overflows
+   * today its history is discarded and the lead receives one partial sentence
+   * for the whole dispatch.
    *
    * `false` REPRODUCES ROUND 1 EXACTLY: `subagent.ts` spreads no `contextManager`
    * key at all, so the child's loop gate tests an absent field.

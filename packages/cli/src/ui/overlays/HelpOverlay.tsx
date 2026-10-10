@@ -34,9 +34,13 @@ function keyRows(times: string): [string, string][] {
     // either of them is a key the affected user never learns about, which is the
     // one-shot notice's failure repeated with a different switch.
     ['Shift+Tab / Ctrl+P', 'Toggle plan mode (same as /plan)'],
-    [`Ctrl+C ${times}2`, 'Exit'],
+    // The ladder clears a draft first (ctrl-c-clear-draft-exit):
+    // with a draft x2 clears the input and x3 exits; an empty input
+    // keeps the previous x2 exit.
+    ['Ctrl+C', `Draft: ${times}2 clear input, ${times}3 exit. Empty: ${times}2 exit`],
     ['Ctrl+L', 'Redraw the frame'],
     ['Ctrl+T', 'Show/hide thinking (off by default)'],
+    ['Ctrl+I', 'Build the project index (bundled skill; asks first; needs keyboard enhancement)'],
     ['Ctrl+G', 'Expand/collapse status details; disabled while an overlay is open'],
     ['PgUp / PgDn', 'Scroll a page (transcript, or this overlay)'],
     ['Shift+Up / Shift+Down', 'Scroll the transcript a line (full-screen mode)'],
@@ -48,6 +52,7 @@ function keyRows(times: string): [string, string][] {
     ['Drag right edge', 'Scroll messages; input stays fixed; type to return to newest output'],
     ['Bottom rows', 'Fixed input, one status row; Ctrl+G adds one detail row'],
     ['C / Th / t/s', 'Context percent / thinking level / run-average output tokens per second'],
+    ['B / P / P>B', 'Status-row mode word: BUILD / PLAN; CUR>PENDING = switch deferred to run end'],
     ['O/N/L/M/H/X', 'Thinking: off/minimal/low/medium/high/xhigh'],
     ['~ / ? / --', 'Estimated context / unknown context / unavailable output speed'],
     ['Output speed', 'Main Agent reported output tokens / total run time, including tools and waits'],
@@ -57,7 +62,6 @@ function keyRows(times: string): [string, string][] {
     ['Ctrl+C (with a selection)', 'Copy the pending selection - does not arm exit'],
     ['Native terminal selection', 'Copy-on-select is controlled by your terminal settings'],
     ['Queue / /queue', 'Pending receipt; /queue opens full text, PgUp/PgDn pages, Esc closes'],
-    ['plan>build / build>plan', 'A mode switch pending until the current run ends'],
     ['/bg / /todo status', 'Show full service and TODO counts when status fields are hidden'],
     ['Queue paused', 'Unreceived messages persist after interruption until accepted or cancelled'],
     ['Up / Down', 'Prompt history (empty input)'],
@@ -135,7 +139,6 @@ const FAST_ROWS: [string, string][] = [
   ['/fast model <id>', 'Set the fast model; accepts provider:model'],
   ['/fast same', 'Run the fast tier on the main model'],
   ['/fast review <n> | off', 'Turns between automatic reviews, or turn them off'],
-  ['/fast delegate on | off', 'Allow model:"fast" on task subagents'],
   ['--fast / --no-fast', 'Start a session with the tier on or off (also ARAGON_FAST=1)'],
   ['<fast_review>', 'An automated second opinion from the fast model - advice, not the user'],
 ];

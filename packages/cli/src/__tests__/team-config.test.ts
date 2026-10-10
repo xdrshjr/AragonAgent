@@ -74,15 +74,28 @@ describe('clampTeamConfig', () => {
     expect(clampTeamConfig({ maxSubagents: 8, maxConcurrent: 3 }).maxConcurrent).toBe(3);
   });
 
-  it('clamps every timeout and the turn cap into its documented range', () => {
-    const low = clampTeamConfig({
-      subagentTimeoutMs: 1,
-      dispatchTimeoutMs: 1,
-      maxTurnsPerSubagent: 1,
+  it('keeps an explicit 0: the documented off switch for each ceiling', () => {
+    // Main-agent parity: 0 means NO limit, and a clamp that folds 0 back to
+    // the old default is the `scrollResumeMs` trap - "my setting won't stick".
+    const zeroed = clampTeamConfig({
+      subagentTimeoutMs: 0,
+      dispatchTimeoutMs: 0,
+      maxTurnsPerSubagent: 0,
     });
-    expect(low.subagentTimeoutMs).toBe(30_000);
-    expect(low.dispatchTimeoutMs).toBe(60_000);
-    expect(low.maxTurnsPerSubagent).toBe(4);
+    expect(zeroed.subagentTimeoutMs).toBe(0);
+    expect(zeroed.dispatchTimeoutMs).toBe(0);
+    expect(zeroed.maxTurnsPerSubagent).toBe(0);
+  });
+
+  it('clamps the timeout range and the turn cap from ABOVE only', () => {
+    const low = clampTeamConfig({
+      subagentTimeoutMs: 5_000,
+      dispatchTimeoutMs: 10_000,
+      maxTurnsPerSubagent: 2,
+    });
+    expect(low.subagentTimeoutMs).toBe(5_000);
+    expect(low.dispatchTimeoutMs).toBe(10_000);
+    expect(low.maxTurnsPerSubagent).toBe(2);
 
     const high = clampTeamConfig({
       subagentTimeoutMs: 99_000_000,
@@ -197,5 +210,67 @@ describe('aragon config set team.*', () => {
     expect(applyTeamConfigSet('team.enabled', 'true')).toEqual({ team: { enabled: true } });
     expect(applyTeamConfigSet('team.enabled', '1')).toEqual({ team: { enabled: true } });
     expect(applyTeamConfigSet('team.enabled', 'false')).toEqual({ team: { enabled: false } });
+  });
+
+  it('sets team.overseer - the shell surface the /team command also writes (team-overseer)', () => {
+    // The slash command is the interactive surface; `config set` is the one
+    // scripts and dotfile edits use. A supervisor key reachable from only
+    // one of the two presents as "my setting won't stick" - the exact
+    // failure the TEAM_CONFIG_SET_KEYS membership test above exists for.
+    expect(applyTeamConfigSet('team.overseer', 'false')).toEqual({ team: { overseer: false } });
+    expect(applyTeamConfigSet('team.overseer', 'true')).toEqual({ team: { overseer: true } });
+    expect(applyTeamConfigSet('team.overseer', '1')).toEqual({ team: { overseer: true } });
+  });
+});
+
+describe('team.overseer (team-overseer)', () => {
+  it('defaults ON, and a hand-edited value round-trips through the clamp', () => {
+    expect(DEFAULT_TEAM_CONFIG.overseer).toBe(true);
+    expect(clampTeamConfig({}).overseer).toBe(true);
+    expect(clampTeamConfig({ overseer: false }).overseer).toBe(false);
+    expect(clampTeamConfig({ overseer: true }).overseer).toBe(true);
+    // A non-boolean reads as not set (the `bool` helper rule), never as false:
+    // a typo must not silently disarm the supervisor.
+    expect(clampTeamConfig({ overseer: 'yes' }).overseer).toBe(true);
+  });
+
+  it('loads from disk with the default when the key is absent', () => {
+    writeConfig({ maxSubagents: 3 });
+    expect(loadConfig({ cwd: TMP }).team.overseer).toBe(true);
+    writeConfig({ overseer: false });
+    expect(loadConfig({ cwd: TMP }).team.overseer).toBe(false);
+  });
+});
+
+describe('team.overseerIntervalMs (subagent-overseer-v2 D-8)', () => {
+  it('defaults to 0 = the structural cadence, and 0 survives the clamp', () => {
+    expect(DEFAULT_TEAM_CONFIG.overseerIntervalMs).toBe(0);
+    expect(clampTeamConfig({}).overseerIntervalMs).toBe(0);
+    expect(clampTeamConfig({ overseerIntervalMs: 0 }).overseerIntervalMs).toBe(0);
+  });
+
+  it('clamps from above at one hour, like dispatchTimeoutMs', () => {
+    expect(clampTeamConfig({ overseerIntervalMs: 5_000 }).overseerIntervalMs).toBe(5_000);
+    expect(clampTeamConfig({ overseerIntervalMs: 99_000_000 }).overseerIntervalMs).toBe(3_600_000);
+    // A non-numeric reads as not set, never as a scary small interval.
+    expect(clampTeamConfig({ overseerIntervalMs: 'soon' }).overseerIntervalMs).toBe(0);
+  });
+
+  it('loads from disk and survives a round-trip through the store', () => {
+    writeConfig({ overseerIntervalMs: 600_000 });
+    expect(loadConfig({ cwd: TMP }).team.overseerIntervalMs).toBe(600_000);
+  });
+
+  it('is reachable from `aragon config set`, clamped by the same gate', () => {
+    expect(applyTeamConfigSet('team.overseerIntervalMs', '120000')).toEqual({
+      team: { overseerIntervalMs: 120_000 },
+    });
+    expect(applyTeamConfigSet('team.overseerIntervalMs', '999999999')).toEqual({
+      team: { overseerIntervalMs: 3_600_000 },
+    });
+    // 0 must stick: it is the documented "use the structural default".
+    expect(applyTeamConfigSet('team.overseerIntervalMs', '0')).toEqual({
+      team: { overseerIntervalMs: 0 },
+    });
   });
 });

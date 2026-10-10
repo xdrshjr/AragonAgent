@@ -1501,10 +1501,6 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
       const runs: SubagentRun[] = action.specs.map((spec) => ({
         label: spec.label,
         description: spec.description,
-        // Already downgraded by the normalizer when the tier was unavailable, so
-        // the card and the report agree from the first frame (fast-model-tier
-        // §3.4).
-        tier: spec.tier,
         phase: 'queued',
         turns: 0,
         toolCalls: 0,

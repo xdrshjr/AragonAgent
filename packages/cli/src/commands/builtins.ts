@@ -132,8 +132,7 @@ function formatFastStatus(controller: AgentController): string {
   }
 
   lines.push(
-    `Review: ${cfg.review ? `every ${cfg.reviewEveryTurns} turns` : 'off'}. ` +
-      `Delegation: ${cfg.delegate ? 'on' : 'off'}.`,
+    `Review: ${cfg.review ? `every ${cfg.reviewEveryTurns} turns` : 'off'}.`,
   );
 
   const snapshot = status.snapshot;
@@ -158,7 +157,6 @@ function formatFastStatus(controller: AgentController): string {
   const budget = snapshot.budgetReached ? ' (budget reached - raise with /fast budget <n>)' : '';
   lines.push(
     `This session: ${snapshot.reviews}/${snapshot.reviewBudget} reviews${budget}, ` +
-      `${snapshot.delegated} delegated subagents, ` +
       `in ${formatTokens(snapshot.usage.inputTokens)} / out ` +
       `${formatTokens(snapshot.usage.outputTokens)}, cost ${cost}.`,
   );
@@ -303,7 +301,7 @@ const COMMANDS: SlashCommand[] = [
   },
   {
     name: 'team',
-    description: 'Team subagents: status | on | off | max <n>',
+    description: 'Team subagents: status | on | off | max <n> | overseer on|off',
     /**
      * `/team on` CANNOT turn team mode on in a session that started without it,
      * and this command must not pretend otherwise (§4.5 / D-17 / P0-2).
@@ -347,7 +345,8 @@ const COMMANDS: SlashCommand[] = [
         ctx.notify(
           'info',
           `Team mode: ${state}. Max subagents: ${cfg.maxSubagents}, ` +
-            `concurrent: ${cfg.maxConcurrent}.${roster}`,
+            `concurrent: ${cfg.maxConcurrent}, supervisor: ${cfg.overseer ? 'on' : 'off'}` +
+              `${cfg.overseer ? ' (never kills; checks the fast tier each tick)' : ' (legacy hard timeouts)'}.${roster}`,
         );
         return;
       }
@@ -391,14 +390,33 @@ const COMMANDS: SlashCommand[] = [
         return;
       }
 
-      ctx.notify('warn', `Unknown argument "${verb}" - use /team [status|on|off|max <n>].`);
+      if (verb === 'overseer') {
+        if (value !== 'on' && value !== 'off') {
+          ctx.notify('warn', 'Usage: /team overseer on|off');
+          return;
+        }
+        // Read LIVE per dispatch by the runtime, so no rebuild is needed - the
+        // same reason this command does not touch the tool array (its own header
+        // comment). Clamped by `setTeamConfig` and again on the persist path.
+        const applied = controller.setTeamConfig({ overseer: value === 'on' });
+        ctx.persistConfig({
+          team: { overseer: applied.overseer } as PersistedConfig['team'],
+        });
+        ctx.toast('success', `Dispatch supervisor ${applied.overseer ? 'on' : 'off'}.`);
+        return;
+      }
+
+      ctx.notify(
+        'warn',
+        `Unknown argument "${verb}" - use /team [status|on|off|max <n>|overseer on|off].`,
+      );
     },
   },
   {
     name: 'fast',
     description:
       'Fast model tier: status | on | off | model <id> | provider <id> | same | ' +
-      'review <n|off> | budget <n> | delegate on|off',
+      'review <n|off> | budget <n>',
     /**
      * `/fast on` CANNOT turn the tier on in a session that started without it,
      * for the reason `/team on` above records at length: the tool array is built
@@ -590,22 +608,10 @@ const COMMANDS: SlashCommand[] = [
         return;
       }
 
-      if (verb === 'delegate') {
-        const raw = (value ?? '').trim().toLowerCase();
-        if (raw !== 'on' && raw !== 'off') {
-          ctx.notify('warn', 'Usage: /fast delegate <on|off>');
-          return;
-        }
-        if (!persist({ delegate: raw === 'on' })) return;
-        ctx.toast('success', `Fast delegation ${raw}.`);
-        return;
-      }
-
       ctx.notify(
         'warn',
         `Unknown argument "${verb}" - use /fast ` +
-          '[status|on|off|model <id>|provider <id>|same|review <n|off>|budget <n>|' +
-          'delegate on|off].',
+          '[status|on|off|model <id>|provider <id>|same|review <n|off>|budget <n>].',
       );
     },
   },

@@ -209,6 +209,7 @@ const CONFIG: CliConfig = {
   compaction: { ...DEFAULT_COMPACTION_CONFIG, enabled: false },
   cwd: '/work',
   color: true,
+  keyboardEnhancement: false,
   colorLevel: 3,
   unicode: true,
 };

@@ -12,6 +12,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Message, ModelInfo, TokenUsage } from '@aragon-agent/core';
 import { CONTEXT_METER_TICK_MS, ContextMeter, toContextUsage } from '../compaction/meter.js';
+import { getLogger } from '../logging/logger.js';
 
 const MODEL: ModelInfo = {
   id: 'claude-sonnet-4-5',
@@ -479,5 +480,124 @@ describe('stable gate cost', () => {
     expect(reads).toBe(0);
     samples.sort((a, b) => a - b);
     console.log(`stable gate: messages=1000, chars=200000, samples=100, P95=${samples[94]}ms`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T10 - the zero-input defense (context-usage-zero-input-tokens B)
+// ---------------------------------------------------------------------------
+
+describe('T10 - a usage that measured no input side is not a measurement', () => {
+  const GATEWAY_USAGE: TokenUsage = { inputTokens: 0, outputTokens: 245 };
+
+  it('does not arm the measured branch - the gauge degrades to an honest estimate', () => {
+    // THE §2.2 REPRO, INVERTED. Pre-fix, arming the measured branch with a
+    // 0-input usage showed occupied=245 (0%) as `source: 'usage'` - a confident
+    // zero that hid the `~`, starved the trigger and mis-priced the session.
+    // Post-fix the same history reads as an estimate of the right magnitude.
+    const messages: Message[] = [];
+    for (let i = 0; i < 30; i += 1) {
+      messages.push(user(`turn ${i}: ${'x'.repeat(2_000)}`));
+      messages.push(assistant('answer '.repeat(200)));
+    }
+    const h = harness({ messages, systemPrompt: 'sys' });
+    h.meter.onTurnEnd(GATEWAY_USAGE);
+    const after = h.meter.currentUsage();
+    expect(after.source).toBe('estimate');
+    expect(after.occupied).toBeGreaterThan(20_000);
+    expect(after.pct).toBeGreaterThan(0);
+  });
+
+  it('keeps an earlier good measurement and estimates only what was appended since', () => {
+    // THE KIMI SHAPE: the gateway discloses input on most turns and drops it
+    // on a few. A good measurement of a prefix that still exists is better
+    // than a whole-history estimate - the history only grows between splices,
+    // so "old good base + appended estimate" stays self-consistent.
+    const measured = [user('a'), user('b')];
+    const h = harness({ messages: measured });
+    h.meter.onTurnEnd(USAGE);
+    h.setMessages(afterTurn(measured, toolResult('t', 60_000)));
+    h.meter.onTurnEnd(GATEWAY_USAGE);
+    const p = h.meter.current();
+    expect(p.source).toBe('usage');
+    expect(p.deltaTokens).toBeGreaterThan(10_000);
+    expect(p.occupied).toBeGreaterThan(100_500);
+  });
+
+  it('does not overwrite estimateOffset or the prefix bookkeeping', () => {
+    // (a) With no earlier good measurement the offset stays undefined. Pre-fix
+    //     a 245-token usage clamped it to 0, destroying the estimate branch's
+    //     only calibration source for the rest of the session.
+    const fresh = harness({ messages: [user('a')] });
+    fresh.meter.onTurnEnd(GATEWAY_USAGE);
+    expect(fresh.meter.current().estimateOffset).toBeUndefined();
+
+    // (b) A seeded offset survives a later zero-input turn AND the splice that
+    //     follows it (the shallow reset keeps it - I-5 / I-8).
+    const measured = [user('a'.repeat(400)), user('b'.repeat(400))];
+    const seeded = harness({ messages: measured, systemPrompt: 'sys' });
+    seeded.meter.onTurnEnd({ inputTokens: 50_000, outputTokens: 0 });
+    const offset = seeded.meter.lastPublished()!.estimateOffset ?? 0;
+    expect(offset).toBeGreaterThan(40_000);
+    seeded.setMessages([user('the summary')]);
+    seeded.meter.onHistorySpliced();
+    seeded.meter.onTurnEnd(GATEWAY_USAGE);
+    const p = seeded.meter.current();
+    expect(p.source).toBe('estimate');
+    expect(p.estimateOffset).toBe(offset);
+    expect(p.occupied).toBeGreaterThan(offset);
+  });
+
+  it('input 0 with a huge cache read IS a measurement and still arms the branch', () => {
+    // Anthropic's `input_tokens` EXCLUDES cached tokens; a deeply cached turn
+    // legitimately reports 0 uncached input. Rejecting it on `inputTokens`
+    // alone would strand a correct gauge on the estimator - the input-side SUM
+    // is the predicate, and this usage passes it.
+    const h = harness({ messages: [user('a'), user('b')] });
+    h.meter.onTurnEnd({ inputTokens: 0, cacheReadTokens: 90_000, outputTokens: 245 });
+    const p = h.meter.current();
+    expect(p.source).toBe('usage');
+    expect(p.occupied).toBe(90_245);
+  });
+
+  it('S3-b: after a splice, the next zero-input turn_end does not collapse the gauge', () => {
+    // The post-compaction reading must survive the FIRST gateway-style turn_end
+    // after it. Pre-fix that turn re-armed the measured branch with a 0-input
+    // usage and the gauge fell straight back to ~0% - the "compaction broke the
+    // display" symptom (S3).
+    const measured = [user('a'.repeat(400)), user('b'.repeat(400))];
+    const h = harness({ messages: measured, systemPrompt: 'sys' });
+    h.meter.onTurnEnd({ inputTokens: 50_000, outputTokens: 0 });
+    h.setMessages([user('the summary')]);
+    h.meter.onHistorySpliced();
+    const afterSplice = h.meter.current();
+    expect(afterSplice.source).toBe('estimate');
+
+    h.setMessages([user('the summary'), user('the next task')]);
+    h.meter.onTurnEnd(GATEWAY_USAGE);
+    const p = h.meter.currentUsage();
+    expect(p.source).toBe('estimate');
+    expect(p.occupied).toBeGreaterThanOrEqual(afterSplice.occupied);
+    expect(p.pct).toBeGreaterThan(0);
+  });
+
+  it('warns once per run, not once per turn', () => {
+    // 10-09 alone saw 1,973 zero-input turns; a per-turn warn is a log flood
+    // that teaches whoever reads the file to ignore it.
+    const h = harness({ messages: [user('a'), user('b')] });
+    const warn = vi.spyOn(getLogger(), 'warn');
+    try {
+      h.meter.onTurnEnd(GATEWAY_USAGE);
+      h.meter.onTurnEnd(GATEWAY_USAGE);
+      h.meter.onTurnEnd(GATEWAY_USAGE);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        'compaction',
+        'context_input_tokens_unreported',
+        expect.objectContaining({ in: 0, out: 245 }),
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

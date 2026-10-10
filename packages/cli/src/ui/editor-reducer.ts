@@ -225,17 +225,22 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
     case 'recall':
       // `historyIndex` is SET, not reset, which is why recall cannot reuse
       // `replace` — the two differ in exactly the field that keeps the walk
-      // alive. `dismissed` and `sel` are LEFT ALONE, which is not an oversight:
-      // the three `setState` calls this replaces did not touch them either, and
-      // an Esc-dismissed popup that reopened when the user stepped through their
-      // history would be a behaviour change smuggled in by a refactor whose whole
-      // claim is that input semantics are identical (K-7).
+      // alive. `dismissed` is forced TRUE (history-recall-autocomplete-popup):
+      // recalled content is not a query the user is typing, so the suggestion
+      // popup must not appear over it - while it is visible it owns Up/Down and
+      // the second Up moves the highlight instead of stepping history. Any
+      // buffer edit (insert / backspace / replace / input ...) re-arms the
+      // popup through DRAFT_FLAGS, so typing over a recall restores them. The
+      // same gate covers the `@file` popup, which shares `dismissed`.
+      // `sel` is still LEFT ALONE: invisible while dismissed, re-homed by the
+      // next buffer change; touching it would only widen the diff (K-7 note).
       return withPrune({
         ...state,
         buffer: action.buffer,
         cursor: snapGrapheme(action.buffer, action.cursor),
         preferredVisualColumn: undefined,
         historyIndex: action.historyIndex,
+        dismissed: true,
       });
     case 'select':
       return state.sel === action.sel ? state : { ...state, sel: action.sel };

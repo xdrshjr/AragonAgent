@@ -22,56 +22,36 @@ export interface FastBlockParams {
   /** The resolved fast model id, interpolated so the prompt never names a model
    *  the tier will not actually use (§3.9 / RV-3). */
   model: string;
-  /** `fast.delegate` — whether `model: "fast"` is honoured on `task`. */
-  delegate: boolean;
   /** `fast.review` — whether `<fast_review>` blocks can appear at all. */
   review: boolean;
 }
 
 /**
- * The lead's `<fast_tier>` block. Under 1100 characters on purpose: it is paid
- * for on EVERY turn of every fast-enabled session, so anything that does not
- * change a delegation decision does not belong in it (R-11).
+ * The `<fast_tier>` block, spliced for the lead AND for task children running
+ * under a per-child reviewer. Under 1100 characters on purpose: it is paid for
+ * on EVERY turn of every fast-enabled session, so anything that does not change
+ * a decision does not belong in it (R-11).
  *
- * EACH PARAGRAPH IS PRESENT ONLY WHEN ITS CAPABILITY IS. `fast.delegate: false,
- * fast.review: true` advertises only the review, because telling a model about a
- * `model: "fast"` field that the normalizer will downgrade every time is how you
- * get a model that keeps asking for something it can never have.
+ * REVIEW-ONLY SIN MAIN-AGENT PARITY: every `task` child runs the lead's own
+ * model, so the block no longer advertises a per-child `model:"fast"`. Telling
+ * a model about a field that no longer exists is how you get a model that keeps
+ * asking for something it can never have.
  *
- * Returns `''` when neither capability is live, which the splice treats as "no
- * block" and which keeps the byte-identity branch intact.
+ * Returns `''` when the review is off, which the splice treats as "no block"
+ * and which keeps the byte-identity branch intact.
  */
 export function buildFastBlock(params: FastBlockParams): string {
-  if (!params.delegate && !params.review) return '';
-  const lines: string[] = [
+  if (!params.review) return '';
+  return [
     '<fast_tier>',
     `A second, cheaper model is available in this session (${params.model}).`,
-  ];
-
-  if (params.delegate) {
-    lines.push(
-      '',
-      'Delegation: pass model:"fast" to a task subagent whose work is mechanical and',
-      'high-volume - reading or searching many files, summarizing long command output,',
-      'applying the same small edit in several places. Keep model:"main" (the default)',
-      'for design decisions, tricky debugging, and anything that has to be right the',
-      'first time. A fast subagent has the same tools and the same permissions as any',
-      'other; only the model differs.',
-    );
-  }
-
-  if (params.review) {
-    lines.push(
-      '',
-      'Reviews: every few turns a <fast_review> block may appear in the conversation.',
-      'It is an automated second opinion from the fast model - NOT a message from the',
-      'user. Treat it as advice: act on it when it is right, say so briefly and carry',
-      'on when it is not, and never ask the user to confirm it.',
-    );
-  }
-
-  lines.push('</fast_tier>');
-  return lines.join('\n');
+    '',
+    'Reviews: every few turns a <fast_review> block may appear in the conversation.',
+    'It is an automated second opinion from the fast model - NOT a message from the',
+    'user. Treat it as advice: act on it when it is right, say so briefly and carry',
+    'on when it is not, and never ask the user to confirm it.',
+    '</fast_tier>',
+  ].join('\n');
 }
 
 export interface ReviewSystemPromptParams {

@@ -246,7 +246,10 @@ export class ExecRunner {
         reviews: snapshot.reviews,
         reviewBudget: snapshot.reviewBudget,
         budgetReached: snapshot.budgetReached,
-        delegated: snapshot.delegated,
+        // Deprecated in schema v1: always 0 since fast-tier children were
+        // removed (every task child runs the lead's model). Emitted so
+        // schema-v1 consumers keep parsing.
+        delegated: 0,
         inFlight: snapshot.inFlight,
         ...(event.type === 'review_end'
           ? {
@@ -801,6 +804,19 @@ export class ExecRunner {
         total: runs.length,
         aborted: event.outcome.aborted,
       });
+      return;
+    }
+    if (event.type === 'overseer') {
+      this.emit({
+        type: 'team',
+        sessionId: this.sessionId,
+        subtype: 'overseer',
+        label: event.label,
+        action: event.decision.action,
+        trigger: event.trigger,
+        reason: event.decision.reason,
+      });
+      return;
     }
   }
 }

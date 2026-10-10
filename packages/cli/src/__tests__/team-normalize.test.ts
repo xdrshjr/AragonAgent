@@ -75,6 +75,19 @@ describe('normalizeSubagentSpecs', () => {
     expect(new Set(specs.map((s) => s.label.toLowerCase())).size).toBe(3);
   });
 
+    it('reserves the aggregate supervisor label team (subagent-overseer-v2)', () => {
+      // `TEAM_AGGREGATE_LABEL` is the pseudo-label the runtime's dispatch-total
+      // supervisor notices travel under; a child wearing the same slug would
+      // have those notices attributed to it in the ledger and its own quiet
+      // note swallowed by the report's aggregate count. The reservation hands
+      // the spec the suffixed form, exactly like any other collision.
+      const { specs } = normalizeSubagentSpecs(
+        [spec({ label: 'team' }), spec({ label: 'Team' })],
+        5,
+      );
+      expect(specs.map((s) => s.label)).toEqual(['team-2', 'team-3']);
+    });
+
   it('clamps description and prompt rather than rejecting them', () => {
     const { specs } = normalizeSubagentSpecs(
       [spec({ description: 'd'.repeat(500), prompt: 'p'.repeat(20_000) })],

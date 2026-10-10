@@ -77,6 +77,7 @@ function config(team: Partial<TeamConfig> = {}): CliConfig {
     compaction: { ...DEFAULT_COMPACTION_CONFIG, enabled: false },
     cwd: process.cwd(),
     color: true,
+    keyboardEnhancement: false,
   };
 }
 
@@ -133,6 +134,8 @@ class StubAgent implements SubagentAgentLike {
   pauseIdleWatchdog(): void {
     this.pauses += 1;
   }
+  steer(_text: string): void {}
+  clearAllQueues(): void {}
 
   resumeIdleWatchdog(): void {
     this.pauses -= 1;
@@ -304,6 +307,9 @@ describe('TeamRuntime outcomes', () => {
     const { runtime, specs, agents } = runtimeWith([{ hang: true }, { ms: 10, summary: 'fine' }], {
       subagentTimeoutMs: 60,
       maxConcurrent: 2,
+      // subagent-overseer-v2 D-4: the hard wall clock is the LEGACY
+      // regime, armed only under `team.overseer: false`.
+      overseer: false,
     });
     const outcome = await runtime.dispatch(specs, specs.length);
     expect(agents[0]!.aborted).toBe(true);

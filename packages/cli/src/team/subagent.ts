@@ -23,7 +23,6 @@ import {
   type ModelRef,
   type ProviderRegistry,
   type SkillRegistry,
-  type ThinkingLevel,
   type TokenUsage,
   type ToolPolicyDecision,
   type ToolPolicyVerdict,
@@ -32,18 +31,19 @@ import type { AgentMode } from '../agent/agent-mode.js';
 import type { ChildContextManagerProvider } from '../compaction/child.js';
 import { formatStreamError } from '../agent/reducer.js';
 import { buildSystemPrompt } from '../agent/system-prompt.js';
+import { buildFastBlock } from '../fast/prompt.js';
 import { createBuiltinTools, type ConfirmRequest } from '../tools/index.js';
 import type { CliConfig } from '../config/schema.js';
 import type { ToolPermission } from '../exec/permission.js';
-import type { FastTierName } from '../fast/types.js';
 import { pickActivityArgs, sanitizeActivity } from './activity.js';
+import type { ChildReviewProvider } from './child-reviewer.js';
 import { TEAM_LIMITS, TEAM_SUBAGENT_TOOL_NAMES } from './limits.js';
 import { isRetryableStreamError } from './retry.js';
 import { TeamBus } from './bus.js';
 import { makeTeamSend, makeTeamWait, withMailboxTail } from './comm-tools.js';
 import type { TeamHumanQueue, WatchdogPausable } from './human-queue.js';
 import { buildSubagentBlock } from './prompt.js';
-import type { SubagentRun, SubagentSpec } from './types.js';
+import type { OverseerVerdict, SubagentRun, SubagentSpec } from './types.js';
 
 /**
  * The slice of `Agent` a child is used through.
@@ -56,6 +56,10 @@ export interface SubagentAgentLike extends WatchdogPausable {
   prompt(text: string): Promise<void>;
   abort(): void;
   subscribe(listener: (event: AgentEvent) => void): () => void;
+  /** Steering surface for the child's own fast reviewer (core `Agent.steer`). */
+  steer(text: string): void;
+  /** Queued-block hygiene on abort, again mirroring the lead (D-21). */
+  clearAllQueues(): void;
   /**
    * The child's live history, for its own context manager
    * (context-auto-compaction-hardening §3.4.3 / W3).
@@ -121,19 +125,19 @@ export interface SubagentDeps {
   humanQueue?: TeamHumanQueue;
   agentFactory: SubagentAgentFactory;
   /**
-   * Which model and thinking level a tier runs on (fast-model-tier §3.4).
-   *
-   * OPTIONAL, defaulting to the session's own model, so every existing caller
-   * and test compiles unchanged and a `--no-fast` session builds children
-   * exactly as it always did.
-   *
-   * `resolveTier('fast')` RETURNS THE MAIN TIER when the fast tier is not
-   * available, which is what makes the two guards agree BY CONSTRUCTION: the
-   * normalizer can never produce a `tier: 'fast'` spec this factory would
-   * refuse, and this factory can never build a child against a `ModelRef` the
-   * tier stopped resolving twenty minutes ago (RV-3 / R-14).
+   * Whether the dispatch supervisor is live for THIS dispatch
+   * (team-overseer). Read once per dispatch by the runtime and spread here;
+   * when true the child's OWN idle watchdog is lengthened by
+   * `TEAM_LIMITS.overseerWatchdogFactor`, so the supervisor's soft silence
+   * inspection at `idleTimeoutMs` always precedes the hard abort.
    */
-  resolveTier?: (tier: FastTierName) => { ref: ModelRef; thinkingLevel: ThinkingLevel; role?: ModelRole };
+  overseerActive?: boolean;
+  /**
+   * Per-child fast review (main-agent parity): the controller's shared
+   * provider, built on the lead's `FastWiring`. ABSENT means the session
+   * has no fast wiring, and the child is then exactly what it always was.
+   */
+  review?: ChildReviewProvider;
   /**
    * Build this child its own context manager
    * (context-auto-compaction-hardening §3.4.3 / W3).
@@ -151,6 +155,13 @@ export interface SubagentHooks {
   /** Coalesced at the source (§5.2); phase transitions always pass. */
   onUpdate: (run: SubagentRun) => void;
   onUsage: (label: string, usage: TokenUsage) => void;
+  /**
+   * UNTHROTTLED per-event callback (team-overseer I-OV3). `onUpdate` is
+   * coalesced, so it would lie about silence; the supervisor's soft stall
+   * timer needs one kick per REAL agent event. Called after the phase switch
+   * so the phase read at fire time is current.
+   */
+  onActivity?: () => void;
 }
 
 export interface SubagentHandle {
@@ -158,6 +169,28 @@ export interface SubagentHandle {
   run: SubagentRun;
   agent: SubagentAgentLike;
   tools: AgentTool[];
+  /**
+   * THE HANDLE-LEVEL ABORT, and the only one `TeamRuntime` may call. It sets a
+   * synchronous `abortRequested` flag BEFORE `agent.abort()`, which is what the
+   * child's fast reviewer reads as its guard-1 fact: an Esc or a dispatch stop
+   * must be visible to the reviewer in the same tick it happens, or the
+   * reviewer steers a `<fast_review>` block into a run that is already dying.
+   */
+  abort: () => void;
+  /**
+   * Whether `abort()` has been called on this handle (team-overseer
+   * I-OV4): the supervisor reads it before steering a nudge, so advice is
+   * never queued into a child that is already dying - the same guard-1 fact
+   * the child's own fast reviewer reads.
+   */
+  isAborted: () => boolean;
+  /**
+   * A terminal supervisor decision awaiting application by the WORKER LOOP
+   * (team-overseer I-OV1). Written by `TeamRuntime` immediately before
+   * `abort()`; read by `runOne` after `prompt()` resolves. NEVER cleared,
+   * so an abort racing the read cannot hide the cause.
+   */
+  overseerVerdict?: OverseerVerdict;
   unsubscribe: () => void;
 }
 
@@ -183,11 +216,18 @@ export function buildSubagentTools(
   deps: SubagentDeps,
   getAgent: () => WatchdogPausable | null,
 ): AgentTool[] {
+  // `team_wait`'s ceiling is the STRUCTURAL clamp when the child itself has no
+  // wall clock (`subagentTimeoutMs: 0`): a peer wait must stay bounded even when
+  // the child's run is not, or one forgotten wait would hold a slot forever.
+  const subagentTimeoutMs = deps.config.team.subagentTimeoutMs;
   const commTools = [
     makeTeamSend(deps.bus, spec.label),
     makeTeamWait(deps.bus, spec.label, {
       getAgent,
-      maxWaitMs: deps.config.team.subagentTimeoutMs,
+      maxWaitMs:
+        subagentTimeoutMs > 0
+          ? subagentTimeoutMs
+          : TEAM_LIMITS.waitMaxSeconds * 1000,
     }),
   ];
 
@@ -296,9 +336,6 @@ export function createSubagent(
   const run: SubagentRun = {
     label: spec.label,
     description: spec.description,
-    // FROM THE SPEC, which the normalizer already downgraded when the tier was
-    // unavailable — so this is what RAN, not what was asked for (§3.4).
-    tier: spec.tier,
     phase: 'queued',
     turns: 0,
     toolCalls: 0,
@@ -316,31 +353,24 @@ export function createSubagent(
 
   const tools = buildSubagentTools(spec, deps, getAgent);
 
-  // THE TWO HARDCODED CONFIG READS THAT USED TO LIVE HERE NOW ROUTE THROUGH ONE
-  // RESOLVER (fast-model-tier §3.4). The fallback reproduces them exactly, so a
-  // caller that passes no `resolveTier` builds a byte-identical child.
+  // THE CHILD'S MODEL IS THE LEAD'S MODEL, READ FROM THE DISPATCH-TIME CONFIG
+  // (main-agent parity). Same provider, same model id, same base URL, same
+  // thinking level: a delegation is never a downgrade, and the only model a
+  // child may surprise its lead with is one a settings-screen edit made live
+  // between two dispatches.
   //
-  // `thinkingLevel` is PER TIER and defaults to `'off'` for the fast tier
-  // (D-13): a "fast" model asked to think for 32 768 tokens is not fast, and
-  // inheriting the session's `xhigh` into a mechanical file-scan child would be
-  // the most expensive possible reading of the word.
-  //
-  // `maxTokens` is deliberately NOT per tier (RV-15). A child inherits
-  // `deps.config.maxTokens` below, which is an ambition sized for the main
-  // model; the adapter clamps it down to whatever the fast model actually
-  // accepts (`llm/provider.ts:44-52`), so a large inherited value degrades to
-  // the right number rather than to an HTTP 400.
-  const resolved = deps.resolveTier
-    ? deps.resolveTier(spec.tier)
-    : {
-        ref: {
-          providerId: deps.config.provider,
-          modelId: deps.config.model,
-          ...(deps.config.baseUrl ? { baseUrl: deps.config.baseUrl } : {}),
-        } as ModelRef,
-        thinkingLevel: deps.config.thinkingLevel,
-        role: 'main' as const,
-      };
+  // `maxTokens` inherits `deps.config.maxTokens` below - the same ambition the
+  // lead sends, clamped by the same adapter, so an inherited large value
+  // degrades to the right number rather than to an HTTP 400.
+  const resolved: { ref: ModelRef; thinkingLevel: typeof deps.config.thinkingLevel; role: 'main' } = {
+    ref: {
+      providerId: deps.config.provider,
+      modelId: deps.config.model,
+      ...(deps.config.baseUrl ? { baseUrl: deps.config.baseUrl } : {}),
+    },
+    thinkingLevel: deps.config.thinkingLevel,
+    role: 'main',
+  };
   const model: ModelRef = resolved.ref;
 
   // HOISTED TO A LOCAL, AND THAT IS WHAT MAKES W3 POSSIBLE AT ALL. This was built
@@ -348,6 +378,15 @@ export function createSubagent(
   // child manager's `getSystemPrompt` accessor to close over - and the accessor
   // cannot read it back off the agent, because `SubagentAgentLike` is narrowed to
   // `state.messages` on purpose.
+  // THE SAME `<fast_tier>` BLOCK THE LEAD GETS, spliced only when this child
+  // will actually have a reviewer. The gating expression is written against
+  // `deps.review` here and the reviewer is built from the SAME predicate
+  // below, so the prompt can never advertise a capability the child lacks -
+  // and a child with a reviewer is never surprised by its first injection.
+  const fastBlock =
+    deps.review !== undefined && deps.review.active()
+      ? buildFastBlock({ model: deps.review.modelId(), review: true })
+      : '';
   const systemPrompt = buildSystemPrompt({
     cwd: deps.getCwd(),
     tools,
@@ -362,6 +401,7 @@ export function createSubagent(
       description: spec.description,
       peers: deps.bus.peersOf(spec.label),
     }),
+    ...(fastBlock ? { fastBlock } : {}),
   });
 
   // LAZY ACCESSORS OVER `agentRef`, WHICH IS ASSIGNED AFTER THIS RETURNS. A
@@ -396,7 +436,10 @@ export function createSubagent(
       // (§3.8). The two places a child legitimately blocks on something other
       // than its own LLM or tool — `team_wait` and the confirm queue — pause it
       // explicitly.
-      idleTimeout: deps.config.idleTimeoutMs,
+      idleTimeout:
+        deps.overseerActive === true
+          ? deps.config.idleTimeoutMs * TEAM_LIMITS.overseerWatchdogFactor
+          : deps.config.idleTimeoutMs,
     },
     // SPREAD CONDITIONALLY, never `contextManager: deps.contextManagerFor?.(...)`.
     // With the feature off the options bag has no such key, so the loop's gate
@@ -405,6 +448,29 @@ export function createSubagent(
     ...(contextManager ? { contextManager } : {}),
   });
   agentRef = agent;
+
+  // PER-CHILD FAST REVIEW (main-agent parity). GATED ON THE PROVIDER'S OWN
+  // LIVE PREDICATE, read once here so the prompt and the reviewer CANNOT
+  // DISAGREE about whether the child has one: a child told about
+  // `<fast_review>` blocks must be a child that actually receives them, and a
+  // child with a reviewer must have been told. `abortRequested` is the flag
+  // `handle.abort()` sets (see `SubagentHandle`); the reviewer reads it as its
+  // never-steer-into-a-requested-abort fact.
+  let abortRequested = false;
+  const reviewLive = deps.review !== undefined && deps.review.active() === true;
+  const reviewer = reviewLive
+    ? deps.review?.create({
+        label: spec.label,
+        goal: spec.description,
+        agent,
+        isRunning: () =>
+          run.phase === 'starting' ||
+          run.phase === 'thinking' ||
+          run.phase === 'tool' ||
+          run.phase === 'waiting',
+        isAbortRequested: () => abortRequested,
+      })
+    : undefined;
 
   let lastEmit = 0;
   let lastPhase = run.phase;
@@ -486,8 +552,16 @@ export function createSubagent(
         // rather than parsing `agent_end.messages` keeps a partial summary from
         // an aborted run, which the report renders as partial rather than lost.
         if (text.length > 0) run.summary = text;
-        if (run.turns >= deps.config.team.maxTurnsPerSubagent) {
+        // `0` MEANS NO CAP (main-agent parity): the lead has no turn ceiling
+        // either, and a child that needs forty turns for a forty-turn job is
+        // not runaway - it is working.
+        const turnCap = deps.config.team.maxTurnsPerSubagent;
+        if (turnCap > 0 && run.turns >= turnCap) {
           run.truncated = true;
+          // THE FLAG FIRST, exactly like `handle.abort()`: the child's
+          // reviewer reads `abortRequested` as its guard-1 fact, and a
+          // turn-cap stop must be visible to it in the same tick.
+          abortRequested = true;
           agent.abort();
         }
         break;
@@ -559,8 +633,28 @@ export function createSubagent(
       default:
         break;
     }
+    // AFTER the switch, so `run.phase` is current when the supervisor's
+    // silence timer consults it (team-overseer I-OV3): a `team_wait` start
+    // must be observable as `waiting` on the very kick that follows it.
+    hooks.onActivity?.();
     emit();
   });
 
-  return { spec, run, agent, tools, unsubscribe };
+  return {
+    spec,
+    run,
+    agent,
+    tools,
+    // THE HANDLE-LEVEL ABORT (see `SubagentHandle`): the flag first, then the
+    // agent, so the reviewer's guard observes the request in the same tick.
+    abort: () => {
+      abortRequested = true;
+      agent.abort();
+    },
+    isAborted: () => abortRequested,
+    unsubscribe: () => {
+      reviewer?.dispose();
+      unsubscribe();
+    },
+  };
 }

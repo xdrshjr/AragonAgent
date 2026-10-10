@@ -49,6 +49,7 @@ import { layoutComposer, splitRowAtColumn, type ComposerSegment } from './compos
 import { moveVisualCursor, snapGrapheme, stepGrapheme } from './editor-navigation.js';
 import { interactionCopy } from './interaction-copy.js';
 import {
+  INDEX_KEY_FRAME,
   PASTE_DRAFT_MAX_BYTES,
   PASTE_MAX_BLOCKS,
   formatPasteSize,
@@ -120,6 +121,15 @@ interface PromptInputProps {
    * component is the only place that holds both facts.
    */
   onNotice?: (level: 'warn' | 'error', text: string) => void;
+  /**
+   * App-owned draft clearing (ctrl-c-clear-draft-exit): the second
+   * Ctrl+C of the armed ladder asks the editor to drop the draft. A
+   * NUMBER, not a boolean, so repeated requests stay distinguishable
+   * and the effect below never re-fires for an unchanged value.
+   * `'clear'` returns the editor to INITIAL_EDITOR_STATE, releasing
+   * paste payloads with it.
+   */
+  draftClearNonce?: number;
 
   scrolledLines?: number;
 }
@@ -401,6 +411,7 @@ export function PromptInput({
   reducedMotion = false,
   borderColor,
   onDraftChange,
+  draftClearNonce,
   onNotice,
 }: PromptInputProps): React.ReactElement {
   const { stdout } = useStdout();
@@ -535,6 +546,16 @@ export function PromptInput({
     onDraftChange({ hasDraft, rows: draftRowCount });
   }, [hasDraft, draftRowCount, onDraftChange]);
 
+  // --- App-requested draft clear (ctrl-c-clear-draft-exit). --------
+  // The NONCE, not the buffer, is the dependency: App cannot reach this
+  // reducer directly, and keying on content would miss back-to-back
+  // requests that land on the same (empty) buffer. `'clear'` is
+  // idempotent, so a StrictMode double-invoked effect is harmless.
+  useEffect(() => {
+    if (draftClearNonce === undefined || draftClearNonce <= 0) return;
+    dispatch({ type: 'clear' });
+  }, [draftClearNonce]);
+
   // --- Mutators. -----------------------------------------------------------
   // ONE DISPATCH EACH, and that is the rule §3.4 asks a reviewer to check line
   // by line. Two dispatches from one key would put the legacy root back to two
@@ -646,6 +667,15 @@ export function PromptInput({
         return;
       }
 
+      // App owns the Ctrl+I index frame (see input/limits.ts). Standalone it
+      // never reaches here - isControlSeq drops it at the printable-insert
+      // branch below - but a frame glued to typed text in one chunk must
+      // insert ONLY the text, so strip it before any other interpretation.
+      if (input.includes(INDEX_KEY_FRAME)) {
+        const rest = input.split(INDEX_KEY_FRAME).join('');
+        if (rest.length > 0) insert(rest);
+        return;
+      }
       if (hasPasteFrame(input) || hasEnterFrame(input) || /[\r\n]/.test(input)) {
         const intents: ComposerInputIntent[] = splitEnterFrames(input).map((frame) =>
           frame.kind === 'paste' ? { ...frame, id: allocatePasteId() } : frame,

@@ -17,7 +17,6 @@ function run(over: Partial<SubagentRun> = {}): SubagentRun {
   return {
     label: 'a1',
     description: 'read the auth middleware',
-    tier: 'main',
     phase: 'thinking',
     turns: 1,
     toolCalls: 2,
@@ -82,8 +81,8 @@ describe('P1-5 — a session saved mid-dispatch resumes settled', () => {
 
 describe('the reducer keeps the live card and the panel in step (§5.3)', () => {
   const specs: SubagentSpec[] = [
-    { label: 'a1', description: 'one', prompt: 'p', readOnly: false, tier: 'main' },
-    { label: 'a2', description: 'two', prompt: 'p', readOnly: false, tier: 'main' },
+    { label: 'a1', description: 'one', prompt: 'p', readOnly: false },
+    { label: 'a2', description: 'two', prompt: 'p', readOnly: false },
   ];
 
   it('teamStart appends an active card AND opens the panel', () => {

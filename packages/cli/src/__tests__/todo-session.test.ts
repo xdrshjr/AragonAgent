@@ -108,6 +108,7 @@ function config(over: Partial<CliConfig> = {}): CliConfig {
     cwd: tmp.root,
     color: true,
     ...over,
+    keyboardEnhancement: over.keyboardEnhancement ?? false,
   };
 }
 
@@ -296,7 +297,7 @@ describe('AC-34: a subagent never gets todo_write (D-14 / R-7)', () => {
       },
     };
     const names = buildSubagentTools(
-      { label: 'a2', description: 'read auth', prompt: 'go', readOnly: false, tier: 'main' },
+      { label: 'a2', description: 'read auth', prompt: 'go', readOnly: false },
       deps,
       () => null,
     ).map((t) => t.name);

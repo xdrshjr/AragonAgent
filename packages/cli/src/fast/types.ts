@@ -103,8 +103,6 @@ export interface FastSnapshot {
    * report a budget reached for a session that never had one (RV-H10).
    */
   budgetReached: boolean;
-  /** Fast-tier children dispatched this session. */
-  delegated: number;
   usage: TokenUsage;
   /**
    * No price table for `model` (C-11 / RV-4).

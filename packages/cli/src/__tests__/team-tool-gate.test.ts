@@ -81,6 +81,7 @@ function config(): CliConfig {
     compaction: { ...DEFAULT_COMPACTION_CONFIG, enabled: false },
     cwd: dir,
     color: true,
+    keyboardEnhancement: false,
   };
 }
 
@@ -89,7 +90,6 @@ const SPEC: SubagentSpec = {
   description: 'read the auth middleware',
   prompt: 'Read src/auth and report.',
   readOnly: false,
-  tier: 'main',
 };
 
 function deps(over: Partial<SubagentDeps> = {}): SubagentDeps {

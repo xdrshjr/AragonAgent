@@ -326,9 +326,11 @@ describe('真实运行时请求使用角色对应账户', () => {
     }
   });
 
-  it.each([true, false])('TeamRuntime 实际角色随快速委派可用性变化：%s', async (delegate) => {
+  it('TeamRuntime 子代理始终使用主模型凭据（主代理对等）', async () => {
+    // The fast tier is LIVE and resolvable, and still no child is routed
+    // to it: a delegation is never a downgrade, and the fast role reaches
+    // children only through per-child reviews and compaction summaries.
     const cfg = config();
-    cfg.fast.delegate = delegate;
     const { wiring } = fastHarness(cfg);
     const requests: LLMRequest[] = [];
     const roles: ModelRole[] = [];
@@ -347,17 +349,16 @@ describe('真实运行时请求使用角色对应账户', () => {
     const runtime = new TeamRuntime({
       getConfig: () => cfg, providerRegistry: registry, getCwd: () => process.cwd(),
       getMode: () => 'build', getApiKey: roleKey(cfg),
-      resolveTier: (tier) => wiring.resolveTier(tier),
       contextManagerFor: (request) => { roles.push(request.role!); return undefined; },
     });
     try {
       const outcome = await runtime.dispatch([{ label: 'worker', description: '检查',
-        prompt: '返回摘要', readOnly: true, tier: 'fast' }], 1);
+        prompt: '返回摘要', readOnly: true }], 1);
       expect(outcome.runs[0]!.phase).toBe('done');
       expect(requests).toHaveLength(1);
-      expect(requests[0]!.apiKey).toBe(delegate ? 'fast-secret' : 'main-secret');
-      expect(requests[0]!.baseUrl).toBe(delegate ? undefined : 'https://main.example/v1');
-      expect(roles).toEqual([delegate ? 'fast' : 'main']);
+      expect(requests[0]!.apiKey).toBe('main-secret');
+      expect(requests[0]!.baseUrl).toBe('https://main.example/v1');
+      expect(roles).toEqual(['main']);
     } finally {
       runtime.dispose();
       wiring.dispose();

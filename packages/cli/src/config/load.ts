@@ -259,23 +259,6 @@ export interface CliFlags {
    */
   fastReview?: string;
   /**
-   * `--fast-delegate` ⇒ true, `--no-fast-delegate` ⇒ false, absent ⇒ undefined
-   * (web-use-tier-cooperation-and-control-closure §4.1.5).
-   *
-   * DECLARED AS A PAIR — MANDATORY, for the reason `--team`, `--todo-panel`,
-   * `--render-governor`, `--retry` and `--fast` each record in turn, and here
-   * with the SAME polarity as `--update`: `fast.delegate` is PERSISTED and
-   * defaults to `true`, so a lone `--no-fast-delegate` would make commander
-   * default `opts.fastDelegate` to `true` and silently overwrite a stored
-   * `false` on every run that passed no flag at all.
-   *
-   * It exists because it is the ONLY `fast.*` sub-switch with no channel a
-   * wrapper can reach: `--fast-review <n|off>` already covers `review` and
-   * `reviewEveryTurns`, and `enabled` / `model` / `provider` have both a flag
-   * and an environment variable.
-   */
-  fastDelegate?: boolean;
-  /**
    * `--update` ⇒ true, `--no-update` ⇒ false, absent ⇒ undefined
    * (cli-auto-update §4.2).
    *
@@ -566,12 +549,6 @@ function resolveFastConfig(
     ...(flags.fastProvider !== undefined && flags.fastProvider !== ''
       ? { provider: flags.fastProvider }
       : {}),
-    // `!== undefined`, for the reason stated on `flags.fast` above: commander
-    // materialises a lone `--no-fast-delegate` as `opts.fastDelegate = true`
-    // when the flag is absent, and `delegate` defaults to TRUE — so a truthiness
-    // check would force it on for every run that passed no flag at all,
-    // overwriting a stored `false` with nothing to show for it.
-    ...(flags.fastDelegate !== undefined ? { delegate: flags.fastDelegate } : {}),
     ...reviewPatch,
   });
 }

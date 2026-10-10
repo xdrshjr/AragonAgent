@@ -1,7 +1,7 @@
 /** Facts, never translated toast text, determine action ownership and feedback. */
 export interface StatusFeedback {
-  kind: 'confirm' | 'stopping' | 'force-stop' | 'exit' | 'copying' | 'copied'
-    | 'copy-sent' | 'copy-cleanup' | 'copy-error' | 'notice';
+  kind: 'confirm' | 'stopping' | 'force-stop' | 'exit' | 'clear-input' | 'copying'
+    | 'copied' | 'copy-sent' | 'copy-cleanup' | 'copy-error' | 'notice';
   text: string;
   level: 'info' | 'warn' | 'error';
 }
@@ -14,6 +14,8 @@ export interface StatusFeedbackInput {
   copyState?: { busy: boolean; cleanupPending: boolean };
   copyResult?: { status: 'confirmed' | 'sent' | 'error'; text: string };
   ctrlCArmed?: boolean;
+  /** Draft present: the armed feedback names the clear rung, not exit. */
+  hasDraft?: boolean;
   selectionPending?: boolean;
   liveServices?: number;
   toast?: { text: string; level: 'info' | 'warn' | 'error' };
@@ -28,7 +30,9 @@ export function projectStatusFeedback(input: StatusFeedbackInput): StatusFeedbac
   let feedback: StatusFeedback | undefined;
   if (input.ctrlCArmed && !input.copyState?.busy && !input.copyState?.cleanupPending
     && !input.selectionPending && !input.liveServices) {
-    feedback = { kind: 'exit', text: 'Press Ctrl+C again to exit', level: 'warn' };
+    feedback = input.hasDraft
+      ? { kind: 'clear-input', text: 'Press Ctrl+C again to clear input', level: 'warn' }
+      : { kind: 'exit', text: 'Press Ctrl+C again to exit', level: 'warn' };
   } else if (input.copyState?.cleanupPending) {
     feedback = { kind: 'copy-cleanup', text: 'Copy failed; cleaning up', level: 'error' };
   } else if (input.copyResult?.status === 'error') {

@@ -61,6 +61,8 @@ class RetryingAgent implements SubagentAgentLike {
   pauseIdleWatchdog(): void {}
   resumeIdleWatchdog(): void {}
   abort(): void {}
+  steer(_text: string): void {}
+  clearAllQueues(): void {}
 
   private emit(event: AgentEvent): void {
     for (const l of [...this.listeners]) l(event);

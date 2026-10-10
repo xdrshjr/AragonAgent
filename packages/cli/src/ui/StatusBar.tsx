@@ -75,7 +75,8 @@ export function StatusBar(props: StatusBarProps): React.ReactElement {
     ecoRung: props.ecoRung, fastActive: props.fastActive, scrolledLines: props.scrolledLines,
   });
   const tones = { normal: props.theme.primary, muted: props.theme.muted,
-    warning: props.theme.noticeWarn, error: props.theme.noticeError };
+    warning: props.theme.noticeWarn, error: props.theme.noticeError,
+    accent: props.theme.accent };
   return <Box width={cols} height={1} flexShrink={0} flexDirection="row" overflow="hidden">
     <Box width={1} flexShrink={0}><Text>{redrawChar(props.redrawNonce ?? 0)}</Text></Box>
     {plan.fields.map((item, index) => <React.Fragment key={item.id}>

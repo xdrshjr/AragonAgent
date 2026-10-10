@@ -253,19 +253,24 @@ describe('maxTokens: AUTO, precedence, and the single clamp gate', () => {
 describe('getApiKey precedence', () => {
   it('prefers the config-file key over the env var', () => {
     updatePersistedConfig({ apiKeys: { anthropic: 'file-key' } });
-    process.env.ANTHROPIC_API_KEY = 'env-key';
+    // vi.stubEnv, NEVER a direct assignment: afterEach un-stubs these, while
+    // `process.env.X = ...` leaks into the worker process for every test file
+    // scheduled after this one. exec-diagnostics.test.ts resolves keys through
+    // the same env layer, and a leaked key turns its "no key resolvable"
+    // premise into an order-dependent release failure.
+    vi.stubEnv('ANTHROPIC_API_KEY', 'env-key');
     const cfg = loadConfig({ cwd: CWD });
     expect(makeGetApiKey(cfg)('anthropic')).toBe('file-key');
   });
 
   it('falls back to the env var when no file key exists', () => {
-    process.env.OPENAI_API_KEY = 'env-openai';
+    vi.stubEnv('OPENAI_API_KEY', 'env-openai');
     const cfg = loadConfig({ cwd: CWD });
     expect(makeGetApiKey(cfg)('openai')).toBe('env-openai');
   });
 
   it('a one-shot --api-key override wins for the active provider', () => {
-    process.env.ANTHROPIC_API_KEY = 'env-key';
+    vi.stubEnv('ANTHROPIC_API_KEY', 'env-key');
     const cfg = loadConfig({ cwd: CWD, provider: 'anthropic', apiKey: 'override' });
     expect(makeGetApiKey(cfg)('anthropic')).toBe('override');
   });

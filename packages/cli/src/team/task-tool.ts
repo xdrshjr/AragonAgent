@@ -19,6 +19,12 @@
  * `normalizeSubagentSpecs`, which is deterministic and unit-tested. `maxItems`
  * in the schema would behave differently depending on whether `ajv`, an OPTIONAL
  * dependency of core, happened to install.
+ *
+ * EVERY CHILD RUNS THE LEAD'S OWN MODEL (main-agent parity): same provider,
+ * model, thinking level and token ambition, resolved from the LIVE config at
+ * dispatch. There is no per-child `model` property and no cheap tier to pick -
+ * a delegation is never a downgrade, and the fast tier reaches children the
+ * same way it reaches the lead (compaction summaries, per-child reviews).
  */
 
 import { errorResult, textResult, type AgentTool, type ToolResult } from '@aragon-agent/core';
@@ -32,38 +38,19 @@ export interface TaskToolDeps {
   runtime: TeamRuntime;
   /** Read LIVE, never cached: `/team off` flips this, it does not unregister. */
   isTeamEnabled: () => boolean;
-  /**
-   * Whether the fast tier was resolvable AT CONSTRUCTION (fast-model-tier §3.3 /
-   * C-2).
-   *
-   * DECIDED ONCE, because the tool array is built once and must never be
-   * rebuilt: `Agent.setTools()` mutates the live `ToolRegistry`, and
-   * `submit_plan` flips the session mode from INSIDE a tool execution. So the
-   * `model` property either exists in this schema for the whole session or never
-   * does — and with it absent, `TASK_DESCRIPTION` and the schema are
-   * BYTE-IDENTICAL to the pre-feature build (AC-3).
-   *
-   * Optional so every existing construction site and test compiles unchanged.
-   */
-  fastRegistered?: boolean;
-  /**
-   * Whether `model:"fast"` is honoured RIGHT NOW. Read LIVE, at dispatch time
-   * (RV-3) — the tier can stop resolving mid-session, and a downgrade is the
-   * honest observable either way.
-   */
-  fastAvailable?: () => boolean;
   maxSubagents: () => number;
   /** Whether a usable key exists for the active provider right now (P2-3). */
   hasApiKey: () => boolean;
   activeProvider: () => string;
   /** The lead's cost table, so the report header states real spend (R-5). */
   modelCost: () => ModelCost | undefined;
-  /** The FAST model's cost table (fast-model-tier §3.4). Absent when the tier is
-   *  off, which is what leaves the report byte-identical. */
+  /**
+   * The FAST tier's cost table, so the report's supervisor spend line states
+   * real spend (subagent-overseer-v2 D-7 / R-P1-2). OPTIONAL and returning
+   * `undefined`: an unpriced fast model renders `pricing unknown`, never a
+   * fabricated `$0.00` - the C-11 / RV-4 rule.
+   */
   fastModelCost?: () => ModelCost | undefined;
-  /** Whether the static price table has never heard of the fast model (C-11 /
-   *  RV-4). `unknown` is rendered as unknown, NEVER as `$0.00`. */
-  fastPricingUnknown?: () => boolean;
   /**
    * Run the dispatch with the LEAD's idle watchdog paused, `try/finally` inside.
    *
@@ -90,50 +77,24 @@ const TEAM_OFF_REFUSAL =
 const TASK_DESCRIPTION =
   'Run several independent subagents in parallel and get one combined report. Each ' +
   'subagent is a fresh agent with the same tools and working directory but NO memory of ' +
-  'this conversation - its prompt must be self-contained. Use this when a task splits ' +
+  'this conversation - its prompt must be self-contained. Each runs on the same model ' +
+  'you are running on. Use this when a task splits ' +
   'into 2 or more parts that do not depend on each other\'s output, especially reading or ' +
   'searching several areas at once. Do NOT use it when one part needs another part\'s ' +
   'result (do those yourself, in order), when two parts would edit the same file, or for ' +
   'a change small enough to just make. Subagents cannot dispatch further subagents and ' +
   'cannot ask the user anything. Give each a description of at most ' +
   `${TEAM_LIMITS.descriptionChars} characters and a complete prompt. Extra entries beyond the ` +
-  'configured maximum are dropped, so keep within it.';
-
-/**
- * The one sentence appended when the fast tier exists (fast-model-tier §4.1).
- *
- * WHEN to use a tier is POLICY and lives here and in `<fast_tier>`, where the
- * model actually reads it; the `enum` below is SHAPE and lives in the schema.
- * That split is what keeps behaviour the same whether or not `ajv` — an OPTIONAL
- * dependency of core — happened to install (C-8).
- */
-const TASK_FAST_SENTENCE =
-  ' Set model:"fast" on a subagent whose job is bulk reading, searching or summarizing; ' +
-  'leave it out for work that needs judgement.';
-
-/**
- * NOT `as const`: `AgentTool.parameters` is a `JSONSchema7`, whose `enum` is a
- * MUTABLE `unknown[]`, and a readonly tuple is not assignable to it.
- */
-const SUBAGENT_MODEL_PROPERTY = {
-  type: 'string',
-  enum: ['main', 'fast'],
-  default: 'main',
-  description:
-    'Which tier runs this subagent. "fast" is a cheaper, quicker model - use it for ' +
-    'mechanical, high-volume work (reading or searching many files, summarizing long ' +
-    'output, mechanical edits). Keep "main" for design, tricky debugging, and anything ' +
-    'that must be right the first time.',
-};
+  'configured maximum are dropped, so keep within it. A supervisor watches the ' +
+    'fan-out: a child that stalls or runs very long may be nudged with guidance ' +
+    'or replaced by a fresh attempt, and the report\'s Supervisor section ' +
+    'records every intervention.';
 
 export function createTaskTool(deps: TaskToolDeps): AgentTool {
-  const fastRegistered = deps.fastRegistered === true;
   return {
     name: 'task',
     label: 'Dispatch subagents',
-    // BYTE-IDENTICAL WITHOUT THE TIER (AC-3): concatenation is conditional, so a
-    // default session's description is the exact string it always was.
-    description: fastRegistered ? `${TASK_DESCRIPTION}${TASK_FAST_SENTENCE}` : TASK_DESCRIPTION,
+    description: TASK_DESCRIPTION,
     parameters: {
       type: 'object',
       properties: {
@@ -163,11 +124,6 @@ export function createTaskTool(deps: TaskToolDeps): AgentTool {
                 default: false,
                 description: 'Refuse all writes and shell for this subagent.',
               },
-              // Spread rather than a `?:` property, so with the tier off the
-              // object has exactly the four keys it always had — `undefined`
-              // survives `JSON.stringify` as an absent key but not as an
-              // identical object, and AC-3 is asserted on the schema itself.
-              ...(fastRegistered ? { model: SUBAGENT_MODEL_PROPERTY } : {}),
             },
             required: ['description', 'prompt'],
           },
@@ -199,14 +155,9 @@ export function createTaskTool(deps: TaskToolDeps): AgentTool {
       }
 
       // 4. Repair, never reject. Zero survivors is the single hard failure.
-      //    `fastAvailable` is read HERE, at dispatch time, not captured at
-      //    construction (RV-3): the tier can stop resolving mid-session, and the
-      //    normalizer and the subagent factory must agree about that at the same
-      //    instant or a child gets built against a provider with no key.
-      const { specs, requested, downgraded } = normalizeSubagentSpecs(
+      const { specs, requested } = normalizeSubagentSpecs(
         (params as { subagents?: unknown }).subagents,
         deps.maxSubagents(),
-        { fastAvailable: deps.fastAvailable?.() === true },
       );
       if (specs.length === 0) {
         return errorResult('No usable subagent specs: each needs a description and a prompt.');
@@ -214,25 +165,21 @@ export function createTaskTool(deps: TaskToolDeps): AgentTool {
 
       // 5. Pause the lead's watchdog for the whole dispatch (I-3).
       const outcome = await deps.withPausedWatchdog(() =>
-        deps.runtime.dispatch(specs, requested, ctx.signal, { downgraded }),
+        deps.runtime.dispatch(specs, requested, ctx.signal),
       );
 
       // 6. ALWAYS A NON-ERROR RESULT, abort and all-children-failed included.
       //    A cancellation or a partial result rendered as a tool FAILURE invites
       //    the model to retry the whole fan-out, which is the most expensive
       //    possible reaction (the same reasoning as `ask_user`'s cancelled
-      //    shape, and D-14 one level up).
-      //    TWO COST TABLES (§3.4 / R-7). Summing fast-tier tokens at the lead's
-      //    price is not a rounding error: for a Haiku child under a Sonnet lead
-      //    it over-reports by roughly an order of magnitude, and the whole
-      //    justification for the feature is a number in this report.
+      //    shape, and D-14 one level up). Every child ran the lead's own model,
+      //    so the lead's cost table is the one honest price for the total.
       const cost = deps.modelCost();
       const fastCost = deps.fastModelCost?.();
       return textResult(
         buildDispatchReport(outcome, {
           ...(cost ? { cost } : {}),
           ...(fastCost ? { fastCost } : {}),
-          ...(deps.fastPricingUnknown?.() ? { fastPricingUnknown: true } : {}),
         }),
       );
     },

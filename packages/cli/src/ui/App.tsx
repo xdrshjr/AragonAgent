@@ -95,7 +95,13 @@ import { buildFrameBudget } from './layout/budget.js';
 import type { ScrollIntent } from './layout/scroll.js';
 import { OVERLAY_PAGE, useWheelRouting } from './use-wheel-routing.js';
 import type { MouseSource } from '../input/stdin-filter.js';
-import type { PasteBridge } from '../input/limits.js';
+import { INDEX_KEY_FRAME, type PasteBridge } from '../input/limits.js';
+import {
+  INDEX_SKILL_NAME,
+  buildIndexConfirmSummary,
+  hasProjectIndex,
+  indexBuildInvocationArgs,
+} from '../commands/index-build.js';
 import { installConsoleBridge } from './console-bridge.js';
 import { publishExitSnapshot } from './exit-snapshot.js';
 import { OverlayFrame } from './layout/OverlayFrame.js';
@@ -285,6 +291,13 @@ export function App({
   const { stdout } = useStdout();
   const size = useTerminalSize();
   const [draftRows, setDraftRows] = useState(1);
+  // Ctrl+C draft ladder (ctrl-c-clear-draft-exit). The nonce ticks when
+  // the armed ladder spends its clear rung; the flag marks "clear spent"
+  // so the render-time feedback already reads the exit wording at the
+  // nonce render (the async clear lands a frame later - see the timing
+  // invariant beside the ladder itself).
+  const [draftClearNonce, setDraftClearNonce] = useState(0);
+  const [draftClearedByCtrlC, setDraftClearedByCtrlC] = useState(false);
   const [popupRows, setPopupRows] = useState(0);
   const [statusExpanded, setStatusExpanded] = useState(false);
   const dimensions = buildFrameBudget({ ...size, draftRows, popupRows, statusExpanded });
@@ -825,6 +838,28 @@ export function App({
           if (snapshot) dispatch({ type: 'teamUpdate', snapshot });
           break;
         }
+        case 'overseer': {
+          // A supervisor decision was applied (team-overseer). The roster
+          // already refreshed through the agent_update the runtime publishes
+          // with it; re-read the snapshot so the panel cannot miss the row.
+          const snap = controller.getTeamSnapshot();
+          if (snap) dispatch({ type: 'teamUpdate', snapshot: snap });
+          // G-4 / AC-5 (subagent-overseer-v2): a TERMINAL verdict is the
+          // one decision the user must not discover from the final report
+          // - it removes work they watched running. wait and nudge stay
+          // panel-only so the transcript gains no per-tick noise.
+          if (event.decision.action === 'replace' || event.decision.action === 'abandon') {
+            const verb = event.decision.action === 'replace' ? 'replaced' : 'abandoned';
+            const level = event.decision.action === 'replace' ? 'info' : 'warn';
+            const reason = event.decision.reason.slice(0, 120);
+            dispatch({
+              type: 'notice',
+              level,
+              text: `team supervisor ${verb} ${event.label} - ${reason}`,
+            });
+          }
+          break;
+        }
         case 'usage': {
           // Child spend is REAL SPEND and must reach the status bar, or the
           // session cost readout under-reports by however much the team consumed
@@ -839,11 +874,9 @@ export function App({
           // so it closes over the `cfg` object of the render it mounted in, and
           // `setModel` builds a NEW one.
           const live = controller.getConfig();
-          const fastTier = event.tier === 'fast' ? controller.getFastStatus().tier : null;
-          const ref =
-            fastTier && fastTier.ok
-              ? fastTier.ref
-              : { providerId: live.provider, modelId: live.model };
+          // Every child runs the lead's own model (main-agent parity), so the
+          // lead's live connection IS the tier that billed.
+          const ref = { providerId: live.provider, modelId: live.model };
           // Unknown pricing contributes ZERO rather than a fabricated figure
           // (C-11 / RV-4); `/fast status` and the dispatch report say `unknown`.
           const costDelta = controller.isPricedModel(ref)
@@ -1344,6 +1377,20 @@ export function App({
   const onDraftRows = useCallback((next: number) => {
     setDraftRows(previous => previous === next ? previous : next);
   }, []);
+  /**
+   * Draft presence, written to a REF on purpose (ctrl-c-clear-draft-exit):
+   * promoting it to state would re-render the transcript on the first
+   * keystroke of every message - the exact cost Composer.tsx documents
+   * for keeping `hasDraft` local. The ladder reads the ref inside its key
+   * handler, where freshness is guaranteed; the render-time feedback
+   * uses `hasDraftRef.current && !draftClearedByCtrlC` instead.
+   */
+  const hasDraftRef = useRef(false);
+  const onDraftPresence = useCallback((hasDraft: boolean) => {
+    hasDraftRef.current = hasDraft;
+    // A draft that re-appears after a ladder clear re-arms the clear rung.
+    if (hasDraft) setDraftClearedByCtrlC(false);
+  }, []);
 
   // --- Auto-update bridge (cli-auto-update section 3.8 / 6.3). ------------
   //
@@ -1770,6 +1817,46 @@ export function App({
     dispatch({ type: 'setOverlay', overlay: null });
   };
 
+  // --- Ctrl+I: run the bundled project-indexer skill. -------------------
+  //
+  // SAME PATH AS A TYPED COMMAND, ON PURPOSE. After the Yes/No gate (the
+  // second confirmation the user asked for) this dispatches
+  // `/skill:project-indexer <args>` through `executeSlashInput`, so the
+  // load/activate/queue-frame/submit lifecycle and the streaming tool cards
+  // in the transcript are the ones every skill command already has. The
+  // busy guard refuses rather than queueing: a queued skill body would
+  // arrive as steering mid-run, which is not what "build the index" means.
+  const requestIndexBuild = (): void => {
+    if (controller.isRunning() || interactionPhase.current !== 'idle') {
+      // A notice entry, not a toast: the running status row's feedback slot is
+      // owned by the activity phrase, and a busy warning nobody can read is
+      // the same as no warning.
+      notify('warn', 'The agent is busy. Let it finish before building the index (Ctrl+I).');
+      return;
+    }
+    if (cfg.skills.enabled) {
+      const record = controller.getSkillService().get(INDEX_SKILL_NAME);
+      if (!record || record.disabled || record.invalid) {
+        notify('warn', `Skill "${INDEX_SKILL_NAME}" is not available. Check /skills list.`);
+        return;
+      }
+    } else {
+      notify('warn', 'Skills are disabled; the project index needs the bundled skill.');
+      return;
+    }
+    const cwd = controller.getCwd();
+    const existing = hasProjectIndex(cwd);
+    void (async () => {
+      const approved = await new Promise<boolean>((resolve) => {
+        setConfirmState({ summary: buildIndexConfirmSummary({ cwd, hasExistingIndex: existing }), resolve });
+        dispatch({ type: 'setOverlay', overlay: 'confirm' });
+      });
+      if (approved) {
+        await executeSlashInput(`/skill:${INDEX_SKILL_NAME} ${indexBuildInvocationArgs(existing)}`);
+      }
+    })();
+  };
+
   /** Answer every outstanding request with the same response and close up. */
   const resolveHuman = (response: HumanResponse): void => {
     for (const entry of [...pendingHuman.current]) settleHuman(entry, response);
@@ -1911,7 +1998,43 @@ export function App({
         toast('warn', `Stopping ${live} service${live === 1 ? '' : 's'}.`);
         return;
       }
+      //
+      // RENDER-TIMING INVARIANT (part of this fix, not an implementation
+      // detail): the status feedback is evaluated during render, but
+      // `hasDraftRef` is a ref that does not itself trigger one. Every
+      // rung still lands exactly one render - arm bumps `metricsClock`,
+      // the clear rung bumps `draftClearNonce`/`draftClearedByCtrlC` - and
+      // the async clear (nonce -> effect -> 'clear' -> the onDraftChange
+      // transition) refills the ref within the same tick, far faster than
+      // a human's next press. `draftClearedByCtrlC` exists because the
+      // nonce render happens BEFORE that chain: without it the feedback
+      // would still read hasDraft=true and repeat the clear prompt after
+      // clearing. If a future rung ever becomes a pure ref write with no
+      // state change, its feedback text will silently go stale.
+      //
+      // TWO ACCEPTED EDGES (facts drive the ladder, by design):
+      // - arm (empty, "to exit") then PASTE a draft within 1.5s: the
+      //   second press clears instead of exiting - the cleared text is
+      //   still in the clipboard, so nothing is actually lost.
+      // - arm (draft, "to clear") then Ctrl+U kills the draft by hand:
+      //   the second press falls to the exit branch - with nothing left
+      //   to clear, the next rung owns the press (tmux/htop behave the
+      //   same way).
+      //
+      // RUNG TWO/TREE, composed from two existing facts: armed x
+      // hasDraft. No new counter, no new timer - clearing the draft
+      // flips hasDraftRef to false, so the NEXT press naturally lands on
+      // the exit branch: draft present -> x2 clears, x3 exits; empty ->
+      // x2 exits, byte-identical to the previous behaviour.
       if (ctrlCArmed.current) {
+        if (hasDraftRef.current) {
+          setDraftClearNonce(value => value + 1);
+          setDraftClearedByCtrlC(true);
+          // Stays armed and the 1500ms clock keeps running: the clear
+          // rung must not re-arm the whole ladder (that would make
+          // exiting a draft x4 presses).
+          return;
+        }
         doExit();
         return;
       }
@@ -1922,6 +2045,7 @@ export function App({
       ctrlCTimer.current = setTimeout(() => {
         ctrlCTimer.current = null;
         ctrlCArmed.current = false;
+        setDraftClearedByCtrlC(false);
         setMetricsClock(value => value + 1);
       }, 1500);
       return;
@@ -1930,6 +2054,15 @@ export function App({
     if (key.ctrl && input.toLowerCase() === 'g') {
       if (tooSmall || stateRef.current.overlay) return;
       setStatusExpanded(value => !value);
+      return;
+    }
+    // Ctrl+I arrives as INDEX_KEY_FRAME, never as key.ctrl + 'i': legacy
+    // terminals encode it as the Tab byte and the stdin filter's translators
+    // are the only layer that can tell them apart (see input/limits.ts).
+    // Guarded exactly like Ctrl+G above it.
+    if (input.includes(INDEX_KEY_FRAME)) {
+      if (tooSmall || stateRef.current.overlay) return;
+      requestIndexBuild();
       return;
     }
     if (tooSmall) return;
@@ -2406,6 +2539,10 @@ export function App({
   const feedbackProjection = projectStatusFeedback({
     interactionPhase: interactionPhase.current, interruptPhase: interruptGesture.current.phase,
     completion, overlay, copyState, copyResult, ctrlCArmed: ctrlCArmed.current,
+    // The flag, not the raw ref: the nonce render precedes the async
+    // clear, so the ref alone would repeat the clear wording (see the
+    // render-timing invariant beside the ladder).
+    hasDraft: hasDraftRef.current && !draftClearedByCtrlC,
     selectionPending: selectionController?.hasPendingSelection() ?? false, liveServices,
     toast: latestToast ? { text: latestToast.text,
       level: latestToast.level === 'success' ? 'info' : latestToast.level } : undefined,
@@ -2431,7 +2568,8 @@ export function App({
     hints: { interactionPhase: interactionPhase.current, cols, completion, overlay,
       selectionPending: selectionController?.hasPendingSelection() ?? false,
       copyInFlight: copyState.busy, copyCleanupPending: copyState.cleanupPending,
-      services: liveServices, hintsEnabled: cfg.hints, modeToggleKey,
+      hasDraft: hasDraftRef.current, services: liveServices,
+      hintsEnabled: cfg.hints, modeToggleKey,
       interruptPhase: interruptGesture.current.phase,
       updateAvailable: !!updateSnapshot && shouldRenderUpdateLine(updateSnapshot) } });
 
@@ -2461,6 +2599,8 @@ export function App({
       popupMaxHeight={frameBudget.popupMaxHeight}
       onPopupRowsChange={onPopupRowsChange}
       onDraftRows={onDraftRows}
+      onDraftPresence={onDraftPresence}
+      draftClearNonce={draftClearNonce}
       onNotice={notify}
       theme={theme}
       caps={caps}

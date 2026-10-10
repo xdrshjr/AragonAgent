@@ -7,7 +7,6 @@ function run(over: Partial<SubagentRun> = {}): SubagentRun {
   return {
     label: 'a1',
     description: 'read the auth middleware',
-    tier: 'main',
     phase: 'thinking',
     turns: 1,
     toolCalls: 0,

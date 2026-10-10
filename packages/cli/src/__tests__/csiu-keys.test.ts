@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { ENTER_NEWLINE_FRAME } from '../input/limits.js';
+import { ENTER_NEWLINE_FRAME, INDEX_KEY_FRAME } from '../input/limits.js';
 import {
   CSI_U_DISABLE,
   CSI_U_ENABLE,
@@ -87,6 +87,17 @@ describe('translateCsiUKey (translated === legacy bytes)', () => {
     ['Alt+Esc', `${ESC}[27;3u`, `${ESC}${ESC}`],
     ['plain Tab', `${ESC}[9u`, '\t'],
     ['Shift+Tab', `${ESC}[9;2u`, `${ESC}[Z`],
+    // kitty disambiguate reports Ctrl+I as codepoint 105 ('i') with ctrl;
+    // the generic printable branch would fold it back onto the Tab byte.
+    ['Ctrl+I (kitty)', `${ESC}[105;5u`, INDEX_KEY_FRAME],
+    // modifyOtherKeys reports it on the Tab codepoint itself; on Windows
+    // the same record shape is what Ctrl+I arrives as (VK_TAB + ctrl).
+    ['Ctrl+I (mok)', `${ESC}[9;5u`, INDEX_KEY_FRAME],
+    // kitty can tell the I key from the Tab key, so Ctrl+Shift combos on
+    // each keep their own meaning instead of sharing the VK_TAB collapse.
+    ['Ctrl+Shift+Tab', `${ESC}[9;6u`, `${ESC}[Z`],
+    ['Ctrl+Shift+I', `${ESC}[105;6u`, '\t'],
+    ['Ctrl+Alt+I', `${ESC}[105;7u`, `${ESC}\t`],
     ['Ctrl+Backspace', `${ESC}[127;5u`, '\x08'],
     ['Alt+Backspace', `${ESC}[127;3u`, `${ESC}\x08`],
     ['plain space', `${ESC}[32u`, ' '],

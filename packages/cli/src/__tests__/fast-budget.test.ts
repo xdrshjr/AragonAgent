@@ -133,7 +133,6 @@ function harness(
       reviews: 0,
       reviewBudget: 0,
       budgetReached: false,
-      delegated: 0,
       usage: { inputTokens: 0, outputTokens: 0 },
       pricingUnknown: false,
       inFlight: false,
@@ -248,7 +247,8 @@ describe('the announcement (test 3 / AC-H2 / AC-H3)', () => {
     expect(h.notices[0]![0]).toBe('info');
     expect(h.notices[0]![1]).toContain('session budget reached (2)');
     // The reasonable wrong inference this clause exists to prevent.
-    expect(h.notices[0]![1]).toContain('Delegation is unaffected');
+    // The reasonable wrong inference this clause exists to prevent:
+    // reviews stopping is not the fast tier switching off.
     expect(h.notices[0]![1]).toContain('/fast budget');
 
     // NO CARD (§3.1.3): a suppressed review never started and has no index.
@@ -359,7 +359,7 @@ describe('a suppression is neither a success nor a failure (test 5-6 / AC-H6)', 
 });
 
 // ---------------------------------------------------------------------------
-// The delegation asymmetry (test 8 / D-H7)
+// The budget/review boundary (test 8 / D-H7)
 // ---------------------------------------------------------------------------
 
 function cliConfig(fast: Partial<FastConfig>): CliConfig {
@@ -415,11 +415,12 @@ function cliConfig(fast: Partial<FastConfig>): CliConfig {
     submitCount: 0,
     cwd: process.cwd(),
     color: true,
+    keyboardEnhancement: false,
   };
 }
 
-describe('the budget applies to REVIEW and never to delegation (test 8 / D-H7)', () => {
-  it('an exhausted session still resolves `model:"fast"` children on the fast tier', async () => {
+describe('the budget applies to REVIEW only (test 8 / D-H7)', () => {
+  it('an exhausted session still resolves the tier - reviews and child reviewers included', async () => {
     const listeners = new Set<(e: AgentEvent) => void>();
     const config = cliConfig({ reviewMaxPerSession: 1 });
     const wiring = new FastWiring({
@@ -457,12 +458,12 @@ describe('the budget applies to REVIEW and never to delegation (test 8 / D-H7)',
     expect(snapshot.reviewBudget).toBe(1);
     expect(snapshot.budgetReached).toBe(true);
 
-    // Delegation is user-initiated within a run, already bounded by `team.*`,
-    // and cost-REDUCING by construction: a fast child exists so a 240 KB file
-    // body is summarised into the lead's context instead of pasted into it.
-    // Capping it would force main-tier children, which costs MORE.
-    expect(wiring.delegationAvailable()).toBe(true);
-    expect(wiring.resolveTier('fast').ref.modelId).toBe('claude-haiku-4-5');
+    // The tier still resolves after the budget ran out: per-child reviews
+    // share it, and a budgeted review cadence must not take the tier with
+    // it (main-agent parity keeps every child on the lead's model either
+    // way - there is no delegation path left to cap).
+    expect(wiring.available()).toBe(true);
+    expect(wiring.fastRef()!.modelId).toBe('claude-haiku-4-5');
 
     wiring.dispose();
   });

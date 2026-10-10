@@ -75,11 +75,6 @@ function TeamCardImpl(props: TeamCardProps): React.ReactElement {
 
   const count = `${runs.length} ${runs.length === 1 ? 'subagent' : 'subagents'}`;
   const dropped = requested > runs.length ? `  (${runs.length} of ${requested} requested)` : '';
-  // ABSENT WHEN NO FAST CHILD RAN, so an ordinary dispatch's card is unchanged
-  // (fast-model-tier §6). `n fast` rather than a ratio: the total is already one
-  // column to the left.
-  const fastCount = runs.filter((r) => r.tier === 'fast').length;
-  const fastNote = fastCount > 0 ? `  ${fastCount} fast` : '';
 
   return (
     <Box flexDirection="column">
@@ -91,7 +86,6 @@ function TeamCardImpl(props: TeamCardProps): React.ReactElement {
           {' '}
           {count}
           {dropped}
-          {fastNote}
           {'  '}
         </Text>
         {active && !reducedMotion && caps.unicode ? (
@@ -127,7 +121,7 @@ function TeamCardImpl(props: TeamCardProps): React.ReactElement {
             */}
             <Text color={theme.primary}>
               {' '}
-              {`${run.label}${run.tier === 'fast' ? '~' : ''}`.padEnd(8).slice(0, 8)}
+              {run.label.padEnd(8).slice(0, 8)}
             </Text>
             <Text color={theme.muted}>
               {' '}

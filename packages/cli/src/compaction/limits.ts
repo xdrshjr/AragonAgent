@@ -29,8 +29,6 @@ export const COMPACTION_LIMITS = {
   archiveMaxFiles: 20,
   archiveMaxAgeMs: 604_800_000,
   archiveMaxBytes: 8_000_000,
-  childKeepRecentTurns: 2,
-  childMaxPerRun: 2,
   cardTextRows: 6,
   statusCompactCols: 100,
 } as const;

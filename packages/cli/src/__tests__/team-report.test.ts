@@ -7,7 +7,6 @@ function run(over: Partial<SubagentRun> = {}): SubagentRun {
   return {
     label: 'a1',
     description: 'read the auth middleware',
-    tier: 'main',
     phase: 'done',
     startedAt: 1000,
     endedAt: 23_100,
@@ -232,5 +231,121 @@ describe('findFileConflicts', () => {
       { path: 'a.ts', labels: ['a', 'b'] },
       { path: 'z.ts', labels: ['a', 'b'] },
     ]);
+  });
+
+  it('renders the Supervisor ledger and the per-run overseer/replaced counts (team-overseer)', () => {
+    const report = buildDispatchReport(
+      outcome({
+        runs: [run({ interventions: 2, replacements: 1 })],
+        interventions: [
+          {
+            label: 'a1',
+            at: 31_000,
+            action: 'nudge',
+            reason: 'circling on the flaky suite',
+            trigger: 'silence',
+          },
+          {
+            label: 'a1',
+            at: 62_000,
+            action: 'replace',
+            reason: 'wedged on a dead endpoint',
+            trigger: 'clock',
+          },
+        ],
+      }),
+    );
+    expect(report).toContain(', overseer 2, replaced 1x');
+    expect(report).toContain('### Supervisor');
+    expect(report).toContain('[silence 30s] a1: nudge - circling on the flaky suite');
+    expect(report).toContain('[clock 61s] a1: replace - wedged on a dead endpoint');
+  });
+
+  it('omits the Supervisor section entirely when the supervisor never acted', () => {
+    const report = buildDispatchReport(outcome());
+    expect(report).not.toContain('### Supervisor');
+    expect(report).not.toContain('overseer ');
+  });
+});
+
+describe('supervisor accounting (subagent-overseer-v2 D-7 / D-10)', () => {
+  it('renders the fast-tier spend line, priced at fastCost', () => {
+    const report = buildDispatchReport(
+      outcome({
+        overseerUsage: { inputTokens: 2_100, outputTokens: 4_000 },
+        overseerCalls: 3,
+        interventions: [
+          { label: 'a1', at: 31_000, action: 'nudge', reason: 'circling', trigger: 'silence' },
+        ],
+      }),
+      { fastCost: { input: 0.8, output: 4 } },
+    );
+    expect(report).toContain('supervisor: 3 calls, 2.1k in / 4.0k out tokens (fast tier)');
+    // Priced at the FAST table, not the lead's (R-P1-2): 2.1k in at 0.8/M
+    // plus 4.0k out at 4/M is $0.0177 -> rendered, never folded into the
+    // header's main-tier total.
+    expect(report).toContain('(fast tier), $0.0177');
+  });
+
+  it('says pricing unknown instead of a fabricated $0.00 when the fast model is unpriced', () => {
+    const report = buildDispatchReport(
+      outcome({
+        overseerUsage: { inputTokens: 100, outputTokens: 100 },
+        overseerCalls: 1,
+      }),
+    );
+    expect(report).toContain('supervisor: 1 call, 100 in / 100 out tokens (fast tier), pricing unknown');
+    expect(report).not.toContain('supervisor: 1 call, 100 in / 100 out tokens (fast tier), $0.00');
+  });
+
+  it('omits the spend line entirely when no call was ever made', () => {
+    // Better missing than false (D-7): zero calls means nothing to price.
+    const report = buildDispatchReport(outcome());
+    expect(report).not.toContain('supervisor:');
+    expect(report).not.toContain('fast tier)');
+  });
+
+  it('renders ONE aggregated degraded note, not per-tick rows (D-10)', () => {
+    const report = buildDispatchReport(
+      outcome({
+        overseerDegraded: true,
+        overseerDegradedTicks: 7,
+        interventions: [
+          { label: 'a1', at: 31_000, action: 'nudge', reason: 'before the outage', trigger: 'silence' },
+        ],
+      }),
+    );
+    expect(report.match(/fast tier was unavailable/g)?.length).toBe(1);
+    expect(report).toContain('unavailable for 7 cadence check(s)');
+    expect(report).toContain('waited unassisted and none were killed');
+  });
+
+  it('renders ONE aggregated went-quiet note sourced from trigger:quiet entries (D-5 / D-10)', () => {
+    const report = buildDispatchReport(
+      outcome({
+        interventions: [
+          { label: 'a1', at: 31_000, action: 'wait', reason: 'budget', trigger: 'quiet' },
+          { label: 'a2', at: 32_000, action: 'wait', reason: 'budget', trigger: 'quiet' },
+          { label: 'team', at: 33_000, action: 'wait', reason: 'dispatch total', trigger: 'quiet' },
+        ],
+      }),
+    );
+    expect(report.match(/went quiet on/g)?.length).toBe(1);
+    expect(report).toContain('went quiet on 2 children');
+    // The team pseudo-label still reads as one ledger row, not a child.
+    expect(report).toContain('[quiet 32s] team: wait - dispatch total');
+  });
+
+  it('keeps the ledger row format unchanged (R-P2-4 regression)', () => {
+    const report = buildDispatchReport(
+      outcome({
+        interventions: [
+          { label: 'a1', at: 31_000, action: 'nudge', reason: 'circling', trigger: 'clock' },
+        ],
+        overseerUsage: { inputTokens: 1, outputTokens: 1 },
+        overseerCalls: 1,
+      }),
+    );
+    expect(report).toContain('[clock 30s] a1: nudge - circling');
   });
 });

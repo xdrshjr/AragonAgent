@@ -203,6 +203,15 @@ export async function runHeadless(
       }
       return;
     }
+    if (event.type === 'overseer') {
+      // ONE LINE PER DECISION, on stderr with the rest of the team feed:
+      // a machine consumer reads the JSON events; a human watching a long
+      // dispatch reads who the supervisor touched and why.
+      err.write(
+        `[team] supervisor ${event.label}: ${event.decision.action} (${event.trigger}) ${event.decision.reason}\n`,
+      );
+      return;
+    }
     if (event.type === 'dispatch_end') {
       const ok = event.outcome.runs.filter((r) => r.phase === 'done' && !r.error).length;
       err.write(

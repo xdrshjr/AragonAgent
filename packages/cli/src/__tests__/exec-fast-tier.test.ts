@@ -46,7 +46,6 @@ function snapshot(over: Partial<FastSnapshot> = {}): FastSnapshot {
     reviews: 2,
     reviewBudget: 10,
     budgetReached: false,
-    delegated: 4,
     usage: { inputTokens: 0, outputTokens: 0 },
     pricingUnknown: false,
     inFlight: false,
@@ -158,7 +157,10 @@ describe('case 13 - tier_changed', () => {
     expect(t).toHaveLength(1);
     expect(t[0]!.review).toBeUndefined();
     expect(t[0]!.sessionId).toBe('s1');
-    expect(t[0]!.delegated).toBe(4);
+    // Deprecated in schema v1 and pinned at 0: fast-tier children were
+    // removed (every task child runs the lead's model), and the field
+    // survives only so schema-v1 consumers keep parsing.
+    expect(t[0]!.delegated).toBe(0);
     expect(lines.some((e) => e.type === 'fast_review')).toBe(false);
   });
 

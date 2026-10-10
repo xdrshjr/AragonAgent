@@ -68,7 +68,9 @@ import {
 } from '../tools/tool-output-store.js';
 import type { FilePatch } from '../tools/patch.js';
 import { TeamRuntime } from '../team/runtime.js';
+import { createChildReviewer } from '../team/child-reviewer.js';
 import { TeamHumanQueue } from '../team/human-queue.js';
+import { createFastOverseerProvider } from '../team/overseer.js';
 import { createTaskTool } from '../team/task-tool.js';
 import { buildTeamBlock } from '../team/prompt.js';
 import type { TeamEvent, TeamSnapshot } from '../team/types.js';
@@ -339,14 +341,14 @@ export class AgentController {
   // Fast model tier (fast-model-tier §3.1 / §3.3)
   //
   // ONE FIELD AND FOUR THIN FORWARDERS. The flag pair, the tier cache, the
-  // reviewer's lifetime and the `resolveTier` closure all live in
+  // reviewer's lifetime and the shared fail-fast review transport all live in
   // `fast/wiring.ts`, which is a BUDGET decision rather than an aesthetic one
   // (C-12 / RV-5): `CLAUDE.md` caps a source file at 1000 lines and this one had
   // 40 to spare when the design was written.
   //
   // `null` when the tier could not be resolved at construction, which is the
-  // byte-identity branch: no reviewer is subscribed, `task` carries no `model`
-  // property, and `<fast_tier>` is never spliced (I-2).
+  // byte-identity branch: no reviewer is subscribed and `<fast_tier>` is
+  // never spliced (I-2).
   // -----------------------------------------------------------------------
 
   private readonly fast: FastWiring | null;
@@ -499,8 +501,8 @@ export class AgentController {
 
     // --- Fast model tier ---------------------------------------------------
     //
-    // RESOLVED BEFORE THE TOOL ARRAY, because `fastRegistered` decides whether
-    // `task`'s schema carries a `model` property at all and the array is built
+    // RESOLVED BEFORE THE AGENT, because `fastRegistered` decides whether the
+    // `FastWiring` (reviewer, tier cache) exists at all and the wiring is built
     // ONCE (C-2). `FastWiring` re-runs the same pure function in its own
     // constructor; the two agree by construction because they read the same
     // config through the same resolver.
@@ -513,25 +515,51 @@ export class AgentController {
     this.teamRuntime = this.teamRegistered
       ? new TeamRuntime({
           getConfig: () => this.config,
-          // Read LIVE through the wiring, exactly as `resolveTier` below is: the
-          // closure is only ever called from inside a dispatch, and
-          // `childFactory()` re-reads `compaction.subagents` on every call so a
-          // settings-screen edit reaches the next dispatch.
+          // Read LIVE: the closure is only ever called from inside a dispatch,
+          // and `childFactory()` re-reads `compaction.subagents` on every call
+          // so a settings-screen edit reaches the next dispatch.
           contextManagerFor: (req) => this.compaction?.childFactory()?.(req),
-          // Read LIVE through the wiring, which does not exist yet — the closure
-          // is only ever called from inside a dispatch, long after construction.
-          resolveTier: (tier) =>
-            this.fast
-              ? this.fast.resolveTier(tier)
-              : {
-                  ref: {
-                    providerId: this.config.provider,
-                    modelId: this.config.model,
-                    ...(this.config.baseUrl ? { baseUrl: this.config.baseUrl } : {}),
-                  },
-                  thinkingLevel: this.config.thinkingLevel,
-                  role: 'main',
-                },
+          // PER-CHILD FAST REVIEW (main-agent parity): one reviewer per
+          // child, sharing the lead wiring's tier, policy and fail-fast
+          // transport. `this.fast` is null until after the Agent exists; these
+          // closures run only from inside a dispatch, long after construction.
+          review: {
+            // EVERY `this.fast` READ LIVES INSIDE A CLOSURE: the wiring is
+            // assigned AFTER this constructor block (it needs the Agent), and
+            // a read in the constructor's own flow would be a use-before-assign.
+            // The closures run only from inside a dispatch, long after
+            // construction, when the field has its final value.
+            active: () =>
+              this.fast !== null && this.fast.available() && this.config.fast.review,
+            modelId: () => {
+              const tier = this.fast?.getTier();
+              return tier && tier.ok ? tier.ref.modelId : '';
+            },
+            create: (request) =>
+              this.fast
+                ? createChildReviewer(request, {
+                    getConfig: () => this.config,
+                    hasKey: (id, role) => this.hasApiKey(id, role),
+                    getApiKey: (id, role) => this.resolveKey(id, role),
+                    complete: (providerId, llmRequest) =>
+                      this.fast!.completeViaFastRegistry(providerId, llmRequest),
+                    available: () => this.fast?.available() === true,
+                  })
+                : undefined,
+          },
+          // THE DISPATCH SUPERVISOR (team-overseer): the fast tier that powers the
+          // per-child reviewers also powers the supervisor one-shot decision
+          // calls. Same live-predicate discipline as review above - every
+          // this.fast read lives in a closure that only runs from inside a
+          // dispatch, long after the wiring exists.
+          overseer: createFastOverseerProvider({
+            getConfig: () => this.config,
+            hasKey: (id, role) => this.hasApiKey(id, role),
+            getApiKey: (id, role) => this.resolveKey(id, role),
+            complete: (providerId, llmRequest) =>
+              this.fast!.completeViaFastRegistry(providerId, llmRequest),
+            available: () => this.fast?.available() === true,
+          }),
           providerRegistry: this.providerRegistry,
           getCwd: () => this.cwd,
           getMode: () => this.effectiveMode,
@@ -682,23 +710,24 @@ export class AgentController {
               runtime: this.teamRuntime,
               // Read LIVE: `/team off` flips the flag, it cannot unregister.
               isTeamEnabled: () => this.teamEnabled,
-              // FROZEN AT CONSTRUCTION (C-2). `/fast on` in a session launched
-              // without the tier cannot add a schema property, and it says so
-              // rather than advertising one that is not there.
-              fastRegistered,
-              // Read LIVE at dispatch time (RV-3): the tier can stop resolving
-              // mid-session, and the normalizer and the subagent factory must
-              // agree about that at the same instant.
-              fastAvailable: () => this.fast?.delegationAvailable() === true,
               maxSubagents: () => this.config.team.maxSubagents,
               hasApiKey: () => this.hasApiKey(),
               activeProvider: () => this.config.provider,
+              // Every child runs the lead's own model, so the lead's cost table
+              // is the one honest price for the dispatch total.
               modelCost: () => this.getModelInfo().cost,
+              // The FAST table for the supervisor's own spend line
+              // (subagent-overseer-v2 D-7 / R-P1-2). Reuses the tier
+              // resolution and the unknown-pricing predicate the fast
+              // reviewer already uses: undefined prices as `pricing
+              // unknown`, never as $0.00 (C-11 / RV-4).
               fastModelCost: () => {
-                const ref = this.fast?.fastRef();
-                return ref ? this.getModelInfoFor(ref).cost : undefined;
+                const tier = this.fast?.getTier();
+                if (!tier || !tier.ok) return undefined;
+                return this.isPricedModel(tier.ref)
+                  ? this.getModelInfoFor(tier.ref).cost
+                  : undefined;
               },
-              fastPricingUnknown: () => this.fast?.snapshot().pricingUnknown === true,
               withPausedWatchdog: (fn) => this.withPausedWatchdog(fn),
             }),
           ]
@@ -801,6 +830,10 @@ export class AgentController {
           // number only bites BECAUSE `task` races `ctx.signal` — the
           // executor's timeout is cooperative, so an override is inert for any
           // tool that does not listen (I-2).
+          //
+          // `dispatchTimeoutMs: 0` (the default) reaches the executor as an
+          // override of `0` = NO TIMER AT ALL: the dispatch lasts as long as its
+          // slowest child, and only an Esc ends it early (main-agent parity).
           ...(this.teamRegistered ? { task: config.team.dispatchTimeoutMs } : {}),
         },
       },
@@ -873,12 +906,6 @@ export class AgentController {
 
     if (this.fast) {
       this.rebuildSystemPrompt();
-      // Fast-tier children are counted from the outcome rather than from the
-      // specs, so a downgraded child is not miscounted as a saving (§3.6).
-      this.teamRuntime?.subscribe((event) => {
-        if (event.type !== 'dispatch_end') return;
-        this.fast?.noteDelegated(event.outcome.runs.filter((r) => r.tier === 'fast').length);
-      });
     }
 
     // ONE LINE FOR THE TWO CONFIGURATION MISTAKES THAT ARE OTHERWISE INVISIBLE
@@ -943,11 +970,6 @@ export class AgentController {
           ? buildTeamBlock({
               maxSubagents: config.team.maxSubagents,
               maxConcurrent: config.team.maxConcurrent,
-              // One cross-reference sentence, present only when the capability
-              // is (§3.8). `this.fast` is null during the FIRST compose (the
-              // wiring needs the Agent), which is why the constructor composes
-              // again once it exists.
-              fastDelegation: !!fastAvailable && config.fast.delegate,
             })
           : '',
       // BOTH FLAGS, exactly as team mode uses both, and for the identical
@@ -969,7 +991,6 @@ export class AgentController {
         fastAvailable
           ? buildFastBlock({
               model: tier.ok ? tier.ref.modelId : '',
-              delegate: config.fast.delegate,
               review: config.fast.review,
             })
           : '',

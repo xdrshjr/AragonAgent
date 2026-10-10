@@ -615,6 +615,13 @@ export type TeamLogEvent =
       message?: { from?: string; to?: string; subject?: string; body?: string };
     }
   | {
+      type: 'overseer';
+      dispatchId: string;
+      label?: string;
+      decision?: { action?: string; reason?: string };
+      trigger?: string;
+    }
+  | {
       type: 'dispatch_end';
       dispatchId: string;
       outcome?: {
@@ -696,6 +703,17 @@ export function attachTeamEvents(logger: Logger, controller: TeamEventSource): (
           to: event.message?.to,
           // SUBJECT ONLY. See the rule above; the body never leaves the process.
           subject: event.message?.subject,
+        });
+        break;
+      case 'overseer':
+        // REASON ONLY, and at debug: interventions are routine supervision,
+        // not failures; the report and the panel carry them to the user.
+        logger.debug('agent', 'team_overseer', {
+          dispatchId: event.dispatchId,
+          label: event.label,
+          action: event.decision?.action,
+          trigger: event.trigger,
+          reason: event.decision?.reason,
         });
         break;
       case 'dispatch_end': {

@@ -28,7 +28,10 @@ export function buildTeamPanelLayout(input: TeamPanelLayoutInput): TeamPanelLayo
   }
   const selection = selectPanelRows(input.snapshot.runs, TEAM_LIMITS.panelMaxRows);
   const natural = 1 + selection.visible.length + Number(selection.hiddenTotal > 0)
-    + Number(Boolean(input.snapshot.lastMessage));
+    + Number(Boolean(input.snapshot.lastMessage))
+    // The supervisor status line (subagent-overseer-v2 AC-5) occupies one
+    // row whenever any run carries an intervention badge.
+    + Number(input.snapshot.runs.some((run) => run.lastIntervention !== undefined));
   const collapsed = nonNegativeInt(input.terminalRows) < TEAM_LIMITS.panelCollapseRows
     || available - natural < TODO_LIMITS.panelMinRows;
   return { ...selection, collapsed, rowCount: collapsed ? 1 : natural };

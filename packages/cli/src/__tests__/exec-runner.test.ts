@@ -12,6 +12,7 @@ import type { AgentEvent, ModelInfo } from '@aragon-agent/core';
 import { ExecRunner, singlePrompt, type ExecRunnerController } from '../exec/runner.js';
 import { StreamJsonEmitter } from '../exec/emitter.js';
 import type { ExecEvent } from '../exec/events.js';
+import type { TeamEvent } from '../team/types.js';
 import type { CompactionEvent } from '../compaction/types.js';
 
 const MODEL: ModelInfo = {
@@ -467,5 +468,39 @@ describe('per-input lifecycle', () => {
     await runner.run(singlePrompt('two'));
     expect(out.lines().filter(e => e.type === 'turn_state').at(-1)?.phase).toBe('failed');
     runner.detach();
+  });
+});
+
+describe('team supervisor events (subagent-overseer-v2 section 7.1-8)', () => {
+  it('passes the overseer decision fields through verbatim, including trigger quiet', () => {
+    // exec is ZERO-CHANGE by design (R-P1-1): `trigger` is a transparent
+    // string, so the new 'quiet' value must flow without any exec edit.
+    const out = sink();
+    const { controller } = makeStub();
+    let publish!: (event: TeamEvent) => void;
+    (controller as { subscribeTeam?: unknown }).subscribeTeam = (listener: (e: TeamEvent) => void) => {
+      publish = listener;
+      return () => {};
+    };
+    const runner = makeRunner(out.stream);
+    runner.attach(controller);
+    publish({
+      type: 'overseer',
+      dispatchId: 'd1',
+      label: 'a1',
+      decision: { action: 'wait', reason: 'look budget exhausted' },
+      trigger: 'quiet',
+    });
+    runner.detach();
+    const team = out.lines().filter((e) => e.type === 'team');
+    expect(team).toHaveLength(1);
+    expect(team[0]).toMatchObject({
+      type: 'team',
+      subtype: 'overseer',
+      label: 'a1',
+      action: 'wait',
+      trigger: 'quiet',
+      reason: 'look budget exhausted',
+    });
   });
 });

@@ -119,6 +119,7 @@ function cliConfig(fast: Partial<FastConfig>): CliConfig {
     submitCount: 0,
     cwd: process.cwd(),
     color: true,
+    keyboardEnhancement: false,
   };
 }
 

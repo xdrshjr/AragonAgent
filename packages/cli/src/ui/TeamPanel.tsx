@@ -27,7 +27,7 @@ import { formatDuration } from '../agent/usage.js';
 import { describeToolActivity, sanitizeActivity } from '../team/activity.js';
 import { TEAM_LIMITS } from '../team/limits.js';
 import { buildTeamPanelLayout, type TeamPanelLayout } from './layout/team-panel.js';
-import type { SubagentRun, TeamSnapshot } from '../team/types.js';
+import type { OverseerAction, SubagentRun, TeamSnapshot } from '../team/types.js';
 
 export interface TeamPanelProps {
   snapshot: TeamSnapshot;
@@ -145,6 +145,69 @@ export function activityLine(run: SubagentRun, cols: number): string {
   }
 }
 
+/** The past-tense word the supervisor badge and status line render. */
+function interventionWord(action: OverseerAction): string {
+  switch (action) {
+    case 'nudge':
+      return 'nudged';
+    case 'replace':
+      return 'replaced';
+    case 'abandon':
+      return 'abandoned';
+    default:
+      return 'waited';
+  }
+}
+
+/**
+ * The row's supervisor badge (subagent-overseer-v2 AC-5): what the supervisor
+ * last did to THIS child and how long ago, e.g. `nudged 2m03s`.
+ *
+ * `lastIntervention.at` is ABSOLUTE epoch ms (R-P2-3), the same units as
+ * `startedAt`, so this is one subtraction - no second clock convention.
+ */
+export function overseerBadge(run: SubagentRun, at: number): string {
+  const last = run.lastIntervention;
+  if (last === undefined) return '';
+  return `${interventionWord(last.action)} ${formatDuration(Math.max(0, at - last.at))}`;
+}
+
+/**
+ * The activity column WITH the badge composed in (AC-5 / risk table): the
+ * badge rides the SAME `activityBudget(cols)` allocation the prose uses, so
+ * a row can never grow past its terminal; on a narrow terminal the badge
+ * degrades to the action word alone - the who-acted fact outranks the
+ * what-they-are-doing tail exactly when there is room for only one.
+ */
+export function activityWithBadge(run: SubagentRun, cols: number, at: number): string {
+  const last = run.lastIntervention;
+  if (last === undefined) return activityLine(run, cols);
+  const badge = overseerBadge(run, at);
+  if (cols < TEAM_LIMITS.activityWideCols) return interventionWord(last.action);
+  return sanitizeActivity(`${badge}; ${activityLine(run, cols)}`, activityBudget(cols));
+}
+
+/**
+ * The panel's one supervisor status line (AC-5): the most recent intervention
+ * across the roster, human-phrased. Empty when the supervisor has not acted
+ * yet - furniture that says nothing is worse than no line.
+ */
+export function supervisorStatusLine(runs: SubagentRun[], at: number): string {
+  let label = '';
+  let latest: NonNullable<SubagentRun['lastIntervention']> | undefined;
+  for (const run of runs) {
+    const last = run.lastIntervention;
+    if (last !== undefined && (latest === undefined || last.at > latest.at)) {
+      latest = last;
+      label = run.label;
+    }
+  }
+  if (latest === undefined) return '';
+  const ago = formatDuration(Math.max(0, at - latest.at));
+  const head = latest.reasonHead.length > 0 ? ` (${latest.reasonHead})` : '';
+  return `supervisor: ${interventionWord(latest.action)} ${label} ${ago} ago${head}`;
+}
+
 export function TeamPanel({
   snapshot,
   rows,
@@ -209,10 +272,8 @@ export function TeamPanel({
               {' '}
               {animate ? <Spinner type="dots" /> : marker(run, glyphs)}{' '}
             </Text>
-            {/* A trailing `~` marks a fast-tier child, inside the existing
-                8-column label field — see the note in `TeamCard`. */}
             <Text color={theme.primary}>
-              {`${run.label}${run.tier === 'fast' ? '~' : ''}`.padEnd(8).slice(0, 8)}
+              {run.label.padEnd(8).slice(0, 8)}
             </Text>
             {/*
               The description is the ONLY flexible column, so the activity and
@@ -238,7 +299,7 @@ export function TeamPanel({
             <Box flexShrink={1} overflow="hidden">
               <Text wrap="truncate" color={color}>
                 {'  '}
-                {activityLine(run, cols)}
+                {activityWithBadge(run, cols, at)}
               </Text>
             </Box>
             <Text wrap="truncate" color={theme.muted}>
@@ -254,6 +315,17 @@ export function TeamPanel({
           {hiddenRunning > 0 ? ` (${hiddenRunning} running)` : ''}
         </Text>
       )}
+      {(() => {
+        // The panel's supervisor line (AC-5): one row, only when the
+        // supervisor has actually acted - the per-row badges above already
+        // carry the per-child facts.
+        const line = supervisorStatusLine(snapshot.runs, at);
+        return line ? (
+          <Text wrap="truncate" color={theme.muted}>
+            {'  '}{line}
+          </Text>
+        ) : null;
+      })()}
       {snapshot.lastMessage && (
         <Text wrap="truncate" color={theme.muted}>
           {' '}

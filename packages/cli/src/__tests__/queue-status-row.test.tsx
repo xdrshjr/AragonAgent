@@ -33,6 +33,7 @@ describe('fixed queue status', () => {
       expect(before).not.toContain('102');
       expect(before).toContain('0%');
       expect(before).toContain('Idle');
+      expect(before).toMatch(/(?:PLAN>BUILD|P>B)/);
       expect(before).not.toContain('Esc');
       expect(before).not.toContain('plan>build');
       expect(before).not.toContain('12345');

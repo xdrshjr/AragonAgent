@@ -113,7 +113,7 @@ export interface FastReviewerDeps {
    * `FastWiring.snapshot()`, so the self-disable can announce itself.
    *
    * The reviewer cannot build a `FastSnapshot` on its own — `live`,
-   * `sameAsMain`, `delegated` and `pricingUnknown` all belong to the wiring —
+   * `sameAsMain` and `pricingUnknown` all belong to the wiring —
    * and the two existing `tier_changed` emitters read it the same way.
    */
   snapshot(): FastSnapshot;
@@ -475,7 +475,7 @@ export class FastReviewer {
     this.deps.notify(
       'info',
       `Fast reviews: session budget reached (${limit}). ` +
-        `Delegation is unaffected. Raise it with /fast budget <n>.`,
+        `Raise it with /fast budget <n>.`,
     );
     this.log.info('fast_review_budget_reached', { limit, reviews: this.reviewIndex });
   }

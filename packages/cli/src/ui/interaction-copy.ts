@@ -26,6 +26,7 @@ export const interactionCopy = {
   close: 'Esc close', closeCompletion: 'Esc menu', executeCommand: 'Enter command',
   complete: 'Tab complete', select: 'Up/Down select', scroll: 'PgUp/PgDn scroll',
   confirm: 'Enter confirm', stopServices: 'Ctrl+C stop services', exit: 'Ctrl+C x2 exit',
+  exitDraft: 'Ctrl+C x2 clear input, x3 exit',
   help: '/help', shiftNewline: 'Shift+Enter newline needs terminal support',
   mode: 'Shift+Tab switch mode', update: '/update',
   idlePlaceholder: 'Ask a question or describe a task...', runningPlaceholder: 'Add a follow-up...',

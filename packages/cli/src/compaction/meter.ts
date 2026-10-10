@@ -29,7 +29,8 @@
  */
 
 import type { AgentEvent, Message, ModelInfo, TokenUsage } from '@aragon-agent/core';
-import { computeEstimateOffset, computePressure } from './pressure.js';
+import { getLogger } from '../logging/logger.js';
+import { computeEstimateOffset, computePressure, isInputSideUnmeasured } from './pressure.js';
 import type { ContextUsageSnapshot, Pressure } from './types.js';
 
 /**
@@ -137,6 +138,8 @@ export class ContextMeter {
   private last: Pressure | null = null;
   /** Whether the history has changed since the last measurement. */
   private dirty = true;
+  /** Whether the one-per-run empty-measurement warning has been spent. */
+  private hasWarnedUnmeasuredInput = false;
   private prefixLast: Message | undefined;
   private sampledPrompt: string | undefined;
   private sampledVersion: number | undefined;
@@ -214,6 +217,21 @@ export class ContextMeter {
    * better number to wait for.
    */
   onTurnEnd(usage: TokenUsage): void {
+    if (isInputSideUnmeasured(usage)) {
+      // A usage that discloses NOTHING on the input side is not a
+      // measurement of this history (context-usage-zero-input-tokens B):
+      // arming the measured branch with it collapses occupancy to the
+      // turn's own outputTokens and strips the `~` off the gauge. KEEP
+      // WHATEVER IS STILL TRUSTED - an earlier good measurement of a
+      // prefix that still exists (the history only grows between splices,
+      // so "old good base + appended estimate" stays self-consistent), and
+      // the estimate offset it calibrated - and re-measure NOW so the
+      // gauge degrades in this frame instead of after the next turn.
+      this.warnUnmeasuredInputOnce(usage);
+      this.dirty = true;
+      this.current();
+      return;
+    }
     const messages = this.deps.getMessages();
     const systemPrompt = this.readSystemPrompt();
     this.lastUsage = usage;
@@ -350,6 +368,22 @@ export class ContextMeter {
   // =========================================================================
   // Internals
   // =========================================================================
+
+  /**
+   * ONE warn per run (context-usage-zero-input-tokens B). A single day of
+   * real usage logged 1,973 zero-input turns; a per-turn warning is a flood
+   * that teaches whoever reads the file to ignore it.
+   *
+   * The logger is resolved LAZILY rather than captured at construction:
+   * hosts build this class before `installLogging()`, and a child captured
+   * then would stay bound to the silent pre-install logger forever.
+   */
+  private warnUnmeasuredInputOnce(usage: TokenUsage): void {
+    if (this.hasWarnedUnmeasuredInput) return;
+    this.hasWarnedUnmeasuredInput = true;
+    getLogger().warn('compaction', 'context_input_tokens_unreported',
+      { in: usage.inputTokens, out: usage.outputTokens });
+  }
 
   private onAgentEvent(event: AgentEvent): void {
     switch (event.type) {

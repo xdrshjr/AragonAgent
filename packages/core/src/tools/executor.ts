@@ -29,7 +29,13 @@ export interface ToolExecutorOptions {
   /** Default per-tool execution timeout in milliseconds. Defaults to 120_000 (2 minutes). */
   defaultTimeout?: number;
 
-  /** Per-tool timeout overrides, keyed by tool name. */
+  /**
+   * Per-tool timeout overrides, keyed by tool name. An override of `0` means
+   * NO ceiling for that tool: no timer is armed, and only an external abort
+   * can end it. (`setTimeout(fn, 0)` fires immediately, so before this
+   * semantics existed a `0` override aborted the tool at once - a value no
+   * working caller could ever have wanted.)
+   */
   timeoutOverrides?: Record<string, number>;
 
   /** Maximum size (in bytes) of combined text output before truncation. Defaults to 100_000 (100 KB). */
@@ -163,9 +169,16 @@ export class ToolExecutor {
     }
 
     // 4. Set up timeout and merged abort signal.
+    //
+    // AN OVERRIDE OF `0` ARMS NO TIMER: the tool runs until it settles or an
+    // external abort arrives. The CLI's `task` fan-out is the caller this
+    // exists for - a dispatch must be able to outlast every generic
+    // `defaultTimeout` a session may carry, and a huge sentinel number would
+    // merely move the cliff.
     const timeoutMs = this.timeoutOverrides[toolName] ?? this.defaultTimeout;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(TIMEOUT_REASON), timeoutMs);
+    const timeoutId =
+      timeoutMs > 0 ? setTimeout(() => controller.abort(TIMEOUT_REASON), timeoutMs) : null;
 
     // Propagate external signal to our controller.
     const externalAbortHandler = () => {
@@ -173,7 +186,7 @@ export class ToolExecutor {
     };
     if (signal) {
       if (signal.aborted) {
-        clearTimeout(timeoutId);
+        if (timeoutId) clearTimeout(timeoutId);
         return this.buildResult(
           toolCallId,
           toolName,
@@ -264,7 +277,7 @@ export class ToolExecutor {
         result = errorResult(`Tool "${toolName}" threw an error: ${message}`);
       }
     } finally {
-      clearTimeout(timeoutId);
+      if (timeoutId) clearTimeout(timeoutId);
       if (graceTimer) clearTimeout(graceTimer);
       if (onAbandonAbort) {
         controller.signal.removeEventListener('abort', onAbandonAbort);

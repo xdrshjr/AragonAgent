@@ -256,6 +256,24 @@ export class AnthropicProvider implements LLMProvider {
             const u = data.usage as Record<string, number> | undefined;
             if (u) {
               usage.outputTokens = u.output_tokens ?? usage.outputTokens;
+              // Anthropic-COMPATIBLE relays (context-usage-zero-input-tokens A)
+              // commonly disclose the real input token count only here, with
+              // `message_start` carrying 0 or nothing. FIRST-PARTY streams never
+              // put input-side fields in `message_delta`, so the takeover below is
+              // dead code on api.anthropic.com and official behaviour stays
+              // byte-identical; across several deltas the last non-zero wins.
+              const inputTokens = u.input_tokens ?? 0;
+              if (inputTokens > 0) {
+                // TAKE OVER, NEVER SUM. A delta that discloses input may report
+                // an INCLUSIVE total; keeping `message_start`'s additive cache
+                // fields on top of it double-counts the cached tokens and fires
+                // compaction early (P1-10). The input side is re-derived from
+                // this event alone: the delta's own cache terms when present,
+                // cleared when absent.
+                usage.inputTokens = inputTokens;
+                usage.cacheReadTokens = u.cache_read_input_tokens;
+                usage.cacheWriteTokens = u.cache_creation_input_tokens;
+              }
             }
             break;
           }

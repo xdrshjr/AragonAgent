@@ -21,17 +21,6 @@ export { TEAM_BLOCK_VERSION };
 export interface TeamBlockParams {
   maxSubagents: number;
   maxConcurrent: number;
-  /**
-   * Whether `model:"fast"` is honoured on `task` right now (fast-model-tier
-   * §3.8).
-   *
-   * ONE SENTENCE, AND ONLY WHEN IT IS TRUE. `<fast_tier>` carries the full
-   * guidance; this is the cross-reference that stops a model reading
-   * `<team_mode>` in isolation and concluding every child costs the same. With
-   * it absent the block is BYTE-IDENTICAL to the pre-feature output, which is
-   * what `--no-fast` and every existing snapshot depend on.
-   */
-  fastDelegation?: boolean;
 }
 
 /**
@@ -63,19 +52,10 @@ export function buildTeamBlock(params: TeamBlockParams): string {
     '',
     'Each subagent starts with no memory of this conversation, so its prompt must',
     'carry everything it needs: the goal, the files or areas it owns, and what to',
-    'report back. Give each one a disjoint set of files to write. Subagents cannot',
-    'dispatch further subagents and cannot ask the user anything.',
+    'report back. Give each one a disjoint set of files to write. Every subagent',
+    'runs on your own model. Subagents cannot dispatch further subagents and',
+    'cannot ask the user anything.',
     '',
-    // THE TRAILING BLANK IS INSIDE THE CONDITIONAL, not outside it. An
-    // unconditional `''` here would add a line to EVERY team-enabled prompt and
-    // silently break the byte-identity `--no-fast` depends on (I-2).
-    ...(params.fastDelegation
-      ? [
-          'A subagent doing mechanical, high-volume work can run on the cheaper fast',
-          'model - see <fast_tier>.',
-          '',
-        ]
-      : []),
     'You get one combined report when they all finish. Read it before deciding what',
     'to do next, and tell the user what the team found in your own words.',
     '</team_mode>',

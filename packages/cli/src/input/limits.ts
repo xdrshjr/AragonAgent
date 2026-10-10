@@ -74,6 +74,22 @@ export const PASTE_CLOSE = '\u0000]';
 export const ENTER_NEWLINE_FRAME = '\u0000n';
 
 /**
+ * The inline frame that carries ONE "Ctrl+I was pressed" intent from the stdin
+ * filter to `App` (project-indexer Ctrl+I trigger).
+ *
+ * WHY A FRAME AND NOT `key.ctrl && input === 'i'`. Legacy terminals encode
+ * Ctrl+I as the same byte as Tab (0x09), so by the time the stream reaches Ink
+ * the two are indistinguishable. Under win32-input-mode (`?9001h`) and kitty
+ * CSI-u the modifiers ARE known at translation time, and both translators emit
+ * this frame instead of the legacy Tab byte. Same NUL-delimiter guarantee as
+ * `ENTER_NEWLINE_FRAME`: no terminal delivers NUL for a key and pasted text is
+ * stripped of NUL, so a payload can never forge it. Terminals without keyboard
+ * enhancement keep the legacy collapse — Ctrl+I there is Tab, documented in the
+ * README keybindings table.
+ */
+export const INDEX_KEY_FRAME = '\u0000i';
+
+/**
  * The one channel from the stdin filter to `App`'s notice dispatch (P1-3 / I-15).
  *
  * The filter is constructed in `cli.tsx` BEFORE `render()`, so it has no

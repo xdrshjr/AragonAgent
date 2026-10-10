@@ -11,6 +11,8 @@ export interface ActionHintInput {
   selectionPending?: boolean; copyInFlight?: boolean; copyCleanupPending?: boolean;
   completion?: 'none' | 'slash' | 'file'; services?: number; overlay?: string | null;
   hintsEnabled?: boolean; toast?: string; updateAvailable?: boolean; exitHint?: string; modeToggleKey?: string;
+  /** Draft present: the exit clause becomes the clear-then-exit ladder. */
+  hasDraft?: boolean;
 }
 export function escapeClause(input: ActionHintInput): string {
   if (input.overlay) return copy.close;
@@ -68,7 +70,7 @@ export function buildActionClauses(input: ActionHintInput): readonly string[] {
   if (escape) add(escape);
   if (!feedback && input.hintsEnabled !== false && !input.overlay) {
     if (input.updateAvailable) add(copy.update);
-    add(copy.exit);
+    add(input.hasDraft ? copy.exitDraft : copy.exit);
     add((input.modeToggleKey ?? 'Shift+Tab') + ' ' + copy.modeLabel);
     add(copy.help);
   }

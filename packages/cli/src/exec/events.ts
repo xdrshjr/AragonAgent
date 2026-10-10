@@ -205,7 +205,13 @@ export interface ExecTodoEvent {
 export interface ExecTeamEvent {
   type: 'team';
   sessionId: string;
-  subtype: 'dispatch_start' | 'agent_update' | 'dispatch_end';
+  // 'overseer' is additive (team-overseer): a supervisor decision was
+  // applied to one child. Consumers that ignore unknown subtypes are
+  // unaffected, which is the EXEC_SCHEMA_VERSION rule next door.
+  subtype: 'dispatch_start' | 'agent_update' | 'dispatch_end' | 'overseer';
+  action?: string;
+  trigger?: string;
+  reason?: string;
   label?: string;
   phase?: string;
   description?: string;
@@ -233,11 +239,11 @@ export interface ExecFastReviewEvent {
  * not know is unaffected.
  *
  * THE PROBLEM IT SOLVES. `fast_review` only fires when a review produced TEXT,
- * so every other outcome — a review that failed, a tier that switched itself off
- * after three failures, a budget that ran out, a delegation that did or did not
- * happen — was invisible to a wrapper. The single most likely and least
- * self-diagnosable failure ("it runs but not one review card ever arrives") had
- * no signal at all on this stream.
+ * so every other outcome — a review that failed, a tier that switched itself
+ * off after three failures, or a budget that ran out — was invisible to a
+ * wrapper. The single most likely and least self-diagnosable failure ("it
+ * runs but not one review card ever arrives") had no signal at all on this
+ * stream.
  *
  * IT IS A STATE EVENT, NOT A LOG LINE. It fires on `tier_changed` and on every
  * `review_end`, which in a session with reviews is a handful per hundred turns.
@@ -263,7 +269,11 @@ export interface ExecFastTierEvent {
   reviews: number;
   reviewBudget: number;
   budgetReached: boolean;
-  /** Fast-tier children dispatched — the only evidence delegation is working. */
+  /**
+   * DEPRECATED, ALWAYS `0`. Fast-tier children no longer exist (every `task`
+   * child runs the lead's model); the field is kept so schema-v1 consumers
+   * keep parsing. Do not build new readers on it.
+   */
   delegated: number;
   inFlight: boolean;
   /** Present only on the `review_end` branch. */
@@ -427,8 +437,8 @@ export interface ExecInitParams {
  *
  *  · `'interrupt'`         — `{"type":"interrupt"}` on stdin settles the turn
  *                            without killing the process.
- *  · `'fast-policy'`       — this build understands `--fast-delegate` and
- *                            `--fast-review`. FOR AFTER-THE-FACT DISPLAY ONLY:
+ *  · `'fast-policy'`       — this build understands `--fast-review`.
+ *                            FOR AFTER-THE-FACT DISPLAY ONLY:
  *                            argv is fixed before `system/init` arrives, so it
  *                            cannot gate whether the flags are passed.
  *  · `'fast-tier-events'`  — this build emits `fast_tier`. Its ABSENCE is what

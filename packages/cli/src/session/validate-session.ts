@@ -128,7 +128,9 @@ const todo = shape({
 });
 const subagent = shape({
   label: string, description: string,
-  // Old team archives predate tier; renderers already treat absence as main.
+  // OPTIONAL IN BOTH DIRECTIONS: sessions written since main-agent parity
+  // have no tier at all, and older archives may carry `main` or `fast` from
+  // the removed per-child fast dispatch. Renderers treat absence as main.
   tier: optional(enumeration('main', 'fast')),
   phase: enumeration('queued', 'starting', 'thinking', 'tool', 'waiting', 'done', 'failed', 'aborted'),
   startedAt: optional(number), endedAt: optional(number), turns: number, toolCalls: number,

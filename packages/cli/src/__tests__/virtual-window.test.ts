@@ -135,7 +135,6 @@ describe('entryRevision (I-L3-1)', () => {
         {
           label: 'a',
           description: 'd',
-          tier: 'main',
           phase: 'queued',
           turns: 0,
           toolCalls: 0,

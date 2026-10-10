@@ -325,6 +325,7 @@ function controllerConfig(overrides: Partial<CliConfig> = {}): CliConfig {
     cwd: process.cwd(),
     color: true,
     ...overrides,
+    keyboardEnhancement: overrides.keyboardEnhancement ?? false,
   };
 }
 

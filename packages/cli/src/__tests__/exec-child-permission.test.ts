@@ -28,7 +28,6 @@ const SPEC: SubagentSpec = {
   label: 'A',
   description: 'do a thing',
   prompt: 'go',
-  tier: 'main',
   readOnly: false,
 };
 

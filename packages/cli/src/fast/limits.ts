@@ -79,7 +79,7 @@ export const FAST_LIMITS = {
    * A critique waiting for its injection window goes stale (RV-12).
    *
    * The window is not guaranteed to be prompt: one `task` dispatch is a single
-   * tool call that can run for `team.dispatchTimeoutMs`, so a critique triggered
+   * tool call that can run for as long as its children need, so a critique triggered
    * just before one arrives at the far side describing a state five children
    * have since rewritten. Advice that is merely late is worse than no advice,
    * because the lead cannot tell that it is late.
@@ -100,4 +100,4 @@ export const FAST_LIMITS = {
  * changes, so a behaviour report can be tied to a block revision with one grep -
  * exactly what `TEAM_BLOCK_VERSION` and `TODO_BLOCK_VERSION` are for.
  */
-export const FAST_BLOCK_VERSION = 'v1-2026-07';
+export const FAST_BLOCK_VERSION = 'v2-2026-10';

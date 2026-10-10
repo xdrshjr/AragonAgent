@@ -13,15 +13,17 @@
  * turn the child already ran, and receives one partial sentence for all of it.
  * Two fast-model summarizations is the cheap side of that trade.
  *
- * A CHILD MANAGER IS THE SAME `Compactor` UNDER A DIFFERENT POLICY, and the
- * overlay needs TWO mechanisms rather than one (RV-2):
+ * SINCE MAIN-AGENT PARITY, A CHILD MANAGER RUNS THE LEAD'S OWN POLICY. The only
+ * overlay left is the CONNECTION (provider / model / base URL / manual window),
+ * which must follow the model the child actually runs on. `keepRecentTurns`,
+ * `onFailure`, `useFastTier`, `archive` and the per-run compaction bound are all
+ * read from the SAME live config the lead reads, so a user who tunes compaction
+ * tunes every child identically - the requirement "same mode and configuration
+ * as the main agent", taken literally.
  *
- *   A. A CONFIG VIEW, for `keepRecentTurns` / `onFailure` / `useFastTier`, which
- *      `Compactor` reads through `deps.getConfig()`.
- *   B. AN INSTANCE BOUND, for `maxPerRun`, which is STRUCTURAL and has no config
- *      path by design (`limits.ts` header). Without it the child silently
- *      inherits the lead's 5 - two and a half times the bound the reversal above
- *      rests on.
+ * THE INSTANCE BOUND stays (mechanism B of RV-2) because `maxPerRun` is
+ * STRUCTURAL with no config path by design (`limits.ts` header); it is now the
+ * SAME `COMPACTION_LIMITS.maxPerRun` the lead's own manager runs under.
  *
  * NO UI. A child's compaction produces no transcript card (DH-7): the lead's
  * transcript describes the LEAD's context, and a card there would claim the
@@ -140,11 +142,11 @@ export function createChildContextManager(
    * which is the same reason `subagent.ts` reuses the lead's `getApiKey` closure
    * rather than the resolved key.
    *
-   * `useFastTier: true` EXPRESSES A PREFERENCE, NOT AN OUTCOME. `resolveFastTier`
-   * still decides, and when nothing resolves the child falls back exactly as the
-   * lead does - to its OWN model, because `provider` / `model` are overlaid here
-   * too.
-   *
+   * `useFastTier` is read LIVE from the base config (main-agent
+   * parity - no overlay): it expresses a PREFERENCE, not an outcome.
+   * `resolveFastTier` still decides, and when nothing resolves the child
+   * falls back exactly as the lead does - to its OWN model, because
+   * `provider` / `model` are overlaid here too.
    * Failed summaries preserve the child's task just as they preserve the lead's.
    */
   const childConfig = (): CliConfig => {
@@ -158,16 +160,11 @@ export function createChildContextManager(
       baseUrl: req.model.baseUrl,
       // The lead's manual limit describes its connection, not every worker.
       contextWindow: sameConnection ? base.contextWindow : null,
-      compaction: {
-        ...base.compaction,
-        keepRecentTurns: COMPACTION_LIMITS.childKeepRecentTurns,
-        onFailure: 'stop',
-        useFastTier: true,
-        // ONE ARCHIVE PER LEAD COMPACTION IS AUDITABLE; TWENTY PER DISPATCH IS
-        // NOISE. The child's dropped slice is therefore never retained either -
-        // `runCompaction` reads this key before it stashes anything.
-        archive: false,
-      },
+      // NO POLICY OVERLAY (main-agent parity): `keepRecentTurns`, `onFailure`,
+      // `useFastTier` and `archive` are read LIVE from the base config, so the
+      // child compacts under exactly the policy the lead compacts under. A
+      // settings-screen edit mid-dispatch reaches a running child because this
+      // view is re-read on every call.
     };
   };
 
@@ -218,8 +215,9 @@ export function createChildContextManager(
       // user's transcript with no card to explain which agent it is about.
       notify: () => {},
     },
-    // MECHANISM B - the instance bound (RV-2 / DH-16).
-    { maxPerRun: COMPACTION_LIMITS.childMaxPerRun },
+    // MECHANISM B - the instance bound (RV-2 / DH-16). The SAME bound the
+    // lead's own manager runs under (main-agent parity).
+    { maxPerRun: COMPACTION_LIMITS.maxPerRun },
   );
 
   return {

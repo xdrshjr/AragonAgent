@@ -67,6 +67,19 @@ export interface ComposerProps {
    * character, which is what keeps the re-render rate the same (R-6).
    */
   onDraftRows?: (rows: number) => void;
+  /**
+   * Draft PRESENCE, forwarded upward for the Ctrl+C ladder
+   * (ctrl-c-clear-draft-exit). App stores it in a ref only - no state,
+   * so the transcript does not re-render on the first keystroke of a
+   * message (the same cost the comment above documents).
+   */
+  onDraftPresence?: (hasDraft: boolean) => void;
+  /**
+   * Downward half of the same channel: ticks when App asks the editor
+   * to clear the draft (Ctrl+C x2 while drafting). Passed through to
+   * PromptInput unchanged.
+   */
+  draftClearNonce?: number;
   /** Paste refusals from `PromptInput`, routed to `App`'s notice dispatch. */
   onNotice?: (level: 'warn' | 'error', text: string) => void;
   theme: Theme;
@@ -133,6 +146,8 @@ export function Composer({
   popupMaxHeight,
   onPopupRowsChange,
   onDraftRows,
+  onDraftPresence,
+  draftClearNonce,
   onNotice,
   theme,
   caps,
@@ -143,9 +158,12 @@ export function Composer({
   const onDraftChange = useCallback(
     (next: { hasDraft: boolean; rows: number }) => {
       setHasDraft(next.hasDraft);
+      // Presence FIRST: the App ref must be current before the row-count
+      // report below can trigger the App render that reads it.
+      onDraftPresence?.(next.hasDraft);
       onDraftRows?.(next.rows);
     },
-    [onDraftRows],
+    [onDraftPresence, onDraftRows],
   );
 
   // Plan mode inserts ONE branch, above `draft` and below `running`. The
@@ -189,6 +207,7 @@ export function Composer({
         agentMode={agentMode}
         borderColor={borderColor}
         onDraftChange={onDraftChange}
+        draftClearNonce={draftClearNonce}
         onNotice={onNotice}
       />
     </Box>

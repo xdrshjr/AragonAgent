@@ -17,36 +17,21 @@
  * whether an optional install step succeeded.
  *
  * NEVER THROWS. Zero survivors is the caller's single hard failure.
+ *
+ * EVERY CHILD RUNS THE LEAD'S MODEL (main-agent parity): the former
+ * `model: "fast"` per-child tier was removed, so a spec that still carries a
+ * `model` key simply ignores it - there is no tier to downgrade TO, and the
+ * honest reading of a stale key is silence, not a report line about a
+ * capability that no longer exists.
  */
 
-import { TEAM_LIMITS } from './limits.js';
+import { TEAM_AGGREGATE_LABEL, TEAM_LIMITS } from './limits.js';
 import type { SubagentSpec } from './types.js';
 
 export interface NormalizedSpecs {
   specs: SubagentSpec[];
   /** How many entries the model asked for, before dropping and capping. */
   requested: number;
-  /**
-   * Specs that asked for `model:"fast"` and were downgraded to `main`
-   * (fast-model-tier §3.4 / R-6).
-   *
-   * ADDITIVE: `NormalizedSpecs` GAINS a field, it does not change one, so every
-   * existing caller and test compiles unchanged.
-   */
-  downgraded: number;
-}
-
-/** Options for the fast tier. Optional for the reason `normalizeSubagentSpecs`
- *  documents below (RV-14). */
-export interface NormalizeOptions {
-  /**
-   * §3.3's LIVE predicate, evaluated at DISPATCH time (RV-3).
-   *
-   * `fast.delegate: false` and "the tier stopped resolving twenty minutes ago"
-   * are the same observable to the model — a downgrade, counted and reported —
-   * which is the honest reading of both.
-   */
-  fastAvailable?: boolean;
 }
 
 function asString(value: unknown): string {
@@ -110,25 +95,18 @@ function dedupeLabel(label: string, taken: Set<string>): string {
  * @param max   The resolved `team.maxSubagents`; further clamped to
  *              `TEAM_LIMITS.hardMaxSubagents` here so a hand-edited config file
  *              cannot raise the requirement's ceiling (R-g).
- * @param opts  Fast-tier availability. OPTIONAL, DEFAULTING TO `false` (RV-14):
- *              this function and `NormalizedSpecs` are both exported and both
- *              have existing callers and tests, so a required third parameter
- *              would be a breaking edit that buys nothing — and an omitted one
- *              now means exactly what a pre-feature build meant.
  */
-export function normalizeSubagentSpecs(
-  raw: unknown,
-  max: number,
-  opts: NormalizeOptions = {},
-): NormalizedSpecs {
-  if (!Array.isArray(raw)) return { specs: [], requested: 0, downgraded: 0 };
+export function normalizeSubagentSpecs(raw: unknown, max: number): NormalizedSpecs {
+  if (!Array.isArray(raw)) return { specs: [], requested: 0 };
   const requested = raw.length;
-  const fastAvailable = opts.fastAvailable === true;
 
   const kept: SubagentSpec[] = [];
-  const taken = new Set<string>();
-  /** Parallel to `kept`: did entry `i` ask for the fast tier? */
-  const wantedFast: boolean[] = [];
+  // SEEDED WITH THE RESERVED AGGREGATE LABEL (subagent-overseer-v2 D-5 /
+  // R-P1-6): the runtime's dispatch-total supervisor notices travel under
+  // `TEAM_AGGREGATE_LABEL`, so no child may wear that slug - `dedupeLabel`
+  // hands a spec asking for it the suffixed form instead, the same namespace
+  // fix it already applies to any other collision.
+  const taken = new Set<string>([TEAM_AGGREGATE_LABEL]);
 
   for (let i = 0; i < raw.length; i += 1) {
     const item = raw[i];
@@ -140,28 +118,15 @@ export function normalizeSubagentSpecs(
     const prompt = clamp(asString(src.prompt), TEAM_LIMITS.promptChars);
     if (prompt.length === 0) continue;
 
-    // REPAIR, NEVER REJECT — this file's own contract. `'fast'` without
-    // availability becomes `'main'` AND IS COUNTED; anything else (a typo, a
-    // model id, `undefined`) is simply `'main'` and is NOT counted, because the
-    // model did not ask for the fast tier and has nothing to be told about.
-    const wantsFast = src.model === 'fast';
-    wantedFast.push(wantsFast);
     kept.push({
       label: dedupeLabel(slugLabel(src.label, kept.length), taken),
       description,
       prompt,
       readOnly: src.readOnly === true,
-      tier: wantsFast && fastAvailable ? 'fast' : 'main',
     });
   }
 
   const ceiling = Math.max(1, Math.min(Math.floor(max) || 1, TEAM_LIMITS.hardMaxSubagents));
   const specs = kept.slice(0, ceiling);
-  // COUNTED OVER THE SURVIVORS, not over everything the model wrote: a spec the
-  // cap dropped never ran at all, so reporting it as "ran on the main model"
-  // would be a second, different lie in a line that exists to stop the first.
-  const downgraded = specs.filter(
-    (spec, i) => spec.tier === 'main' && wantedFast[i] === true,
-  ).length;
-  return { specs, requested, downgraded };
+  return { specs, requested };
 }

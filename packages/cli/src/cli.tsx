@@ -204,7 +204,6 @@ interface RawOpts {
   fastModel?: string;
   fastProvider?: string;
   fastReview?: string;
-  fastDelegate?: boolean;
   logLevel?: string;
   logFile?: boolean;
   logDir?: string;
@@ -296,11 +295,6 @@ function toFlags(opts: RawOpts): CliFlags {
     fastModel: opts.fastModel,
     fastProvider: opts.fastProvider,
     fastReview: opts.fastReview,
-    // …and again for `--fast-delegate` / `--no-fast-delegate`, one feature
-    // later — NINE features, one trap. It is `fast.delegate`'s only channel:
-    // there is no `ARAGON_FAST_DELEGATE`, so missing this line leaves a wrapper
-    // with no way at all to say "do not delegate on this run".
-    fastDelegate: opts.fastDelegate,
     // `--verbose` is just a shorthand for `--log-level debug`; an explicit
     // `--log-level` still wins, so the two can be combined without surprise.
     logLevel: opts.logLevel ?? (opts.verbose ? 'debug' : undefined),
@@ -1798,14 +1792,6 @@ function buildProgram(): Command {
     .option('--fast-model <id>', 'The fast model id (implies nothing about --fast)')
     .option('--fast-provider <id>', 'Provider for the fast model (default: the main provider)')
     .option('--fast-review <n|off>', 'Turns between automatic fast reviews, or "off"')
-    // BOTH FORMS, POSITIVE FIRST, and here it matters more than anywhere above:
-    // `fast.delegate` is PERSISTED and defaults to TRUE, so declaring only
-    // `--no-fast-delegate` would make commander default `opts.fastDelegate` to
-    // `true` and force `delegate: true` on EVERY run that passed no flag at all
-    // — silently overwriting a user's stored `false`. Same polarity, same trap
-    // and same fix as `--update` / `--compaction`.
-    .option('--fast-delegate', 'Let the fast tier take mechanical sub-steps (the default)')
-    .option('--no-fast-delegate', 'Run every sub-step on the main model')
     // BOTH FORMS, positive first, for the reason recorded seven times above —
     // and this is the pair whose omission would be worst. `update.mode` is
     // PERSISTED and defaults to `'auto'`, so a lone `--no-update` would make

@@ -25,7 +25,7 @@
  * Pure: no node/React imports.
  */
 
-import { ENTER_NEWLINE_FRAME } from './limits.js';
+import { ENTER_NEWLINE_FRAME, INDEX_KEY_FRAME } from './limits.js';
 
 /** Enable / disable the two CSI-u report modes (posix side). */
 export const CSI_U_ENABLE = '\x1b[>1u\x1b[>4;2m';
@@ -118,7 +118,17 @@ export function translateCsiUKey(key: CsiUKey): string {
 
   if (key.code === 13) return m === 0 ? '\r' : ENTER_NEWLINE_FRAME;
   if (key.code === 27) return alt ? '\x1b\x1b' : '\x1b';
-  if (key.code === 9) return shift ? '\x1b[Z' : '\t';
+  if (key.code === 9) {
+    // A modified Tab codepoint (modifyOtherKeys shape) mirrors the VK_TAB
+    // decision in win32-input-mode.ts: ctrl (without shift/alt) is the
+    // project-indexer trigger frame, shift stays Shift+Tab.
+    if (ctrl && !shift && !alt) return INDEX_KEY_FRAME;
+    return shift ? '\x1b[Z' : '\t';
+  }
+  // Ctrl+I under kitty disambiguate arrives as codepoint 105 with the ctrl
+  // modifier; the generic printable branch below would fold it back onto the
+  // legacy Tab byte, which is exactly the ambiguity the frame exists to break.
+  if (key.code === 105 && ctrl && !shift && !alt) return INDEX_KEY_FRAME;
   if (key.code === 127) {
     // POST-normalisation bytes, same rationale as VK_BACK in win32-input-mode.
     if (alt) return '\x1b\x08';

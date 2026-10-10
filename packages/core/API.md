@@ -119,12 +119,19 @@ exports**, so the `EXPECTED` list in `public-api.test.ts` is unaffected.
 | --- | --- | --- |
 | `Agent.pauseIdleWatchdog()` | `(): void` | Suspend the idle watchdog. Idempotent. A paused watchdog also swallows `kick()`, so an event arriving mid-wait cannot re-arm it. |
 | `Agent.resumeIdleWatchdog()` | `(): void` | Resume it, restarting the idle window from now. Idempotent. Always call from a `finally`. |
-| `AgentConfig.timeouts.toolTimeoutOverrides` | `Record<string, number>` | Per-tool ceiling in ms, keyed by tool name; forwarded to `ToolExecutor.timeoutOverrides`. |
+| `AgentConfig.timeouts.toolTimeoutOverrides` | `Record<string, number>` | Per-tool ceiling in ms, keyed by tool name; forwarded to `ToolExecutor.timeoutOverrides`. A value of `0` DISABLES the ceiling for that tool: no timer is armed and only an external abort can end it. |
 
 The host, not the engine, is the only party that can know a human is being
 waited on: from inside the loop that call looks like an ordinary long-running
 tool, and aborting it after `idleTimeout` is correct for a wedged network call
 and wrong for a person reading a plan.
+
+**`0` is "no ceiling", not "zero milliseconds".** `setTimeout(fn, 0)` fires
+immediately, so before that semantics existed a `0` override aborted the tool
+at once — a value no working caller could ever have wanted. `0` now arms no
+timer at all; the tool runs until it settles or the external signal aborts it.
+The CLI's `task` fan-out (whose duration is the max of its subagents, which the
+host may deliberately leave unbounded) is the caller this exists for.
 
 **The single most surprising fact about `toolTimeoutOverrides`, and the one that
 makes it useless on its own:** `ToolExecutor` expresses a timeout by calling

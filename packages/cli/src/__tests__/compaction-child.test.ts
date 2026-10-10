@@ -218,16 +218,16 @@ describe('the child overlay (§3.4.2 / test 27)', () => {
       tokensBefore: 31000, tokensAfter: 31000 });
     expect(compacted).toEqual([]);
   });
-  it('mechanism A: the config view really returns the three policy rows', async () => {
+  it("mechanism A: the child reads the LEAD's own policy rows (parity)", async () => {
     let seen: CliConfig['compaction'] | null = null;
     const config = baseConfig();
     const { manager } = childHarness(
       () => config,
       () => [],
     );
-    // The overlay is only observable through what the compactor DOES with it, so
-    // the assertion runs through a real compaction: `keepRecentTurns: 2` retains
-    // exactly two user turns in the tail.
+    // The policy is only observable through what the compactor DOES with it,
+    // so the assertion runs through a real compaction: the child keeps the
+    // LEAD'S OWN `keepRecentTurns`, not a tighter overlay.
     const history = conversation(8);
     const outcome = await manager.compact(ctx(history));
     seen = config.compaction;
@@ -236,13 +236,12 @@ describe('the child overlay (§3.4.2 / test 27)', () => {
     if (outcome.action !== 'replace') return;
     // The splice is `[anchor, block, ...tail]`, and BOTH the anchor and the
     // `<compacted_context>` block are `user`-role messages - so a child keeping
-    // two turns leaves four.
+    // four turns (the default) leaves six.
     const retainedTurns = outcome.messages.filter((m) => m.role === 'user').length;
-    expect(retainedTurns).toBe(2 + COMPACTION_LIMITS.childKeepRecentTurns);
-    expect(COMPACTION_LIMITS.childKeepRecentTurns).toBeLessThan(
-      DEFAULT_COMPACTION_CONFIG.keepRecentTurns,
-    );
-    // AND THE LEAD'S OWN CONFIG IS NOT MUTATED - the overlay is a VIEW.
+    // MAIN-AGENT PARITY: the child retains the SAME tail the lead would -
+    // there is no child-specific overlay left to diverge.
+    expect(retainedTurns).toBe(2 + DEFAULT_COMPACTION_CONFIG.keepRecentTurns);
+    // AND THE LEAD'S OWN CONFIG IS NOT MUTATED - the view is a VIEW.
     expect(seen.keepRecentTurns).toBe(DEFAULT_COMPACTION_CONFIG.keepRecentTurns);
     expect(seen.archive).toBe(true);
   });
@@ -271,7 +270,7 @@ describe('the child overlay (§3.4.2 / test 27)', () => {
     expect(manager.shouldCompact({ ...probe, turnIndex: 20 })).toBe(false);
   });
 
-  it('mechanism B: the child is refused its THIRD compaction, not its sixth', async () => {
+  it('mechanism B: the child runs under the SAME per-run bound as the lead', async () => {
     const config = baseConfig();
     const { manager } = childHarness(
       () => config,
@@ -284,18 +283,25 @@ describe('the child overlay (§3.4.2 / test 27)', () => {
       lastUsage: { inputTokens: 31_000, outputTokens: 0 },
     };
 
-    manager.onTurnEnd(probe.lastUsage, [], 'child sys');
-    await manager.compact(ctx(conversation(8), { turnIndex: 1 }));
-    manager.onCompactionEnd({ applied: false, reason: 'invalid_history',
-      tokensBefore: 31000, tokensAfter: 31000 });
-    expect(manager.shouldCompact({ ...probe, turnIndex: 50 })).toBe(true);
-    await manager.compact(ctx(conversation(8), { turnIndex: 50 }));
-    manager.onCompactionEnd({ applied: false, reason: 'invalid_history',
-      tokensBefore: 31000, tokensAfter: 31000 });
-    // THE BOUND, ASSERTED THROUGH BEHAVIOUR. `COMPACTION_LIMITS.maxPerRun` is 5;
-    // a child that inherited it would still say `true` here.
-    expect(COMPACTION_LIMITS.childMaxPerRun).toBeLessThan(COMPACTION_LIMITS.maxPerRun);
-    expect(manager.shouldCompact(probe)).toBe(false);
+      // MAIN-AGENT PARITY: the instance bound is the SAME structural
+      // `COMPACTION_LIMITS.maxPerRun` the lead's own manager runs under - a
+      // child that needs five compactions for a five-compaction job is not
+      // runaway, it is working. Refused only at the sixth.
+      // Each attempt is spaced by `minTurnsBetween` turns, re-armed with a
+      // fresh usage sample, and settles `applied: false, reason: 'stale'` -
+      // the one verdict EXEMPT from the no-progress ladder (`compactor.ts`
+      // `noteNoProgress` skips abort/cancel/stale), so the self-disable
+      // (`stuckLimit: 2`) can never fire and the ONLY bound exercised is the
+      // per-run one.
+      for (let run = 0; run < COMPACTION_LIMITS.maxPerRun; run += 1) {
+        const turnIndex = 1 + run * COMPACTION_LIMITS.minTurnsBetween;
+        manager.onTurnEnd(probe.lastUsage, [], 'child sys');
+        expect(manager.shouldCompact({ ...probe, turnIndex })).toBe(true);
+        await manager.compact(ctx(conversation(8), { turnIndex }));
+        manager.onCompactionEnd({ applied: false, reason: 'stale',
+          tokensBefore: 31000, tokensAfter: 31000 });
+      }
+      expect(manager.shouldCompact(probe)).toBe(false);
   });
 });
 
@@ -347,6 +353,8 @@ class StubChild implements SubagentAgentLike {
   }
 
   abort(): void {}
+  steer(_text: string): void {}
+  clearAllQueues(): void {}
   pauseIdleWatchdog(): void {}
   resumeIdleWatchdog(): void {}
   subscribe(listener: (e: AgentEvent) => void): () => void {

@@ -23,31 +23,28 @@
 
 import type { ModelCost } from '@aragon-agent/core';
 import { computeCost, formatCost, formatDuration, formatTokens } from '../agent/usage.js';
-import { TEAM_LIMITS } from './limits.js';
+import { TEAM_AGGREGATE_LABEL, TEAM_LIMITS } from './limits.js';
 import type { DispatchOutcome, SubagentRun } from './types.js';
 
 export interface ReportOptions {
-  /** The lead's model cost table, so the header can state real spend (R-5). */
+  /** The lead's model cost table, so the header can state real spend (R-5).
+   *
+   * THE ONE TABLE, because every child runs the lead's own model
+   * (main-agent parity): one tier, one price, one honest total. */
   cost?: ModelCost;
   /**
-   * The FAST model's cost table (fast-model-tier §3.4 / R-7).
-   *
-   * A SECOND TABLE, not a second number derived from the first. Summing
-   * fast-tier tokens at the lead's price over-reports a Haiku child under a
-   * Sonnet lead by roughly an order of magnitude, and the whole justification
-   * for delegating to a cheaper model is the figure on this line.
+   * The FAST tier's cost table, so the supervisor's own spend line can
+   * state real spend (subagent-overseer-v2 D-7 / R-P1-2). Supplied by
+   * `TaskToolDeps.fastModelCost()`; ABSENT when the fast model is not
+   * priced, in which case the spend line says `pricing unknown` rather
+   * than `$0.00` - unknown pricing is not zero pricing (the C-11 / RV-4
+   * rule the fast tier already follows everywhere else).
    */
   fastCost?: ModelCost;
-  /**
-   * The static price table has never heard of the fast model (C-11 / RV-4).
-   *
-   * UNKNOWN PRICING IS NOT ZERO PRICING. `buildRuntimeModel` hands back
-   * `cost: { input: 0, output: 0 }` for an unrecognised id, and the fast tier is
-   * precisely where an unrecognised id is LIKELY — so rendering it as `$0.00`
-   * would make the feature look free while it is spending money.
-   */
-  fastPricingUnknown?: boolean;
 }
+
+/** The pseudo-label aggregate notices use; reserved at normalization. */
+const SUPERVISOR_TEAM_LABEL = TEAM_AGGREGATE_LABEL;
 
 function byteLength(text: string): number {
   return Buffer.byteLength(text, 'utf8');
@@ -141,34 +138,6 @@ function buildHeader(outcome: DispatchOutcome, options: ReportOptions): string[]
       )}.`,
   );
 
-  // A SECOND LINE, NOT A COMBINED TOTAL (fast-model-tier §3.4). Two tiers with
-  // two price tables have two answers, and folding them into one figure is the
-  // misattribution R-7 is about. Present only when a fast child actually ran, so
-  // an ordinary dispatch's header is byte-identical.
-  const fastUsage = outcome.fastUsage;
-  if (fastUsage) {
-    // `unknown` rather than a currency amount when the model has no price table
-    // (RV-4): a lower bound rendered as a total is the same class of lie as
-    // pricing a Haiku child at Sonnet rates.
-    const fastCostLabel = options.fastPricingUnknown
-      ? 'unknown (no price table)'
-      : formatCost(computeCost(fastUsage, options.fastCost));
-    lines.push(
-      `Fast tier: in ${formatTokens(fastUsage.inputTokens)}, out ` +
-        `${formatTokens(fastUsage.outputTokens)}. Cost: ${fastCostLabel}.`,
-    );
-  }
-
-  // THE LINE THAT KEEPS A DOWNGRADE FROM BEING SILENT (R-6). Without it the
-  // model asked for a cheap child, got an expensive one, and has no way to learn
-  // that its cost model is wrong.
-  if (outcome.downgraded && outcome.downgraded > 0) {
-    const n = outcome.downgraded;
-    lines.push(
-      `${n} ${n === 1 ? 'subagent' : 'subagents'} ran on the main model (fast tier off).`,
-    );
-  }
-
   for (const conflict of findFileConflicts(outcome.runs)) {
     const who = conflict.labels.map((l) => `"${l}"`).join(' and ');
     lines.push(
@@ -183,10 +152,11 @@ function buildSection(run: SubagentRun): { head: string[]; summary: string } {
   // the only place the lead learns that a child's first attempt died before it
   // did anything (F-4).
   const retried = run.retries ? `, retried ${run.retries}x` : '';
-  // `[fast]` after the LABEL, on the head line, which is never trimmed. Six
-  // bytes, and it is the only place the lead learns which of its children were
-  // cheap — the fact the whole second cost line is about.
-  const tier = run.tier === 'fast' ? ' [fast]' : '';
+  // Same head-line position as `retried Nx`, for the same reason: the ONLY
+  // place the lead learns that a supervisor looked at this child (N times) or
+  // rebuilt it (team-overseer §3.7).
+  const overseen = run.interventions ? `, overseer ${run.interventions}` : '';
+  const replaced = run.replacements ? `, replaced ${run.replacements}x` : '';
   // `compacted N` in the same position `retried Nx` uses, and for the same
   // reason (context-auto-compaction-hardening §3.4.4 / W3): this is the ONLY
   // place the lead learns that a child's own history was summarized mid-task, so
@@ -194,8 +164,8 @@ function buildSection(run: SubagentRun): { head: string[]; summary: string } {
   // rather than an unexplained one. Absent when it never happened.
   const compacted = run.compactions ? `, compacted ${run.compactions}` : '';
   const head = [
-    `### ${run.label}${tier} "${run.description}"  ${statusBadge(run)}  ${elapsed(run)}, ` +
-      `${run.turns} turns, ${run.toolCalls} tools${retried}${compacted}`,
+    `### ${run.label} "${run.description}"  ${statusBadge(run)}  ${elapsed(run)}, ` +
+      `${run.turns} turns, ${run.toolCalls} tools${retried}${compacted}${overseen}${replaced}`,
   ];
   if (run.filesTouched.length > 0) head.push(`files: ${run.filesTouched.join(', ')}`);
   // A child that tried to reach a teammate and could not is a child whose brief
@@ -204,6 +174,61 @@ function buildSection(run: SubagentRun): { head: string[]; summary: string } {
   if (run.blockedWaits) head.push(`blocked waits: ${run.blockedWaits} (no teammate could answer)`);
   const summary = (run.summary ?? '').trim();
   return { head, summary: summary.length > 0 ? summary : '(no summary)' };
+}
+
+/**
+ * The supervisor's ledger (team-overseer §3.7): one line per APPLIED decision,
+ * so the lead can see who was nudged or replaced, when, and why. Budgeted by
+ * the same `reportMaxBytes` ladder as everything else - it renders as a block,
+ * so trimming it means trimming the blocks, which the ladder already does.
+ *
+ * subagent-overseer-v2 appends three aggregates, each AT MOST ONCE (D-7 /
+ * D-10): the fast-tier spend line, a degraded-cadence note and a
+ * went-quiet note. Aggregates, never per-tick rows: a degraded dispatch
+ * ticks for hours and the report's job is the fact, not the log.
+ */
+function buildOverseer(outcome: DispatchOutcome, options: ReportOptions): string[] {
+  const list = outcome.interventions ?? [];
+  const calls = outcome.overseerCalls ?? 0;
+  const degraded = outcome.overseerDegraded === true;
+  // The pseudo-label aggregate (`team`) is a note, not a child's ledger row.
+  const quietChildren = list.filter(
+    (item) => item.trigger === 'quiet' && item.label !== SUPERVISOR_TEAM_LABEL,
+  ).length;
+  if (list.length === 0 && calls === 0 && !degraded) return [];
+  const lines = ['### Supervisor'];
+  for (const item of list) {
+    const at = Math.max(0, Math.round((item.at - outcome.startedAt) / 1000));
+    lines.push(
+      `[${item.trigger} ${at}s] ${item.label}: ${item.action} - ${item.reason}`,
+    );
+  }
+  // Honest accounting (D-7): rendered only when calls were actually made,
+  // priced at the FAST table, `pricing unknown` when that table is absent.
+  if (calls > 0 && outcome.overseerUsage !== undefined) {
+    const price = options.fastCost
+      ? formatCost(computeCost(outcome.overseerUsage, options.fastCost))
+      : 'pricing unknown';
+    lines.push(
+      `supervisor: ${calls} call${calls === 1 ? '' : 's'}, ${formatTokens(
+        outcome.overseerUsage.inputTokens,
+      )} in / ${formatTokens(outcome.overseerUsage.outputTokens)} out tokens` +
+        ` (fast tier), ${price}.`,
+    );
+  }
+  if (degraded) {
+    lines.push(
+      `note: the fast tier was unavailable for ${outcome.overseerDegradedTicks ?? 1}` +
+        ` cadence check(s); children waited unassisted and none were killed.`,
+    );
+  }
+  if (quietChildren > 0) {
+    lines.push(
+      `note: supervision went quiet on ${quietChildren}` +
+        ` child${quietChildren === 1 ? '' : 'ren'} after its look budget.`,
+    );
+  }
+  return lines;
 }
 
 function buildLeadMail(outcome: DispatchOutcome): string[] {
@@ -233,6 +258,7 @@ export function buildDispatchReport(
   const header = buildHeader(outcome, options);
   const sections = outcome.runs.map(buildSection);
   const mail = buildLeadMail(outcome);
+  const overseer = buildOverseer(outcome, options);
 
   const summaries = sections.map((s) => truncateBytes(s.summary, TEAM_LIMITS.summaryMaxBytes));
   const trimmed = summaries.map((s, i) => s.length < sections[i]!.summary.length);
@@ -247,6 +273,7 @@ export function buildDispatchReport(
       }
       blocks.push(lines.join('\n'));
     });
+    if (overseer.length > 0) blocks.push(overseer.join('\n'));
     if (mail.length > 0) blocks.push(mail.join('\n'));
     return blocks.join('\n\n');
   };

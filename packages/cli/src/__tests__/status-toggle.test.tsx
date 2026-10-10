@@ -48,7 +48,7 @@ describe('real Ctrl+G and hidden overlay input', () => {
       expect(terminal.lastFrame().trimEnd().split('\n').at(-1)).toContain('Compact');
     } finally { terminal.dispose(); controller.dispose(); }
   });
-  it('naturally expires Ctrl+C exit feedback after 1500ms without another key or render trigger', async () => {
+  it('naturally expires Ctrl+C clear-input feedback after 1500ms without another key or render trigger', async () => {
     const terminal = createTerminalHarness();
     const { controller } = fixture();
     try {
@@ -60,12 +60,13 @@ describe('real Ctrl+G and hidden overlay input', () => {
       await settleTerminal();
       terminal.input('\x03');
       await settleTerminal();
-      expect(terminal.lastFrame()).toContain('^C exit');
+      expect(terminal.lastFrame()).toContain('^C clear');
       const armedFrameCount = terminal.frames.length;
       await new Promise(resolve => setTimeout(resolve, 700));
-      expect(terminal.lastFrame()).toContain('^C exit');
-      await vi.waitFor(() => expect(terminal.lastFrame()).not.toContain('^C exit'),
+      expect(terminal.lastFrame()).toContain('^C clear');
+      await vi.waitFor(() => expect(terminal.lastFrame()).not.toContain('^C clear'),
         { timeout: 1500, interval: 50 });
+      expect(terminal.lastFrame()).not.toContain('Press Ctrl+C again to clear input');
       expect(terminal.lastFrame()).not.toContain('Press Ctrl+C again to exit');
       expect(terminal.frames.length).toBeGreaterThan(armedFrameCount);
       expect(terminal.lastFrame()).toContain('retained draft');
@@ -74,7 +75,7 @@ describe('real Ctrl+G and hidden overlay input', () => {
       // A new press after expiry arms again rather than exiting the application.
       terminal.input('\x03');
       await settleTerminal();
-      expect(terminal.lastFrame()).toContain('^C exit');
+      expect(terminal.lastFrame()).toContain('^C clear');
       expect(terminal.lastFrame()).toContain('retained draft');
     } finally { terminal.dispose(); controller.dispose(); }
   });

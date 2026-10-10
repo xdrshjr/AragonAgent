@@ -21,7 +21,6 @@ function run(over: Partial<SubagentRun> = {}): SubagentRun {
   return {
     label: 'a1',
     description: 'read the auth middleware',
-    tier: 'main',
     phase: 'tool',
     startedAt: 1000,
     turns: 4,

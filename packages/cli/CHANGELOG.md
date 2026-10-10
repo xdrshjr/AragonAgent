@@ -7,6 +7,52 @@ were written.
 
 ## Unreleased
 
+### Fixed
+
+- **`Ctrl+I` was dead on Windows.** The win32-input-mode translator only
+  recognised the chord when the console reported it as `VK_TAB` (vk 9) with
+  ctrl - a record shape no real console was ever probed for. Physical
+  Ctrl+I keeps the LETTER vk (0x49, the same Ctrl+letter rule that reports
+  Ctrl+A as vk 65 and Ctrl+J as vk 74 in the Shift+Enter probe captures)
+  while `char` carries the Tab byte, so the record fell through to the
+  generic Ctrl-combo branch, came out as plain Tab, and the keybinding
+  silently did completion instead of opening the index confirm. The
+  translator now tells Ctrl+I apart from Tab by `char === 0x09 && ctrl`
+  whatever vk it rides, with Shift still mapping to Shift+Tab; both record
+  shapes are pinned by regression rows in `win32-input-mode.test.ts`.
+
+### Team dispatch supervisor (team-overseer)
+
+- **A time ceiling on a subagent is now an inspection trigger, not a death
+  sentence.** With the supervisor on (new key `team.overseer`, default
+  `true`, needs the fast tier), two soft timers per child - event silence at
+  `idleTimeoutMs` and a wall clock at `subagentTimeoutMs` (or 5 minutes when
+  no ceiling is configured) - fire one bounded fast-tier inspection. The
+  supervisor decides wait / nudge / replace / abandon; the runtime applies,
+  funnelling every lifecycle change through the worker loop that awaits the
+  child, so a replacement is never built for nobody.
+- **A nudge is steering; a replace is a rebuild with an amended brief.**
+  Guidance is queued at core's safe top-of-loop checkpoint; a replacement
+  carries the supervisor's reason, the dead child's `filesTouched`, and the
+  original brief bounded to the same prompt budget. A post-mortem inspection
+  diagnoses a child that died silently (watchdog death, stream loss) and may
+  re-assign it once.
+- **Budgets are structural, not settings**: 4 inspections and 1 replacement
+  per child per dispatch; past them the child runs under its own (lengthened
+  while supervised) idle watchdog and the supervisor goes quiet. An
+  unparseable or failing supervision call always becomes `wait` -
+  supervision must never kill a healthy child.
+- Every applied decision is visible three ways: the report's Supervisor
+  section (`[silence 30s] a1: nudge - ...`), the team panel and the `-p`
+  stderr line, and a `debug` log event. `aragon exec` emits it as an
+  additive `team` subtype `overseer` (`EXEC_SCHEMA_VERSION` unchanged).
+- New command `/team overseer on|off` (refused mid-dispatch, like every
+  other `/team` setting) and new config key `team.overseer`, also settable
+  as `aragon config set team.overseer false`. With the supervisor off - or
+  no fast tier - every path is byte-for-byte the pre-feature regime:
+  `subagentTimeoutMs` is a hard abort and silence is the child's own
+  watchdog.
+
 ### 启动与缩窗不再误报 Frame diff lost sync
 
 - 启动即现的 "Frame diffing lost sync with the terminal and fell back to a
@@ -450,6 +496,30 @@ were written.
   to return the tools it returned before.
 
 ## Unreleased
+
+### Project index on Ctrl+I (bundled `project-indexer` skill)
+
+- The `project-indexer` skill now ships **bundled** with the package
+  (`<pkg>/skills/project-indexer`, read-only, alongside `skill-creator`): it
+  generates the `.claude-index/` navigation map and injects the Google-style
+  Clean Code Guidelines section into `CLAUDE.md`, adapted from the standalone
+  Claude Code skill (ask_user instead of AskUserQuestion; body condensed under
+  the 30 KB invocation budget with the four templates bundled as files).
+- New keybinding `Ctrl+I`: opens a Yes/No confirm that names every write
+  target, then dispatches `/skill:project-indexer` through the ordinary
+  command path - the indexing run is a normal agent turn whose tool calls
+  stream into the transcript. While a run is in flight the key warns instead
+  of queueing; with skills disabled or the skill shadowed it explains instead
+  of failing silently.
+- `Ctrl+I` is legacy-encoded as the Tab byte, so the stdin filter's two
+  translators (win32-input-mode on Windows, kitty CSI-u / modifyOtherKeys
+  elsewhere) now emit a distinct NUL-delimited `INDEX_KEY_FRAME` for it -
+  the same framing technique `Shift+Enter` uses. On terminals with neither
+  protocol the key keeps its legacy Tab meaning (completion).
+- The header names the key next to the detail toggle: `^I Index` collapsed,
+  `^I build index` in the `Ctrl+G` expanded state; hidden below 72 columns and
+  while an overlay is open. `/skill:project-indexer` and `/project-indexer`
+  remain available as typed commands.
 
 ### Added
 

@@ -12,6 +12,15 @@ const ESC = '\u001B';
 const sgr = (b: number, x: number, y: number): string => `${ESC}[<${b};${x};${y}M`;
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+/**
+ * A wait that CANNOT let a timer fire. "Still held" assertions must use this,
+ * not `tick()`: both the 0 ms tick and the 12 ms pending-flush timer are
+ * macrotasks, and a worker preempted between `write` and the tick can resume
+ * with the flush already due, flipping the assertion under suite load (seen
+ * once in a 266-file run). Microtasks drain before every timer callback, so
+ * the hold is deterministically still open here.
+ */
+const stillHeld = (): Promise<void> => Promise.resolve();
 
 describe('DEL normalization outside paste', () => {
   it.each([true, false])('keeps CSI Delete but normalizes DEL and split Alt+DEL, paste=%s', (paste) => {
@@ -288,7 +297,7 @@ describe('createMouseFilter', () => {
 
     const report = sgr(65, 20, 7);
     (stream as unknown as PassThrough).write(report.slice(0, 5));
-    await tick();
+    await stillHeld();
     expect(sink.text()).toBe('');
     (stream as unknown as PassThrough).write(report.slice(5));
     await tick();
@@ -308,7 +317,7 @@ describe('createMouseFilter', () => {
     const sink = drain(filter);
 
     (stream as unknown as PassThrough).write(ESC);
-    await tick();
+    await stillHeld();
     expect(sink.text()).toBe('');
     await new Promise((r) => setTimeout(r, 30));
     expect(sink.text()).toBe(ESC);
@@ -559,7 +568,7 @@ describe('createStdinFilter — Enter-family rewrite (tui-shift-enter-copy-queue
     const pipe = stream as unknown as PassThrough;
 
     pipe.write(`${ESC}[13;`);
-    await tick();
+    await stillHeld();
     expect(sink.text()).toBe(''); // nothing leaks while the hold is open
     pipe.write('2u');
     await tick();
@@ -712,7 +721,7 @@ describe('createStdinFilter — paste framing', () => {
     const pipe = stream as unknown as PassThrough;
 
     pipe.write(`${BEGIN}stuck`);
-    await tick();
+    await stillHeld();
     expect(sink.text()).toBe('');
 
     await new Promise((r) => setTimeout(r, 2_100));

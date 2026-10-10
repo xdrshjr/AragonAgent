@@ -35,8 +35,22 @@ export interface WatchdogPausable {
 export class TeamHumanQueue {
   /** The chain. Never rejects: a failed request resolves `false` (deny). */
   private tail: Promise<unknown> = Promise.resolve();
+  /**
+   * Labels with a request chained but not yet answered (team-overseer I-OV3).
+   *
+   * The queue pauses the CHILD's own watchdog on enqueue; the supervisor's
+   * soft silence timer needs the same fact one level up, or a user who takes
+   * four minutes over the first dialog burns inspection budget on siblings
+   * that are third in the FIFO and provably fine.
+   */
+  private readonly waiting = new Set<string>();
 
   constructor(private readonly confirm: (req: ConfirmRequest) => Promise<boolean>) {}
+
+  /** Whether `label` has a confirmation queued or displayed right now. */
+  isWaiting(label: string): boolean {
+    return this.waiting.has(label);
+  }
 
   /**
    * Ask the human about `req` on behalf of `label`, one at a time.
@@ -54,6 +68,7 @@ export class TeamHumanQueue {
     signal?: AbortSignal,
   ): Promise<boolean> {
     child?.pauseIdleWatchdog();
+    this.waiting.add(label);
 
     const queued = this.enqueue(async () => {
       if (signal?.aborted) return false;
@@ -61,7 +76,10 @@ export class TeamHumanQueue {
     });
 
     const raced = signal ? Promise.race([queued, abortsToFalse(signal)]) : queued;
-    return raced.finally(() => child?.resumeIdleWatchdog());
+    return raced.finally(() => {
+      this.waiting.delete(label);
+      child?.resumeIdleWatchdog();
+    });
   }
 
   /**

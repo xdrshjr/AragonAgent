@@ -254,22 +254,32 @@ describe('config set retry.* coverage', () => {
 // ---------------------------------------------------------------------------
 
 describe('the retry budget clears the per-child timeout (AC-33)', () => {
-  it('DEFAULT_RETRY_POLICY.maxElapsedMs < DEFAULT_TEAM_CONFIG.subagentTimeoutMs', () => {
+  it('the parity default leaves the retry ladder alone', () => {
     /**
      * A STATIC ASSERTION, and it lives here because this is the only suite where
      * both constants are visible (llm-api-retry-backoff §5.6 / R-15).
      *
      * ITS ENTIRE JOB IS TO MAKE THE NEXT PERSON WHO EDITS EITHER NUMBER READ THE
-     * REASON. If the two are EQUAL, a child is killed by its own timeout at or
-     * before the instant its retry budget expires — so the user is told "subagent
-     * timed out" for what was a provider outage, and the whole retry story was
-     * invisible on the way there. They were both 300 000 in the v1 design.
+     * REASON. If a child wall clock EQUALS the retry budget, the child is killed
+     * by its own timeout at or before the instant its retry budget expires — so
+     * the user is told "subagent timed out" for what was a provider outage, and
+     * the whole retry story was invisible on the way there. They were both
+     * 300 000 in the v1 design.
      *
-     * The invariant is `maxElapsedMs + one model round-trip < subagentTimeoutMs`;
-     * the headroom below is what pays for the round trip.
+     * MAIN-AGENT PARITY removed the race BY REMOVING THE TIMER: the default
+     * `subagentTimeoutMs: 0` arms no clock at all, so a retrying child can
+     * always run its ladder to the end, exactly like the lead.
      */
-    expect(DEFAULT_RETRY_POLICY.maxElapsedMs).toBeLessThan(DEFAULT_TEAM_CONFIG.subagentTimeoutMs);
-    expect(DEFAULT_TEAM_CONFIG.subagentTimeoutMs - DEFAULT_RETRY_POLICY.maxElapsedMs)
+    expect(DEFAULT_TEAM_CONFIG.subagentTimeoutMs).toBe(0);
+  });
+
+  it('no ceiling the clamp can produce reintroduces the race', () => {
+    // The largest wall clock the config can hand a child is 30 minutes; the
+    // retry budget plus one model round trip still fits inside it, so no
+    // reachable POSITIVE setting collides with the ladder either.
+    const maxSubagentTimeoutMs = 1_800_000;
+    expect(DEFAULT_RETRY_POLICY.maxElapsedMs).toBeLessThan(maxSubagentTimeoutMs);
+    expect(maxSubagentTimeoutMs - DEFAULT_RETRY_POLICY.maxElapsedMs)
       .toBeGreaterThanOrEqual(30_000);
   });
 

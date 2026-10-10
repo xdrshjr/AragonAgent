@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import stringWidth from 'string-width';
 import * as layout from '../ui/layout/status-layout.js';
 const base = {
@@ -60,4 +60,37 @@ it('sanitizes external tool names and never interprets control bytes', () => {
  const plan=layout.planPrimaryStatusFields({...base,columns:300,activeTool:{name:'\x1b[31mtool\nname\x00',toolCallId:'t'}});
  expect(plan.fields[0]!.text).toContain('tool name');
  expect(plan.fields[0]!.text).not.toMatch(/[\x00-\x1f]/);
+});
+
+describe('planPrimaryStatusFields mode word', () => {
+  it('names both modes on the primary row right after the phase word', () => {
+    for (const [mode, word] of [['build', 'BUILD'], ['plan', 'PLAN']] as const) {
+      const plan = layout.planPrimaryStatusFields({ ...base, columns: 120, mode });
+      expect(plan.fields.map(f => f.id)).toEqual(['phase', 'mode', 'context', 'thinking', 'speed', 'elapsed']);
+      expect(plan.fields[1]).toMatchObject({ id: 'mode', text: word, tone: 'accent' });
+    }
+  });
+  it('renders a deferred switch as CUR>PENDING and degrades to letters when tight', () => {
+    const wide = layout.planPrimaryStatusFields({ ...base, columns: 120, mode: 'plan', pendingMode: 'build' });
+    expect(wide.fields[1]!.text).toBe('PLAN>BUILD');
+    const narrow = layout.planPrimaryStatusFields({ ...base, columns: 40, mode: 'plan', pendingMode: 'build',
+      context: { ...base.context, pct: 1e300 }, tokPerSec: 1e300, elapsedMs: 1e300 });
+    expect(narrow.fields[1]!.text).toBe('P>B');
+  });
+  it('keeps the mode word inside the budget in the maximal-value ladder', () => {
+    for (let columns = 40; columns <= 200; columns += 1) {
+      for (const mode of ['build', 'plan'] as const) {
+        const plan = layout.planPrimaryStatusFields({ ...base, columns, mode,
+          pendingMode: mode === 'plan' ? 'build' : 'plan',
+          context: { ...base.context, pct: 1e300 }, tokPerSec: 1e300, elapsedMs: 1e300,
+          feedback: { kind: 'copy-error', text: 'failure', level: 'error' }, escapeAction: 'force-stop' });
+        expect(plan.cells).toBeLessThanOrEqual(columns - 1);
+        expect(plan.fields.map(f => f.id)).toContain('mode');
+      }
+    }
+  });
+  it('omits the mode field entirely when the caller names no mode', () => {
+    const plan = layout.planPrimaryStatusFields({ ...base, columns: 120 });
+    expect(plan.fields.map(f => f.id)).toEqual(['phase', 'context', 'thinking', 'speed', 'elapsed']);
+  });
 });

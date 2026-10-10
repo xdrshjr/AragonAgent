@@ -70,6 +70,7 @@ function config(fast: Partial<FastConfig> = {}, over: Partial<CliConfig> = {}): 
     submitCount: 0,
     cwd: '/tmp',
     color: true,
+    keyboardEnhancement: false,
     ...over,
   };
 }

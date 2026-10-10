@@ -7,8 +7,8 @@
  * THIS CLASS EXISTS FOR A BUDGET REASON, NOT AN AESTHETIC ONE (C-12 / RV-5).
  * `CLAUDE.md` caps a source file at 1000 lines and `controller.ts` was at 960
  * before this feature, which handed it nine new responsibilities. `FastWiring`
- * owns the flag pair, the tier cache, the reviewer's lifetime and the
- * `resolveTier` closure; `AgentController` keeps one field and four thin
+ * owns the flag pair, the tier cache, the reviewer's lifetime and the shared
+ * fail-fast review transport; `AgentController` keeps one field and four thin
  * forwarders. It is still CLI-local and still holds no `ui/` import.
  *
  * TWO FLAGS AND ONE LIVE PREDICATE (§3.3), which is the shape every optional
@@ -41,7 +41,6 @@ import {
   type ModelRef,
   type ProviderRegistry,
   type RetryPolicy,
-  type ThinkingLevel,
 } from '@aragon-agent/core';
 import type { CliConfig } from '../config/schema.js';
 import { getLogger } from '../logging/logger.js';
@@ -53,7 +52,6 @@ import type {
   FastEventListener,
   FastSnapshot,
   FastTier,
-  FastTierName,
 } from './types.js';
 
 export interface FastWiringDeps {
@@ -125,7 +123,6 @@ export function offFastStatus(): FastStatus {
       // `budgetReached` is CARRIED and callers must never re-derive it.
       reviewBudget: 0,
       budgetReached: false,
-      delegated: 0,
       usage: { inputTokens: 0, outputTokens: 0 },
       pricingUnknown: false,
       inFlight: false,
@@ -148,7 +145,6 @@ export class FastWiring {
   private tier: FastTier;
   /** Warned once per TRANSITION, so a broken tier does not shout every turn. */
   private lastReportedReason: string | null = null;
-  private delegated = 0;
 
   constructor(private readonly deps: FastWiringDeps) {
     this.tier = resolveFastTier(deps.getConfig(), deps.hasKey);
@@ -238,26 +234,14 @@ export class FastWiring {
    * §3.3's live predicate. THE THIRD TERM IS THE POINT - see the header.
    *
    * `FastReviewer.isSelfDisabled()` is DELIBERATELY NOT a fourth term. Folding
-   * it in would look tidier and would break something else: `delegationAvailable()`
-   * is `available() && config.fast.delegate === true`, so three consecutive
-   * REVIEW failures would silently switch DELEGATION off as well - turning a
-   * diagnostic signal into a behaviour change for every user. The two facts are
-   * reported separately on `FastSnapshot` instead (`live` / `selfDisabled`).
+   * it in would look tidier and would break something else: per-child reviewers
+   * gate on `available()` too, so three consecutive REVIEW failures would
+   * silently stop every child's reviews as well - turning a diagnostic signal
+   * into a behaviour change for every dispatch. The two facts are reported
+   * separately on `FastSnapshot` instead (`live` / `selfDisabled`).
    */
   available(): boolean {
     return this.registered && this.enabled && this.tier.ok;
-  }
-
-  /**
-   * Whether `model: "fast"` on `task` is honoured right now.
-   *
-   * Evaluated AT DISPATCH TIME, never snapshot (§3.4 / RV-3). `fast.delegate:
-   * false` and "the tier stopped resolving twenty minutes ago" are the same
-   * observable to the model - a downgrade, counted and reported - which is the
-   * honest reading of both.
-   */
-  delegationAvailable(): boolean {
-    return this.available() && this.deps.getConfig().fast.delegate === true;
   }
 
   setEnabled(enabled: boolean): void {
@@ -307,42 +291,28 @@ export class FastWiring {
   }
 
   // -----------------------------------------------------------------------
-  // Tier resolution for subagents (§3.4)
+  // The tier's transport, shared with per-child reviewers (§3.4)
   // -----------------------------------------------------------------------
 
-  /**
-   * The `ModelRef` and thinking level one subagent tier runs on.
-   *
-   * `'fast'` FALLS BACK TO MAIN when delegation is not available, so the two
-   * guards agree BY CONSTRUCTION: the normalizer can never produce a
-   * `tier: 'fast'` spec this factory would refuse, and this factory can never
-   * build a child against a `ModelRef` the tier no longer resolves (RV-3).
-   */
-  resolveTier(tier: FastTierName): { ref: ModelRef; thinkingLevel: ThinkingLevel; role?: ModelRole } {
-    const config = this.deps.getConfig();
-    if (tier === 'fast' && this.delegationAvailable() && this.tier.ok) {
-      return { ref: this.tier.ref, thinkingLevel: this.tier.thinkingLevel, role: 'fast' };
-    }
-    return {
-      ref: {
-        providerId: config.provider,
-        modelId: config.model,
-        ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
-      },
-      thinkingLevel: config.thinkingLevel,
-      role: 'main',
-    };
-  }
-
-  /** The resolved fast `ModelRef`, or `null` - for per-tier cost lookup (§3.6). */
+  /** The resolved fast `ModelRef`, or `null` - for cost lookups (§3.6). */
   fastRef(): ModelRef | null {
     return this.tier.ok ? this.tier.ref : null;
   }
 
-  /** Count fast-tier children so `/fast status` can answer "is this saving me
-   *  anything?" — the aggregate on the status bar cannot. */
-  noteDelegated(count: number): void {
-    if (count > 0) this.delegated += count;
+  /**
+   * The fail-fast review transport, exposed so PER-CHILD reviewers share ONE
+   * registry instead of building one each - the same adapter-state reuse
+   * argument `TeamRuntime` makes about the lead's `ProviderRegistry`.
+   *
+   * Lazy: a session that never reviews allocates nothing (I-2). The retry
+   * policy is `FAST_RETRY_POLICY`, deliberately not the user's `retry` config
+   * - see `getFastRegistry()` for the reason.
+   */
+  completeViaFastRegistry(
+    providerId: string,
+    request: LLMRequest,
+  ): Promise<AssistantMessage> {
+    return this.getFastRegistry().complete(providerId, request);
   }
 
   // -----------------------------------------------------------------------
@@ -385,7 +355,6 @@ export class FastWiring {
       reviews: this.reviewer.reviewCount(),
       reviewBudget: this.reviewer.budgetLimit(),
       budgetReached: this.reviewer.isBudgetReached(),
-      delegated: this.delegated,
       usage: this.reviewer.sessionUsage(),
       // UNKNOWN PRICING IS NOT ZERO PRICING (C-11 / RV-4). The fast tier is
       // precisely where an unrecognised model id is likely, and rendering it as

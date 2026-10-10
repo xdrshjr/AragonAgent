@@ -406,10 +406,10 @@ signal ends the run (`130` SIGINT, `143` SIGTERM, `129` SIGHUP).
 | `/save [file]` | Save the session to JSON |
 | `/resume [file]` | Load a saved session |
 | `/plan [on\|off\|status]` | Toggle plan mode - the keyboard-free equivalent of `Shift+Tab` |
-| `/team [on\|off\|max <n>]` | Team subagents: status and the live roster, the on/off switch, the fan-out width |
+| `/team [on\|off\|max <n>\|overseer on\|off]` | Team subagents: status and the live roster, the on/off switch, the fan-out width, the dispatch supervisor |
 | `/todo [on\|off\|panel on\|off\|follow <mode>\|clear\|continue]` | Todo planning: status, the on/off switch, the rail, follow-through, and picking an unfinished plan back up |
 | `/retry [show\|on\|off\|max <n>]` | API retry: the effective ladder, the on/off switch, the retry count. Takes effect **in the running session**, children included |
-| `/fast [on\|off\|model <id>\|provider <id>\|same\|review <n\|off>\|delegate on\|off]` | Fast model tier: status and this session's totals, the on/off switch, which model, the review cadence |
+| `/fast [on\|off\|model <id>\|provider <id>\|same\|review <n\|off>]` | Fast model tier: status and this session's totals, the on/off switch, which model, the review cadence |
 | `/compact [status\|on\|off\|threshold <n>\|keep <n>\|history\|show <n>\|<instructions>]` | Context compaction: occupancy and this session's totals, the on/off switch, when it fires, how much it keeps. With free text, compacts now and tells the summarizer what to pay attention to |
 | `/context` | What the context gauge is showing: occupancy split into measured and estimated, the window and **where it came from**, how stale the measurement is, compaction's actual state, and what the session-spend readout includes |
 | `/bg [list\|logs <id> [n]\|stop <id\|all>\|status]` | Background services: what is running, its log tail, and how to stop it. `list` is the default |
@@ -436,6 +436,7 @@ completes, `Up` / `Down` moves the selection, `Esc` closes it.
 | `Ctrl+J` / `Alt+Enter` / `Shift+Enter` | 插入换行。应用默认请求终端区分修饰键（Windows 用 win32-input-mode，macOS/Linux 用 kitty/modifyOtherKeys），Shift+Enter 在支持的终端开箱即用；不支持的终端用 Ctrl+J。参见 [终端设置](#terminal-setup-for-shiftenter) |
 | `Shift+Tab` | Toggle **plan mode** (`BUILD` <-> `PLAN`). Equivalent: `/plan`. On Windows this needs a console flag Node < 22.17 does not set; aragon sets it at startup — see [Requirements](#requirements) |
 | `Ctrl+P` | The same toggle, over a channel no Windows console can swallow. Use it if `Shift+Tab` does nothing |
+| `Ctrl+I` | **Build the project index** (bundled `project-indexer` skill). Asks for confirmation, then runs as a normal agent turn that writes `.claude-index/` and updates `CLAUDE.md`. On terminals without keyboard enhancement `Ctrl+I` is the Tab byte and completes input instead |
 | `Esc` | Close an overlay or popup; otherwise ask for interruption confirmation. While idle, cancel pending auto-continuation |
 | `Esc` ×2 | Interrupt the run when pressed within 1.5 seconds. Other keys or closing a menu cancel the first press |
 | `Esc` again after interruption | **Force-stop** a run that is still stopping, kill foreground shell commands and return to `idle`; background services remain running |
@@ -810,9 +811,11 @@ still exits the session outright.
 
 ### Where the mode is shown
 
-The status bar always names a non-default mode (`PLAN`, or `PLAN → BUILD` while
-a switch is pending), including on short terminals and with `--no-hints`. The composer additionally shows a `PLAN` chip on its hint row and
-tints its border, where there is room for it.
+The status bar's first row always names the current mode (`BUILD` or `PLAN`,
+an accent word right after the run state; `PLAN>BUILD` while a switch is
+pending; `B` / `P` / `P>B` when the terminal is narrow), including on short
+terminals and with `--no-hints`. The Ctrl+G details row repeats it, and the
+composer tints its border in plan mode.
 
 ### Switching mid-run
 
@@ -821,7 +824,7 @@ during a run takes effect immediately — you pressed it *because* the agent is
 about to do something. Pressing it toward `BUILD` during a run is **deferred to
 the end of the run**, so a session you launched under a read-only guarantee
 cannot start writing files because of one stray keypress. The status bar shows
-`PLAN → BUILD` while that is pending. Approving a plan is the one exception, and
+`PLAN>BUILD` while that is pending. Approving a plan is the one exception, and
 it is an informed act rather than a stray keypress.
 
 ### If `Shift+Tab` does nothing
@@ -839,7 +842,7 @@ node -e "process.stdin.setRawMode(true);process.stdin.resume();process.stdin.on(
 | It prints | What it means |
 | --- | --- |
 | `09` | The console is swallowing the modifier — the key is arriving as an ordinary `Tab`. Check `node -v`: below 22.17.0 (or on 24.0/24.1) this is expected, and aragon's own attempt to fix it was blocked. See [Requirements](#requirements) |
-| `1b5b5a` | The key reaches the process fine, so something inside aragon is eating it — most often an overlay is open, or the run is still going and the switch is pending (the status bar shows `BUILD → PLAN`) |
+| `1b5b5a` | The key reaches the process fine, so something inside aragon is eating it — most often an overlay is open, or the run is still going and the switch is pending (the status bar shows `PLAN>BUILD`) |
 | nothing | Your terminal, multiplexer or remote-desktop stack never sent it; some never send `CSI Z` at all |
 
 On the first row the wheel is dead for the same reason, and with the `/` palette
@@ -1144,6 +1147,36 @@ subagents wrote the same file the header says so, phrased as a warning rather
 than a fact: the file list is derived from `write_file` / `edit_file`, so a
 write made through `bash` is invisible to it.
 
+**The dispatch supervisor.** A time ceiling on a subagent is an inspection
+trigger, not a death sentence. Every dispatch gets its own supervisor on the
+fast model: a per-child silence window for suspected stalls, plus a periodic
+cadence check over the WHOLE roster — one bounded call that carries every live
+subagent and returns one decision per child: keep waiting, steer a nudge in,
+rebuild the child with an amended brief, or abandon it with a recorded reason.
+The cadence grows geometrically (5 min base, ×1.6, capped at 15 min), so a
+healthy slow subagent is checked logarithmically in its run time rather than
+every five minutes forever. The budgets are structural, not settings — 12
+looks, 3 nudges, 1 replacement and 1 abandon per child per dispatch. When the
+look budget is spent the supervisor says so once (`quiet` in the report) and
+stops waking that child; failed inspection calls cost a look but never an
+action. Every applied decision is recorded in the report's Supervisor section
+with the supervisor's own fast-tier spend, and replace/abandon also surface as
+a transcript notice while the dispatch runs.
+
+**No kill by default.** While `team.overseer` is on (the default),
+`team.subagentTimeoutMs` never aborts anything — a positive value is only the
+supervisor's first cadence check. If the fast tier is missing (no key,
+`/fast off`), a due check degrades to an announced *unassisted wait*: the
+children keep running, the report notes how many checks ran degraded, and
+nothing is killed. A subagent still ends on the user's Esc, the explicit
+`team.dispatchTimeoutMs` / `team.maxTurnsPerSubagent` ceilings, its own idle
+watchdog (lengthened 4× while supervised), or the supervisor's own
+replace/abandon verdict. One boundary to know: a session with NO fast wiring
+at all and `team.overseer: true` runs children with no wall clock whatsoever
+— they finish, or die on their own un-lengthened watchdog. `/team overseer
+off` is the escape hatch back to the legacy regime where
+`team.subagentTimeoutMs` is a hard abort again.
+
 **Talking to each other.** Subagents get two extra tools, `team_send` and
 `team_wait`. Messages are delivered by attaching them to the recipient's next
 tool result, so nobody has to poll and nobody's work is interrupted. The limits
@@ -1184,25 +1217,24 @@ children's tokens are folded into the `[usage]` footer.
 ## Fast model tier
 
 A second, cheaper model can be made a first-class citizen of a session. It is
-**off by default** — with `fast.enabled: false` the system prompt, the `task`
-tool schema, the transcript and the request payloads are exactly what they were
-before this feature existed — and it buys you two things once you turn it on.
+**off by default** — with `fast.enabled: false` the system prompt, the
+transcript and the request payloads are exactly what they were before this
+feature existed — and it buys you two things once you turn it on.
 
-**Delegation (the agent decides).** `task` gains one optional field per
-subagent, `model: "fast"`. A child marked that way runs on the fast model and is
-otherwise identical: same tools, same working directory, same `--confirm` gate,
-same plan-mode gate, same skills ceiling. Delegating to a cheaper model is a
-*model* choice, never a permission boundary. This is where "not complicated, but
-very expensive in context" is actually paid for: a child that reads nine files
-and reports four sentences moves ~200 KB of file bodies out of the lead's window
-and onto a model that costs a fraction as much per token.
+**Every `task` child runs the lead's own model.** Per-child fast dispatch
+(`model: "fast"`) was removed for main-agent parity: a delegation is never a
+downgrade, and all the gates (tools, working directory, `--confirm`, plan mode,
+skills ceiling, compaction policy) are the lead's own.
 
 **Periodic review (the harness decides).** Every *N* completed turns, a small
 digest of what the lead has been doing goes to the fast model with one question
 — is this still on track? — and if the answer is not "on track" it is injected
 back into the running loop as a `<fast_review>` block. The lead sees a short
 second opinion mid-run, when it can still act on it, for a few hundred tokens
-instead of a second full-size turn.
+instead of a second full-size turn. **Subagents get the same review**: when the
+tier is live and `fast.review` is on, each dispatched child runs with its own
+reviewer — same cadence, same budget per child, same fail-fast transport — so a
+team is as capable as the agent that dispatched it.
 
 ```
 > refactor the config loader and keep the tests green
@@ -1224,7 +1256,7 @@ separately. If the fast model is not in the built-in price table the number is
 shown as `unknown` rather than as `$0.00` — a feature that looks free while it
 is spending money is worse than one that admits it does not know.
 
-**The review has a session budget, and delegation deliberately does not.** A
+**The review has a session budget.** A
 session is not one run — it is one run per message you send — so a cadence alone
 bounds nothing over a working afternoon. `fast.reviewMaxPerSession` (default
 **40**) is the total number of reviews a session may *start*; reaching it prints
@@ -1233,9 +1265,7 @@ first review rather than a bare count you can only size afterwards. Raise it liv
 with `/fast budget 80`. The budget is denominated in **reviews, not currency**,
 because the fast tier is precisely where a model the price table has never seen
 lives — a dollar ceiling would silently never fire for the configuration that
-most needs one. Delegation is never budgeted: it is spend the lead chose in
-service of a message you sent, it is already bounded by `team.*`, and it exists
-to *reduce* total cost.
+most needs one.
 
 ### Turning it on
 
@@ -1255,9 +1285,8 @@ cannot grow a field mid-session.
 | `fast.provider` | `''` | Empty inherits the main provider. |
 | `fast.model` | `''` | The fast model id. Empty means *not configured* — it never falls back to the main model, so "same as main" stays distinguishable from a typo. |
 | `fast.baseUrl` | `''` | Empty inherits the session's base URL **only** when the provider matches. |
-| `fast.thinkingLevel` | `'off'` | Applied to fast children and to reviews. |
-| `fast.delegate` | `true` | Allow `model:"fast"` on `task`. |
-| `fast.review` | `true` | Run the periodic review. |
+| `fast.thinkingLevel` | `'off'` | Applied to reviews (lead and subagents) and to fast-tier compaction summaries. |
+| `fast.review` | `true` | Run the periodic review — for the lead and for every `task` child. |
 | `fast.reviewEveryTurns` | `5` | Turns between reviews (1–50). |
 | `fast.reviewContextTurns` | `3` | Turns included in one digest (1–10). |
 | `fast.reviewMaxChars` | `280` | Ceiling on an injected critique (80–600). |
@@ -1281,7 +1310,6 @@ reporting one:
 /fast same                 run the fast tier on the main model
 /fast review <n> | off
 /fast budget [n]           the session review budget; bare form reads it
-/fast delegate on | off
 ```
 
 `/fast budget` with no argument is a **read**, so it is answerable while a `task`
@@ -1290,9 +1318,8 @@ like every other `/fast` setting.
 
 **What you see.** A `fast` chip in the status bar's right cluster while the tier
 is live (`fast*` while a review is in flight, dropped below 100 columns), a
-one-line card per review in the transcript, and `n fast` plus a trailing `~` on
-fast children in the team roster. `/fast status` reports the session totals the
-status bar cannot: reviews run, children delegated, tokens and cost. Under `-p`
+one-line card per review in the transcript. `/fast status` reports the session totals the
+status bar cannot: reviews run, tokens and cost. Under `-p`
 nothing extra is written to stdout or stderr — the review spend is folded into
 the `[usage]` footer and the reviews are in the log.
 
@@ -1558,18 +1585,19 @@ refusal is explained. Automatic tail clipping and failure truncation are disable
 
 ### Sub-agents get the same protection
 
-A `task` child is bounded by `team.maxTurnsPerSubagent` (24) and
-`team.dispatchTimeoutMs` (15 minutes) — the same profile as a lead run that fills
-a window. When a child overflowed, its history was discarded and the whole
-dispatch reached you as one partial sentence.
-
-Children now compact their own history, under tighter bounds: **two** retained
-turns instead of four, at most **two** compactions per child instead of five, the
-fast tier preferred whenever it resolves, and failures preserve history. Each
+Children compact their own history **under the lead's own policy**: the same
+`keepRecentTurns`, the same `onFailure`, the same archive setting, the same
+per-run compaction bound, the fast tier preferred whenever it resolves. Each
 child owns its own context meter and counts compaction only after Core accepts
 the candidate. There is no transcript card for a
 child — the lead's transcript describes the lead's context. Turn it off with
 `compaction.subagents: false`.
+
+Since main-agent parity, the turn cap, the per-child wall clock and the dispatch
+wall clock all default to **0 = no limit**: a child runs until it finishes, like
+the lead, with only its own idle watchdog and your Esc as ceilings. Set any of
+`team.subagentTimeoutMs` / `team.dispatchTimeoutMs` / `team.maxTurnsPerSubagent`
+to a positive value to bring a ceiling back.
 
 ### A compaction is no longer irreversible
 
@@ -1629,6 +1657,39 @@ A skill is a reusable expert procedure stored on disk: a directory containing a
 `SKILL.md` (YAML frontmatter + Markdown body) and, optionally, `reference/`,
 `scripts/` and `assets/`. The format matches Claude Code's, so an existing
 community skill directory works as-is.
+
+### Project index - `Ctrl+I`
+
+Two skills ship **bundled** with the package (`<pkg>/skills`, read-only):
+`skill-creator`, and `project-indexer` - a codebase indexer that generates a
+`.claude-index/` navigation map (project overview, feature map, file index,
+exported symbols) and injects a Google-style **Clean Code Guidelines** section
+into `CLAUDE.md` so future sessions inherit the project's code-quality
+thresholds.
+
+`Ctrl+I` is its dedicated keybinding. The flow is deliberately boring:
+
+1. A **Yes/No confirm** opens (what will be written is spelled out - the
+   dialog names `.claude-index/` and `CLAUDE.md` before anything happens).
+2. Approving dispatches `/skill:project-indexer` through the ordinary command
+   path, so the run is a normal agent turn: every `glob` / `read_file` /
+   `write_file` streams into the transcript as a tool card, `Esc`
+   interrupts it, and the follow-up configuration questions (exclusions,
+   priority directories, clean-code preset) arrive through the same `ask_user`
+   overlay any other turn uses.
+3. The header names the key: `^I Index` collapsed, `^I build index` once
+   `Ctrl+G` expands the detail row.
+
+An existing `.claude-index/config.md` is reused on rebuild. While the agent is
+running, `Ctrl+I` warns instead of queueing. `/skill:project-indexer` and
+`/project-indexer` work as typed commands too.
+
+> **Terminal support:** `Ctrl+I` is the same byte as `Tab` in legacy terminal
+> encoding. AragonAgent already asks for modified-key reporting at startup
+> (win32-input-mode on Windows, kitty/modifyOtherKeys elsewhere - the same
+> machinery that makes `Shift+Enter` work), and under those protocols the key
+> is distinguishable and the binding works. On a terminal that implements
+> neither, `Ctrl+I` simply behaves as `Tab`.
 
 ### Progressive disclosure
 
@@ -1959,9 +2020,11 @@ env / `.env` → CLI flags**.
 | `team.enabled` | `true` | Master switch for team subagents. `false` means the `task` tool is never registered — `/team on` in such a session saves the setting for next launch and says so, rather than advertising a tool that is not there. |
 | `team.maxSubagents` | `5` | Subagents per dispatch, clamped to `[1, 10]`. The 10 is the hard ceiling and is enforced twice — on the config value and again on what the model asks for — so hand-editing this file cannot raise it. |
 | `team.maxConcurrent` | `3` | Subagents in flight at once, clamped to `[1, 10]` and capped at `maxSubagents`. A separate knob because provider rate limits are a different constraint from context economics. |
-| `team.subagentTimeoutMs` | `300000` | One subagent's wall clock before it is aborted, clamped to `[30000, 1800000]`. A wedged subagent dies on its own ceiling without taking the dispatch with it. |
-| `team.dispatchTimeoutMs` | `900000` | The whole dispatch's wall clock, clamped to `[60000, 3600000]`. |
-| `team.maxTurnsPerSubagent` | `24` | Runaway-loop cap, clamped to `[4, 100]`. A subagent stopped here is reported as `stopped: turn cap reached`, with whatever it had produced. |
+| `team.subagentTimeoutMs` | `0` | One subagent's wall clock, clamped to `[0, 1800000]`. With `team.overseer: false` it is a hard abort (the legacy regime). With the supervisor on (the default) it **never aborts anything** — a positive value is only a compatibility source for the supervisor's first cadence check. `0` (the default) = use `team.overseerIntervalMs` / the structural 5 min instead. |
+| `team.dispatchTimeoutMs` | `0` | The whole dispatch's wall clock (and the `task` tool timeout), clamped to `[0, 3600000]`. `0` (the default) = no ceiling; only Esc ends a dispatch early. |
+| `team.maxTurnsPerSubagent` | `0` | Runaway-loop cap, clamped to `[0, 100]`. `0` (the default) = no cap, matching the lead. A subagent stopped at a positive cap is reported as `stopped: turn cap reached`, with whatever it had produced. |
+| `team.overseer` | `true` | The dispatch supervisor: one per dispatch on the fast model, ticking on a geometric cadence over every live subagent and deciding wait / nudge / replace / abandon. With the fast tier missing a tick degrades to an announced unassisted wait — never a kill; with this `false`, children run under the legacy hard ceilings exactly. `/team overseer on\|off` flips it live, and it is read per dispatch. |
+| `team.overseerIntervalMs` | `0` | Supervisor cadence base, clamped to `[0, 3600000]`. `0` (the default) = the structural 300 s; a positive `team.subagentTimeoutMs` is honoured first when this is `0` (compat). Later checks grow ×1.6, clamped to `[60 s, 900 s]`; any nudge/replace/abandon resets that child's cadence to the base. Only meaningful while `team.overseer` is true. |
 | `todo.enabled` | `true` | Master switch for todo planning. `false` means the `todo_write` tool is never registered — `/todo on` in such a session saves the setting for next launch and says so, rather than advertising a tool that is not there. |
 | `todo.panel` | `true` | Render the right-hand rail. Independent of `todo.enabled` on purpose: a screen-reader user wants the planning discipline without the column, and the system prompt varies one sentence accordingly. |
 | `todo.followThrough` | `"notify"` | What happens when a run ends with steps left. `notify` says so and stops; `auto` continues the plan after a 3-second grace window, bounded by two structural limits (one fruitless attempt, 25 continuations per plan) that are deliberately **not** settings; `off` is silent. An unrecognized value falls back to `notify`. |
@@ -1972,7 +2035,7 @@ env / `.env` → CLI flags**.
 | `retry.multiplier` | `2` | Growth factor, clamped to `[1, 5]`. The one **float** key in this section: `2.5` is a legitimate factor and is stored as typed. |
 | `retry.jitter` | `true` | Equal jitter (`d/2 + rand·d/2`), which de-correlates concurrent subagents hitting the same 429 while keeping the announced countdown within a factor of two of the truth. Full jitter can fire 40 ms after announcing 30 s, which reads as a bug. |
 | `retry.respectRetryAfter` | `true` | Honour `Retry-After` (and the provider rate-limit reset headers) as a **floor**, never a replacement — a `Retry-After: 1` on the ninth retry does not undo eight retries of backoff. A stated wait above 60 s is surfaced immediately instead of waited out. |
-| `retry.maxElapsedMs` | `240000` | Wall-clock budget from the first failure, clamped to `[10000, 1800000]`. Deliberately **below** `team.subagentTimeoutMs`: an equal budget means a subagent is killed at the same instant its ladder ends, and the user is then told "subagent timed out" for what was a provider outage. |
+| `retry.maxElapsedMs` | `240000` | Wall-clock budget from the first failure, clamped to `[10000, 1800000]`. Under the legacy regime (`team.overseer: false`) with `team.subagentTimeoutMs` positive, keep this below it: an equal budget means a subagent is killed at the same instant its ladder ends, and the user is then told "subagent timed out" for what was a provider outage. |
 | `retry.onPartialStream` | `true` | Allow a restart after content has already streamed to the transcript. The view is rewound and the discarded tool cards removed; engine history is provably clean at that point, because it is only written on a completed turn. `false` refuses the whole path. |
 | `skills.enabled` | `true` | Master switch for the skill system. |
 | `skills.requireApproval` | `true` | Require a human to approve `skill_install` / `skill_create`. |
@@ -2364,19 +2427,19 @@ node packages/cli/dist/cli.js --version
 - `echo "list files" | node dist/cli.js -p` prints an answer and exits `0`.
 - A missing/invalid key produces a visible, actionable message (never a blank
   screen), both in the TUI and headless.
-- `Shift+Tab` at 40, 80 and 120 columns - the chip, the hint and the status bar
-  are all legible and nothing wraps onto a second row.
+- `Shift+Tab` at 40, 80 and 120 columns - the status-bar mode word (`PLAN` / `P`)
+  stays legible and nothing wraps onto a second row.
 - The question wizard at 24 rows with 5 questions x 4 options - no clipping, and
   the `n/N` counter matches what is on screen.
 - Approve a plan and watch the SAME run start writing files, with no second
   prompt.
-- `--no-color` on a legacy `cmd.exe` - the chip renders `[PLAN]`, radios render
-  `*`/`o`, checkboxes render `[x]`/`[ ]`, no mojibake anywhere.
+- `--no-color` on a legacy `cmd.exe` - the mode word renders as plain `PLAN` text,
+  radios render `*`/`o`, checkboxes render `[x]`/`[ ]`, no mojibake anywhere.
 - A plan with a 600-character summary and a 400-character step detail - the text
   wraps and scrolls, the footer count matches the real number of rows, and
   nothing is truncated to a single line.
 - `--no-hints` on a 20-row terminal in plan mode - the status bar still says
-  `PLAN` with no chip on screen.
+  `PLAN`.
 - Dismiss a plan card with `Esc`, let the agent resubmit, then close the card and press `Esc` twice within 1.5 seconds:
   the run aborts and the session returns to an idle prompt. Do this one BY HAND
   as well as in a test - the point of the check is whether the exit is findable,

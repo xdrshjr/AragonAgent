@@ -126,6 +126,16 @@ function usePickerInput(props: ModelProfilePickerProps, state: PickerState): voi
     else if (key.downArrow || key.tab) setIndex((cursor + 1) % count);
     else if (key.return) activate();
     else if (input === '/' && searchable) setSearching(true);
+    // `e` edits the focused profile directly (profile-picker-edit-key). The
+    // branch is deliberately NOT guarded by `!props.manager`: the manager page
+    // gains the same one-keystroke path (there `selected === focused`, see the
+    // effect in usePickerState), which spares the Enter-to-the-action-row hop.
+    // No-op on the `Current custom` row and the action rows (`focused` is
+    // undefined there), and the `searching` early-return above keeps `e` a
+    // query character while typing a search.
+    else if (!key.ctrl && !key.meta && input.toLowerCase() === 'e' && focused) {
+      props.onEdit(focused);
+    }
   });
 }
 
@@ -177,5 +187,6 @@ export function ModelProfilePicker(props: ModelProfilePickerProps): React.ReactE
     : `${props.role === 'main' ? 'Main' : 'Fast'} profile`)} rows={buildPickerRows(props, state)}
     scrollOffset={state.searching ? 0 : state.offset}
     hint={state.searching ? 'Type search | Enter done | Esc back'
-      : 'Enter select/action | Esc back'} />;
+      : props.manager ? 'Enter action | e edit | Esc back'
+      : 'Enter select | e edit | Esc back'} />;
 }

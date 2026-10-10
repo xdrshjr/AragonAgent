@@ -21,7 +21,7 @@
  * Pure: no node/React imports, callable from any test environment.
  */
 
-import { ENTER_NEWLINE_FRAME } from './limits.js';
+import { ENTER_NEWLINE_FRAME, INDEX_KEY_FRAME } from './limits.js';
 
 /** Enable / disable win32-input-mode (private mode 9001). */
 export const WIN32_INPUT_ENABLE = '\x1b[?9001h';
@@ -195,6 +195,11 @@ export function translateWin32Key(record: Win32KeyRecord): string {
       // A modified Enter NEVER submits -- same rule as `ENTER_SEQUENCES`.
       return m === 0 ? '\r' : ENTER_NEWLINE_FRAME;
     case VK_TAB:
+      // Ctrl+I is the project-indexer trigger, and the ONLY place the two are
+      // tell-apart is right here: legacy encoding collapses it to the Tab
+      // byte. Shift keeps ESC [ Z (Shift+Tab) so the mode toggle stays intact,
+      // and Ctrl+Shift+I stays on that Shift branch.
+      if (ctrl && !shift && !alt) return INDEX_KEY_FRAME;
       return shift ? '\x1b[Z' : '\t';
     case VK_ESCAPE:
       return alt ? '\x1b\x1b' : '\x1b';
@@ -213,6 +218,17 @@ export function translateWin32Key(record: Win32KeyRecord): string {
     // 0x03). Alt keeps the ESC prefix; Ctrl+Alt prefixes ESC over the code.
     if (!ctrl && !alt && !shift) return char;
     if (!ctrl && alt) return `\x1b${char}`;
+    // Ctrl+I, letter-vk shape: a physical Ctrl+I keeps the LETTER vk
+    // (0x49, the same Ctrl+letter probe rule that reports Ctrl+A as 65
+    // and Ctrl+J as 74) while `char` is already the Tab byte, so the
+    // VK_TAB switch above never sees the record. 0x09 is both the Tab
+    // byte and VK_TAB, so the tell-apart from plain Tab is ctrl alone,
+    // and Shift keeps ESC [ Z exactly like that switch: the mode toggle
+    // stays intact and Ctrl+Shift+I stays on the Shift branch.
+    if (ctrl && record.char === VK_TAB) {
+      if (!shift && !alt) return INDEX_KEY_FRAME;
+      return shift ? '\x1b[Z' : '\t';
+    }
     return ctrl ? `${alt ? '\x1b' : ''}${char}` : char;
   }
 

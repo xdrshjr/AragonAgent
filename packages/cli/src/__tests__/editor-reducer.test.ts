@@ -134,15 +134,25 @@ describe('editorReducer — recall (both edges)', () => {
     expect(next.historyIndex).toBeNull();
   });
 
-  it('leaves dismissed and sel alone (K-7 — the old code did not touch them)', () => {
-    const next = editorReducer(state({ dismissed: true, sel: 3 }), {
+  it('always dismisses the popup; sel stays until the next buffer change (K-7 rewrite)', () => {
+    // 新语义（history-recall-autocomplete-popup）：召回内容不是正在键入的查询，
+    // 联想弹窗不在召回内容上自动出现；缓冲编辑经 DRAFT_FLAGS
+    // 复位 dismissed 后联想自然恢复。
+    const armed = editorReducer(state({ dismissed: false, sel: 3 }), {
+      type: 'recall',
+      buffer: '/clear',
+      cursor: 6,
+      historyIndex: 1,
+    });
+    expect(armed.dismissed).toBe(true);   // 从 false 起步的正向断言
+    const dismissed = editorReducer(state({ dismissed: true, sel: 3 }), {
       type: 'recall',
       buffer: 'a',
       cursor: 1,
       historyIndex: 0,
     });
-    expect(next.dismissed).toBe(true);
-    expect(next.sel).toBe(3);
+    expect(dismissed.dismissed).toBe(true);
+    expect(dismissed.sel).toBe(3);
   });
 });
 

@@ -164,7 +164,6 @@ const SPEC: SubagentSpec = {
   description: 'read the auth middleware',
   prompt: 'Read src/auth and report.',
   readOnly: false,
-  tier: 'main',
 };
 
 function config(): CliConfig {
@@ -214,6 +213,7 @@ function config(): CliConfig {
     compaction: { ...DEFAULT_COMPACTION_CONFIG, enabled: false },
     cwd: process.cwd(),
     color: true,
+    keyboardEnhancement: false,
   };
 }
 
@@ -225,6 +225,8 @@ function instrumented(): { run: SubagentRun; feed: (e: AgentEvent) => void; upda
     abort: () => {},
     pauseIdleWatchdog: () => {},
     resumeIdleWatchdog: () => {},
+    steer: () => {},
+    clearAllQueues: () => {},
     /** The narrow member `SubagentAgentLike` gained for child compaction (W3). */
     state: { messages: [] },
     subscribe: (fn) => {

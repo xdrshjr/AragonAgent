@@ -70,6 +70,7 @@ function config(team: Partial<TeamConfig> = {}): CliConfig {
     compaction: { ...DEFAULT_COMPACTION_CONFIG, enabled: false },
     cwd: process.cwd(),
     color: true,
+    keyboardEnhancement: false,
   };
 }
 
@@ -109,6 +110,8 @@ class ScriptedAgent implements SubagentAgentLike {
 
   pauseIdleWatchdog(): void {}
   resumeIdleWatchdog(): void {}
+  steer(_text: string): void {}
+  clearAllQueues(): void {}
 
   abort(): void {
     this.aborts += 1;
@@ -197,7 +200,6 @@ function harness(
     description: `job ${i + 1}`,
     prompt: `do ${i + 1}`,
     readOnly: false,
-    tier: 'main',
   }));
   return { runtime, specs, agents };
 }
@@ -210,7 +212,6 @@ function makeRun(over: Partial<SubagentRun> = {}): SubagentRun {
   return {
     label: 'a1',
     description: 'd',
-    tier: 'main',
     phase: 'failed',
     turns: 0,
     toolCalls: 0,
@@ -362,7 +363,12 @@ describe('AC-12: an aborted child is NEVER retried', () => {
   });
 
   it('the per-child timeout', async () => {
-    const { runtime, specs, agents } = harness([ABORTABLE], 1, { subagentTimeoutMs: 60 });
+    const { runtime, specs, agents } = harness([ABORTABLE], 1, {
+      // subagent-overseer-v2 D-4: the per-child hard timeout is the LEGACY
+      // regime, armed only under team.overseer: false.
+      subagentTimeoutMs: 60,
+      overseer: false,
+    });
     const outcome = await runtime.dispatch(specs, 1);
     expect(agents).toHaveLength(1);
     expect(outcome.runs[0]!.phase).toBe('failed');

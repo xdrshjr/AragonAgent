@@ -8,7 +8,7 @@
  * that is the property that lets a wrapper keep working across versions.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildInfo } from '../diagnostics/info.js';
 import { runDoctorChecks } from '../diagnostics/doctor.js';
 import { EXEC_SCHEMA_VERSION } from '../exec/events.js';
@@ -49,9 +49,22 @@ describe('AC-21: aragon info --json', () => {
 });
 
 describe('AC-22: aragon doctor', () => {
+  // "No API key is resolvable" must be ENFORCED, not assumed. The vitest home
+  // root isolates the config-file layer, but the env layer of loadConfig() is
+  // process-global state shared by every test file this worker has already run:
+  // config.test.ts's precedence tests once leaked ANTHROPIC_API_KEY here and
+  // turned this suite into an order-dependent release failure. The developer's
+  // own shell may also export a provider key (GEMINI_API_KEY, say).
+  beforeEach(() => {
+    for (const name of ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'GEMINI_API_KEY']) {
+      vi.stubEnv(name, undefined);
+    }
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
   it('reports a named failing check when no API key is resolvable', async () => {
-    // The vitest home root is a fresh per-pid directory under `os.tmpdir()`, so
-    // there is no key: exactly the state a machine is in before it is set up.
+    // With the provider env layer stubbed away, there is no key from any
+    // layer: exactly the state a machine is in before it is set up.
     const report = await runDoctorChecks({});
     expect(report.ok).toBe(false);
     const failed = report.checks.filter((c) => c.verdict === 'fail').map((c) => c.name);

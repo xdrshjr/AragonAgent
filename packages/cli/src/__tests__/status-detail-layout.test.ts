@@ -18,3 +18,13 @@ it('keeps full context, session usage and cost in a sufficiently wide detail row
  expect(text).toContain('Context 10/100 tokens');expect(text).toContain('Session input 8 output 2');
  expect(text).toContain('Cost $0.1000');expect(text).not.toContain('newline');expect(text).toContain('^G less');
 });
+
+it('names the mode in uppercase with the accent tone, pending included',()=>{
+  const plan=planStatusDetail({status:{...status,columns:250,feedback:undefined,escapeAction:undefined,mode:'plan',pendingMode:'build'},
+  hints:{cols:250,interactionPhase:'idle',hintsEnabled:false},model:'m',provider:'p'});
+  const mode=plan.fields.find(f=>f.id==='mode');
+  expect(mode?.text).toBe('PLAN>BUILD');expect(mode?.tone).toBe('accent');
+  const plain=planStatusDetail({status:{...status,columns:250,feedback:undefined,escapeAction:undefined,mode:'build'},
+  hints:{cols:250,interactionPhase:'idle',hintsEnabled:false},model:'m',provider:'p'});
+  expect(plain.fields.find(f=>f.id==='mode')?.text).toBe('BUILD');
+});

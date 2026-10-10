@@ -81,3 +81,16 @@ wholesale split of these historical files would widen the regression surface.
 输入事务、队列全文补全、固定行格式化、会话边界验证均独立到小模块，
 新增算法函数仍执行默认阈值。验收与实际行数记录见
 `docs/plans/tui-input-interaction-hardening/code-review.md`。
+
+## Ctrl+I 项目索引触发（project-indexer bundled skill）的历史文件例外
+
+2026-10-08，Ctrl+I 触发内置 project-indexer 技能。`ui/App.tsx` 仅允许
+净增不超过 60 行，限于 useInput 分支守卫与 `requestIndexBuild` 的
+确认-派发接线（复用 `closeConfirm` 同族的 confirm overlay 与
+`executeSlashInput`）；确认文案、技能名、参数与 `.claude-index` 探测
+全部位于新模块 `commands/index-build.ts`（默认阈值）。
+`ui/Header.tsx`（47 行）为整文件改写，仅增加 `^I Index` / `^I build index`
+提示与右侧宽度自适应，行数不超限。`input/win32-input-mode.ts`、
+`input/csiu-keys.ts`、`input/limits.ts` 各净增不超过 16 行（INDEX 帧
+翻译）；`ui/PromptInput.tsx` 净增不超过 12 行（帧剥离防御）。
+理由：本功能只新增一个按键入口与提示，全面拆分历史大文件会扩大回归面。

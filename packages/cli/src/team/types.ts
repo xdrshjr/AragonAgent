@@ -12,7 +12,6 @@
  */
 
 import type { TokenUsage } from '@aragon-agent/core';
-import type { FastTierName } from '../fast/types.js';
 import type { ActivityArgs } from './activity.js';
 
 /** One normalized delegation request. Produced only by `normalizeSubagentSpecs`. */
@@ -29,20 +28,6 @@ export interface SubagentSpec {
    * permission than the session it was spawned from.
    */
   readOnly: boolean;
-  /**
-   * Which model runs this child (fast-model-tier §3.4).
-   *
-   * THE WIRE NAME IS `model` AND THE INTERNAL NAME IS `tier`, on purpose: a
-   * model expects to see `model:"fast"`, while `SubagentSpec.model` would read
-   * as a model ID at every call site in this package.
-   *
-   * DELEGATION IS A MODEL CHOICE, NEVER A PERMISSION BOUNDARY (D-15 / I-4). A
-   * fast child gets the same tools, the same `--confirm` gate, the same
-   * plan-mode gate and the same skills ceiling as any other; only the model
-   * differs. Restricting a fast child's tools would look like security, would
-   * not be, and would make the report's `[fast]` rows mean two different things.
-   */
-  tier: FastTierName;
 }
 
 export type SubagentPhase =
@@ -59,14 +44,6 @@ export type SubagentPhase =
 export interface SubagentRun {
   label: string;
   description: string;
-  /**
-   * The tier this child actually ran on (fast-model-tier §3.4).
-   *
-   * WHAT RAN, NOT WHAT WAS ASKED FOR. A spec the normalizer downgraded arrives
-   * here as `'main'`, which is what makes the report's `[fast]` annotation and
-   * its second cost table agree with the bill.
-   */
-  tier: FastTierName;
   phase: SubagentPhase;
   startedAt?: number;
   endedAt?: number;
@@ -186,6 +163,89 @@ export interface SubagentRun {
    * honest and is what AC-34 asserts.
    */
   retry?: { attempt: number; maxRetries: number };
+
+  /**
+   * Supervisor inspections this child received (team-overseer). Optional so
+   * every existing fixture compiles; absent and `0` read the same.
+   */
+  interventions?: number;
+  /**
+   * Supervisor-driven rebuilds this child went through (team-overseer). The
+   * run object survives a rebuild with the same label, so this is where the
+   * report reads "this row is the Nth body of the same brief".
+   */
+  replacements?: number;
+
+  /**
+   * The most recent supervisor decision applied to this child
+   * (subagent-overseer-v2 section 6). TRANSIENT, never persisted - the
+   * same rule as `activity` / `activityArgs`; a resumed session has no
+   * live dispatch.
+   *
+   * `at` is ABSOLUTE epoch ms, the same units as `startedAt` / `endedAt`
+   * (R-P2-3), so the panel renders `nudged 2m` with one subtraction and
+   * no second clock convention. `reasonHead` <= 60 chars, for the UI
+   * badge line only.
+   */
+  lastIntervention?: {
+    action: OverseerAction;
+    at: number;
+    reasonHead: string;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The dispatch supervisor (team-overseer)
+// ---------------------------------------------------------------------------
+
+/** What the supervisor may do with one inspected child. */
+export type OverseerAction = 'wait' | 'nudge' | 'replace' | 'abandon';
+
+/**
+ * One supervisor decision, already normalized and clamped.
+ *
+ * Produced ONLY by `normalizeOverseerDecision` (repair, never reject): an
+ * unparseable or out-of-budget model answer becomes `wait` with the default
+ * interval, because supervision must not kill a healthy child.
+ */
+export interface OverseerDecision {
+  action: OverseerAction;
+  /** <= TEAM_LIMITS.overseerReasonChars. Why, for the report and the log. */
+  reason: string;
+  /** `nudge` only: <= TEAM_LIMITS.overseerGuidanceChars. Steered into the child. */
+  guidance?: string;
+  /** Model-chosen next check, clamped to the structural range. */
+  nextCheckMs?: number;
+}
+
+/** One supervisor intervention, as recorded on the outcome and rendered. */
+export interface OverseerIntervention {
+  label: string;
+  at: number;
+  action: OverseerAction;
+  reason: string;
+  /**
+   * What the trigger was: event stall, wall-clock check, post-mortem, or
+   * the supervisor going QUIET (subagent-overseer-v2 D-10) - the look
+   * budget ran out and supervision stopped waking this child. A VALUE OF
+   * THE UNION, never a reason prefix: a human-readable sentence is not a
+   * machine contract (the `run.error` rule).
+   */
+  trigger: 'silence' | 'clock' | 'postmortem' | 'quiet';
+}
+
+/**
+ * A terminal supervisor decision handed to the WORKER LOOP, which is the only
+ * place a child's `prompt()` is awaited and therefore the only place a
+ * lifecycle change can be applied without orphaning the replacement (I-OV1).
+ *
+ * Set by `TeamRuntime` on the handle, then `handle.abort()`; consumed and
+ * left in place (never cleared) by `runOne` after the await resolves.
+ */
+export interface OverseerVerdict {
+  action: 'replace' | 'abandon';
+  reason: string;
+  guidance?: string;
 }
 
 /** One message on the team bus. */
@@ -209,26 +269,36 @@ export interface DispatchOutcome {
   /** Messages addressed to `lead`; surfaced in their own report section. */
   leadMail: TeamMessage[];
   /**
-   * Summed across MAIN-TIER children. Real spend; it must reach the status bar
-   * (§3.9).
-   *
-   * THE MEANING NARROWED WHEN THE FAST TIER LANDED, and the split is not a
-   * rounding concern: a Haiku child under a Sonnet lead priced at the lead's
-   * table over-reports by roughly an order of magnitude, and the entire
-   * justification for delegating is a number in this report (R-7).
+   * Every supervisor decision that was applied (team-overseer), in order.
+   * Bounded by the per-child inspection budget; rendered as the report's
+   * Overseer section so the lead can see WHO was nudged or replaced and why.
+   */
+  interventions?: OverseerIntervention[];
+  /**
+   * Summed across all children. Real spend; it must reach the status bar
+   * (§3.9). Every child runs the LEAD's model (main-agent parity), so one
+   * total priced at the lead's table is the honest accounting.
    */
   usage: TokenUsage;
-  /** Summed across FAST-TIER children. Absent when none ran, which is what
-   *  keeps a pre-feature dispatch's report byte-identical. */
-  fastUsage?: TokenUsage;
   /**
-   * Specs that asked for `model:"fast"` and ran on `main` anyway (§3.4 / R-6).
-   *
-   * REPORTED, NEVER SILENT. A silent downgrade means the model asked for a cheap
-   * child, got an expensive one, and has no way to learn that its cost model is
-   * wrong.
+   * The supervisor's own fast-tier spend for this dispatch
+   * (subagent-overseer-v2 D-7). Absent when nothing supervised the
+   * dispatch; read straight off the provider at dispatch end so there is
+   * exactly one accounting of it.
    */
-  downgraded?: number;
+  overseerUsage?: TokenUsage;
+  /** Inspection calls made, including ones that failed softly. */
+  overseerCalls?: number;
+  /**
+   * EDGE-LATCHED, once per dispatch (D-10): the fast tier was missing at
+   * least one cadence tick and the children waited UNASSISTED - announced,
+   * never killed. The per-child wait events of a degraded tick
+   * deliberately do NOT enter `interventions`; this flag plus the tick
+   * count below are the report's aggregate note.
+   */
+  overseerDegraded?: boolean;
+  /** How many cadence ticks ran unassisted (the aggregate note's number). */
+  overseerDegradedTicks?: number;
 }
 
 /**
@@ -254,12 +324,15 @@ export interface TeamSnapshot {
 export type TeamEvent =
   | { type: 'dispatch_start'; dispatchId: string; requested: number; specs: SubagentSpec[] }
   | { type: 'agent_update'; dispatchId: string; run: SubagentRun }
-  // `tier` is what lets `App.tsx` pick the RIGHT cost table per event instead of
-  // always calling `controller.getModelInfo().cost` (§3.6 / RV-4). The reducer
-  // stays cost-table-free and receives a precomputed `costDelta`, which is the
-  // property that makes it testable.
-  | { type: 'usage'; dispatchId: string; label: string; usage: TokenUsage; tier: FastTierName }
+  | { type: 'usage'; dispatchId: string; label: string; usage: TokenUsage }
   | { type: 'message'; dispatchId: string; message: TeamMessage }
+  | {
+      type: 'overseer';
+      dispatchId: string;
+      label: string;
+      decision: OverseerDecision;
+      trigger: OverseerIntervention['trigger'];
+    }
   | { type: 'dispatch_end'; dispatchId: string; outcome: DispatchOutcome };
 
 export type TeamEventListener = (event: TeamEvent) => void;

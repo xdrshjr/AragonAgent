@@ -20,6 +20,7 @@ import {
   computePressure,
   estimateAppendedTokens,
   isApproximate,
+  isInputSideUnmeasured,
   occupiedTokens,
   shouldCompactAt,
 } from '../compaction/pressure.js';
@@ -435,5 +436,50 @@ describe('T19 - `windowOverridden` is a pure pass-through (context-usage-gauge-a
     expect(flagged.ratio).toBe(plain.ratio);
     expect(flagged.headroom).toBe(plain.headroom);
     expect(flagged.windowKnown).toBe(plain.windowKnown);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B - the empty-measurement predicate (context-usage-zero-input-tokens)
+// ---------------------------------------------------------------------------
+
+describe('isInputSideUnmeasured (context-usage-zero-input-tokens B)', () => {
+  it('is true exactly when the input side sums to zero while output was billed', () => {
+    // THE GATEWAY SHAPE: the stream ran, produced output, and disclosed not a
+    // single input-side token. That usage measured NOTHING about the request
+    // size, and treating it as a measurement is what collapsed the gauge to
+    // ~0% with a confident `usage` source.
+    expect(isInputSideUnmeasured({ inputTokens: 0, outputTokens: 245 })).toBe(true);
+    expect(isInputSideUnmeasured({ inputTokens: 0, outputTokens: 245,
+      cacheReadTokens: 0, cacheWriteTokens: 0 })).toBe(true);
+  });
+
+  it('is false when ANY input-side term is non-zero - deep-cache shapes included', () => {
+    // THE CASE THE NAIVE `inputTokens === 0` PREDICATE KILLS: Anthropic's real
+    // `input_tokens` EXCLUDES cached tokens, so a deeply cached turn reports a
+    // tiny input with a huge `cache_read_input_tokens`. That IS a valid
+    // measurement (the sum is what the request cost) and must arm the measured
+    // branch exactly as before.
+    expect(isInputSideUnmeasured({ inputTokens: 0, outputTokens: 245,
+      cacheReadTokens: 90_000 })).toBe(false);
+    expect(isInputSideUnmeasured({ inputTokens: 0, outputTokens: 245,
+      cacheWriteTokens: 4_000 })).toBe(false);
+    expect(isInputSideUnmeasured({ inputTokens: 120, outputTokens: 245 })).toBe(false);
+  });
+
+  it('is false for a degenerate all-zero usage', () => {
+    // `outputTokens > 0` separates "the stream ran and billed output but
+    // disclosed no input" from a usage that measured nothing at all; the
+    // reviewed predicate deliberately does not speak for the latter.
+    expect(isInputSideUnmeasured({ inputTokens: 0, outputTokens: 0 })).toBe(false);
+  });
+
+  it('is the single authority - meter.ts consumes it instead of re-deriving it', () => {
+    // Two inline copies of "did the gateway disclose input" would drift apart
+    // exactly the way the gauge and the trigger once did (R-11). The meter is
+    // the one consumer today; a future `/context` hint (fix C) must import this
+    // same predicate too.
+    const meter = readFileSync(join(here, '..', 'compaction', 'meter.ts'), 'utf8');
+    expect(meter).toMatch(/isInputSideUnmeasured/);
   });
 });

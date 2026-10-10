@@ -3,6 +3,7 @@ import stripAnsi from 'strip-ansi';
 import type { UsageTotal } from '../../agent/reducer.js';
 import type { ContextUsageSnapshot } from '../../compaction/types.js';
 import { formatDuration } from '../../agent/usage.js';
+import { MODE_LABEL, type AgentMode } from '../../agent/agent-mode.js';
 import { interactionCopy as copy } from '../interaction-copy.js';
 import type { EscapeAction, StatusFeedback } from '../status-feedback.js';
 
@@ -15,6 +16,7 @@ export interface StatusLayoutInput {
   runOutcome?: 'none' | 'ended' | 'interrupted' | 'failed';
   spinner?: string; waitingForConfirmation?: boolean; stopping?: boolean;
   compacting?: boolean; retryActive?: { attempt: number; max: number; secondsLeft: number };
+  /** Named on the primary row in EVERY mode - the §6.4 guarantee, restored. */
   mode?: string; pendingMode?: string | null; servicesActive?: { live: number };
   teamActive?: { running: number; total: number }; todoActive?: { done: number; total: number };
   ecoRung?: number; fastActive?: { inFlight: boolean }; scrolledLines?: number;
@@ -24,7 +26,9 @@ export interface StatusPrimaryInput extends StatusLayoutInput {
   interruptPhase?: 'ready' | 'armed' | 'stopping';
 }
 export interface StatusField {
-  id: string; text: string; cells: number; tone: 'normal' | 'muted' | 'warning' | 'error';
+  id: string; text: string; cells: number;
+  /** 'accent' carries the mode word - the row's one always-on emphasis. */
+  tone: 'normal' | 'muted' | 'warning' | 'error' | 'accent';
 }
 export interface StatusLinePlan {
   fields: readonly StatusField[]; separator: string; separatorCells: number; cells: number;
@@ -93,6 +97,7 @@ function feedbackLabel(input: StatusPrimaryInput, form: 'full' | 'short' | 'tiny
   const labels: Record<StatusFeedback['kind'], readonly [string, string, string]> = {
     confirm: ['Awaiting confirmation', 'Ask', 'Ask'], stopping: ['Esc stop', 'EscS', 'EscS'],
     'force-stop': ['Esc force', 'EscF', 'EscF'], exit: ['^C exit', '^Cexit', '^C'],
+    'clear-input': ['^C clear', '^Cclear', '^C'],
     copying: ['Copying', 'Copy', 'Copy'], copied: ['Copied', 'Copied', 'Copy'],
     'copy-sent': ['Copy sent', 'Sent', 'Sent'], 'copy-cleanup': ['Copy cleanup', 'Err', 'Err'],
     'copy-error': ['Copy err', 'Err', 'Err'], notice: ['Notice', 'Notice', 'Note'],
@@ -101,7 +106,30 @@ function feedbackLabel(input: StatusPrimaryInput, form: 'full' | 'short' | 'tiny
 }
 const thinkingCodes: Record<string, string> = { off: 'O', minimal: 'N', low: 'L', medium: 'M', high: 'H', xhigh: 'X' };
 
-/** All five fields survive each width rung; only the redraw carrier is outside this plan. */
+/**
+ * The mode word for the primary row: full rungs name the mode with
+ * `MODE_LABEL`, tight rungs keep only its first letter, and a deferred switch
+ * renders `CUR>PENDING` in both tiers. `null` when the caller names no mode at
+ * all, so callers and tests that predate the field keep a byte-identical plan.
+ * The word must survive every width rung: the border color cannot be the only
+ * mode signal the default view carries (plan-mode P1-6).
+ */
+function modeFieldText(
+  mode: string | undefined,
+  pendingMode: string | null | undefined,
+  full: boolean,
+): string | null {
+  if (!mode && !pendingMode) return null;
+  const word = (value: string): string => {
+    const label = MODE_LABEL[value as AgentMode];
+    if (!label) return full ? value.toUpperCase() : (value[0] ?? '?').toUpperCase();
+    return full ? label : label[0]!;
+  };
+  const current = word(mode || 'build');
+  return pendingMode ? `${current}>${word(pendingMode)}` : current;
+}
+
+/** Every field survives each width rung; only the redraw carrier is outside this plan. */
 export function planPrimaryStatusFields(input: StatusPrimaryInput): StatusLinePlan {
   const budget = Math.max(0, (Number.isFinite(input.columns) ? Math.floor(input.columns) : 80) - 1);
   const labels = phaseLabels(input);
@@ -116,8 +144,10 @@ export function planPrimaryStatusFields(input: StatusPrimaryInput): StatusLinePl
     const full = rung === 0;
     const label = feedbackLabel(input, full ? 'full' : rung >= 4 ? 'tiny' : 'short')
       ?? (full ? labels[1] : rung >= 4 ? labels[0].slice(0, 4) : labels[0]);
+      const modeText = modeFieldText(input.mode, input.pendingMode, full);
     return statusLinePlan([
       statusField('phase', glyph + (rung >= 5 ? '' : ' ') + label, tone),
+      ...(modeText ? [statusField('mode', modeText, 'accent')] : []),
       statusField('context', (full ? 'Context ' : 'C') + pct),
       statusField('thinking', full ? 'Think ' + (thinkingCodes[input.thinkingLevel] ? input.thinkingLevel : '?')
         : (rung >= 2 ? '' : 'Th:') + code),

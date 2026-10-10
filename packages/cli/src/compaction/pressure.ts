@@ -57,6 +57,40 @@ export function occupiedTokens(usage: TokenUsage): number {
 }
 
 /**
+ * Whether a usage measured ANYTHING on the input side
+ * (context-usage-zero-input-tokens B).
+ *
+ * THE EMPTY MEASUREMENT THIS EXISTS FOR. A turn that billed output tokens
+ * while reporting inputTokens 0 AND no cache terms did not measure the
+ * request - no real request is free of input. Anthropic-COMPATIBLE relays
+ * emit exactly this shape (bigmodel on every turn, Kimi intermittently),
+ * and the meter used to arm its measured branch with it: occupancy collapsed
+ * to the turn's own outputTokens, the `~` honesty marker vanished with
+ * `source: 'usage'`, and the trigger - which reads the same number - never
+ * fired. The defense is to not trust such a usage as a measurement.
+ *
+ * THE CACHE TERMS ARE PART OF THE INPUT SIDE, DELIBERATELY. Anthropic's real
+ * `input_tokens` EXCLUDES cached tokens, so a deeply cached turn reports a
+ * tiny `input_tokens` next to a huge `cache_read_input_tokens`. That IS a
+ * valid measurement (C-14), and judging on `inputTokens === 0` alone would
+ * reject it and strand a correct gauge on the estimator.
+ *
+ * `outputTokens > 0` separates "the stream ran, billed output, and disclosed
+ * no input" from a degenerate all-zero usage, which the reviewed predicate
+ * deliberately does not speak for.
+ *
+ * SINGLE AUTHORITY. The meter consumes this, and any future observability
+ * hint (fix C) must too: two inline copies of "did the gateway disclose
+ * input" would drift apart exactly the way the gauge and the trigger once
+ * could (R-11).
+ */
+export function isInputSideUnmeasured(usage: TokenUsage): boolean {
+  const inputSide =
+    usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0);
+  return inputSide === 0 && usage.outputTokens > 0;
+}
+
+/**
  * The calibration offset for this turn (D-23 / P1-11).
  *
  * Clamped at 0: a NEGATIVE offset would mean the estimator over-counted, which

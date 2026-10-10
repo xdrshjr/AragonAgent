@@ -1,6 +1,20 @@
 import { formatCost, formatTokens, promptTokensOf } from '../../agent/usage.js';
 import { actionCandidates, clipStatusText, escapeClause, type ActionHintInput } from '../interaction-hints.js';
+import { MODE_LABEL, type AgentMode } from '../../agent/agent-mode.js';
 import { statusField, statusLinePlan, validContext, type StatusField, type StatusLinePlan, type StatusPrimaryInput } from './status-layout.js';
+
+/**
+ * Uppercase mode word for the details row, mirroring the primary row's field:
+ * same vocabulary (`MODE_LABEL`), same `CUR>PENDING` deferred-switch shape.
+ */
+function detailModeText(
+  mode: string | undefined,
+  pendingMode: string | null | undefined,
+): string {
+  const word = (value: string): string => MODE_LABEL[value as AgentMode] ?? value.toUpperCase();
+  if (pendingMode) return `${word(mode || 'build')}>${word(pendingMode)}`;
+  return word(mode || 'build');
+}
 
 export interface StatusDetailInput {
   status: StatusPrimaryInput; hints: ActionHintInput; model: string; provider: string;
@@ -24,8 +38,8 @@ export function planStatusDetail(input: StatusDetailInput): StatusLinePlan {
   for (const [index, action] of actionCandidates(hints).entries()) add(statusField('action-' + index, action));
   if (status.pendingCount > 0) add(statusField('queue', 'Q' + status.pendingCount));
   if (status.servicesActive?.live) add(statusField('services', 'Svc' + status.servicesActive.live));
-  if (status.mode || status.pendingMode) add(statusField('mode', status.pendingMode
-    ? (status.mode ?? 'build') + '>' + status.pendingMode : status.mode!));
+  if (status.mode || status.pendingMode) add(statusField('mode', detailModeText(
+    status.mode, status.pendingMode), 'accent'));
   if (validContext(status.context)) {
     const approximate = status.context.source === 'estimate' || status.context.deltaTokens > 0 ? '~' : '';
     add(statusField('context', 'Context ' + approximate + formatTokens(status.context.occupied)
