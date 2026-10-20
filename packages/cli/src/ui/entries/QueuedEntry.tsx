@@ -15,6 +15,7 @@ import { Text } from 'ink';
 import type { Theme } from '../theme.js';
 import type { TermCapabilities } from '../capabilities.js';
 import { pickGlyphs } from '../glyphs.js';
+import { expandTabs } from '../display-tab.js';
 
 function QueuedEntryImpl({
   text,
@@ -27,7 +28,9 @@ function QueuedEntryImpl({
 }): React.ReactElement {
   const glyphs = pickGlyphs(caps);
   const lines = text.split('\n');
-  const first = lines[0] ?? '';
+  // Same reason as `UserEntry`: a queued draft is a draft, so its TABs must
+  // occupy the columns the composer showed them at.
+  const first = expandTabs(lines[0] ?? '');
   const extra = lines.length - 1;
   const suffix = extra > 0 ? ` ${glyphs.ellipsis}+${extra} line${extra === 1 ? '' : 's'}` : '';
   return (

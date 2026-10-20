@@ -26,6 +26,7 @@ import {
   type PersistedConfig,
 } from '../config/schema.js';
 import type { AgentController } from '../agent/controller.js';
+import { isTerminalStatus } from '../proc/types.js';
 import { computeCost, formatCost, formatDuration, formatTokens } from '../agent/usage.js';
 import { mergePendingEntries } from '../agent/queued-messages.js';
 import { TODO_FOLLOW_LIMITS } from '../todo/limits.js';
@@ -33,10 +34,17 @@ import { buildContinuationMessage } from '../todo/follow-through.js';
 import type { FollowThroughMode } from '../todo/types.js';
 import { MODE_LABEL, nextMode } from '../agent/agent-mode.js';
 import { loadSession, resolveSessionPath, saveSession } from '../session/persist.js';
+import { applyRestoredSession } from '../session/startup-session.js';
+import { runSessionCommand } from './session-command.js';
+import { runBranchCommand } from './branch-command.js';
 import { getLogger } from '../logging/logger.js';
+import { resolveFastTier } from '../fast/resolve.js';
+import { subagentModelSummary } from '../ui/overlays/model-profile-state.js';
 import { registerQueueCommand } from './queue-command.js';
+import { registerKitCommand } from './kit-command.js';
 import { perfCommand } from './perf.js';
 import { runCompactCommand } from '../compaction/command.js';
+import { runClearCommand } from './clear-command.js';
 import { runContextCommand } from '../compaction/context-command.js';
 import { CommandRegistry, type SlashCommand } from './registry.js';
 // `import type` for the reason `commands/registry.ts` records: tsc erases the
@@ -109,6 +117,75 @@ function formatUpdateStatus(port: UpdateCommandPort, override?: UpdateSnapshot):
   const next = override ? port.nextCheckAt() : snapshot.nextCheckAt;
   lines.push(`  next      ${next ? new Date(next).toLocaleTimeString() : 'not scheduled'}`);
   return lines.join('\n');
+}
+
+/**
+ * `/team model [main|fast|<profile-name>]` (subagent-model §3.6 / 5.2).
+ *
+ * The user-owned switch's command-line surface. `main` and `fast` are verbs
+ * compared case-insensitively; a NAME is matched EXACTLY, case and all,
+ * against the library - the same identity the picker shows - and a miss lists
+ * the names that would work rather than failing silently. The summary reuses
+ * the exact wording the settings root row renders, so the two surfaces can
+ * never describe the same setting differently.
+ */
+function runTeamModelCommand(
+  ctx: Parameters<NonNullable<SlashCommand['run']>>[0],
+  subject: string | undefined,
+): void {
+  const controller = ctx.controller;
+  const config = controller.getConfig();
+  const tier = resolveFastTier(config, (id, role) => controller.hasApiKey(id, role));
+  const summary = subagentModelSummary({
+    mode: config.team.model,
+    modelProfileId: config.team.modelProfileId,
+    mainConnection: `${config.provider}:${config.model}`,
+    fastConnection: tier.ok ? `${tier.ref.providerId}:${tier.ref.modelId}` : null,
+    profiles: config.modelProfiles,
+    hasKey: (id) => controller.hasApiKey(id),
+  });
+
+  if (!subject) {
+    // The status readout: mode + the connection actually in effect + the
+    // disclosed reason when the request had to fall back (D-4).
+    const resolution = controller.subagentModelResolution();
+    const note = resolution.fallbackReason
+      ? ` Unavailable (${resolution.fallbackReason}); children run on the main model.`
+      : resolution.effective === 'main'
+        ? ''
+        : ` Children run on ${resolution.ref.providerId}:${resolution.ref.modelId}.`;
+    ctx.notify('info', `Subagent model: ${summary}.${note}`);
+    return;
+  }
+
+  if (subject.toLowerCase() === 'main' || subject.toLowerCase() === 'fast') {
+    const mode = subject.toLowerCase() as 'main' | 'fast';
+    const applied = controller.setTeamConfig({ model: mode });
+    ctx.persistConfig({ team: { model: applied.model } as PersistedConfig['team'] });
+    if (mode === 'fast' && !tier.ok) {
+      ctx.notify('warn',
+        'The fast tier is not available now; subagents will fall back to the main model.');
+    }
+    ctx.toast('success', `Subagent model: ${mode === 'main' ? 'same as main' : 'fast tier'}.`);
+    return;
+  }
+
+  const entries = config.modelProfiles?.entries ?? [];
+  const matches = entries.filter((entry) => entry.name === subject);
+  if (matches.length === 0) {
+    const names = entries.slice(0, 8).map((entry) => entry.name);
+    ctx.notify('warn', `No profile named "${subject}".`
+      + (names.length ? ` Available: ${names.join(', ')}` : ' Create one in /settings first.'));
+    return;
+  }
+  const entry = matches[0]!;
+  const disambiguation = matches.length > 1 ? ` (#${entry.id.slice(0, 8)})` : '';
+  const applied = controller.setTeamConfig({ model: 'profile', modelProfileId: entry.id });
+  const teamPatch = { model: applied.model,
+    modelProfileId: applied.modelProfileId } as PersistedConfig['team'];
+  ctx.persistConfig({ team: teamPatch });
+  ctx.toast('success',
+    `Subagent model: ${entry.name}${disambiguation} (${entry.provider}:${entry.model}).`);
 }
 
 function formatFastStatus(controller: AgentController): string {
@@ -301,7 +378,8 @@ const COMMANDS: SlashCommand[] = [
   },
   {
     name: 'team',
-    description: 'Team subagents: status | on | off | max <n> | overseer on|off',
+    description:
+      'Team subagents: status | on | off | max <n> | overseer on|off | model [main|fast|<profile-name>]',
     /**
      * `/team on` CANNOT turn team mode on in a session that started without it,
      * and this command must not pretend otherwise (§4.5 / D-17 / P0-2).
@@ -322,6 +400,12 @@ const COMMANDS: SlashCommand[] = [
       const arg = ctx.args.trim().toLowerCase();
       const [verb, value] = arg.split(/\s+/, 2);
       const controller = ctx.controller;
+      // RAW TOKENS, KEPT BESIDE THE LOWERCASED PAIR (V-2): `model` matches a
+      // profile NAME case-sensitively - like the picker and the library -
+      // and the whole-args toLowerCase() above would have made
+      // `/team model MyProfile` silently unmatchable. Only the VERB token is
+      // compared through the lowercased pair.
+      const rawTokens = ctx.args.trim().split(/\s+/).filter((token) => token.length > 0);
 
       // Refused mid-dispatch for the reason `/reload` already records: half a
       // dispatch under one ceiling and half under another produces a result
@@ -333,6 +417,7 @@ const COMMANDS: SlashCommand[] = [
 
       if (!verb || verb === 'status') {
         const cfg = controller.getTeamConfig();
+        const config = controller.getConfig();
         const state = !controller.isTeamRegistered()
           ? 'off for this session (started with --no-team)'
           : controller.isTeamEnabled()
@@ -342,11 +427,23 @@ const COMMANDS: SlashCommand[] = [
         const roster = snapshot
           ? `\nRunning: ${snapshot.runs.map((r) => `${r.label} (${r.phase})`).join(', ')}`
           : '';
+        const tier = resolveFastTier(controller.getConfig(),
+          (id, role) => controller.hasApiKey(id, role));
+        const subagent = subagentModelSummary({
+          mode: cfg.model,
+          modelProfileId: cfg.modelProfileId,
+          mainConnection: `${config.provider}:${config.model}`,
+          fastConnection: tier.ok ? `${tier.ref.providerId}:${tier.ref.modelId}` : null,
+          profiles: config.modelProfiles,
+          hasKey: (id) => controller.hasApiKey(id),
+        });
         ctx.notify(
           'info',
           `Team mode: ${state}. Max subagents: ${cfg.maxSubagents}, ` +
             `concurrent: ${cfg.maxConcurrent}, supervisor: ${cfg.overseer ? 'on' : 'off'}` +
-              `${cfg.overseer ? ' (never kills; checks the fast tier each tick)' : ' (legacy hard timeouts)'}.${roster}`,
+              `${cfg.overseer ? ' (never kills; checks the fast tier each tick)' : ' (legacy hard timeouts)'}.` +
+            `\nSubagent model: ${subagent}` +
+            `${roster}`,
         );
         return;
       }
@@ -390,6 +487,11 @@ const COMMANDS: SlashCommand[] = [
         return;
       }
 
+      if (verb === 'model') {
+        runTeamModelCommand(ctx, rawTokens[1]);
+        return;
+      }
+
       if (verb === 'overseer') {
         if (value !== 'on' && value !== 'off') {
           ctx.notify('warn', 'Usage: /team overseer on|off');
@@ -408,7 +510,7 @@ const COMMANDS: SlashCommand[] = [
 
       ctx.notify(
         'warn',
-        `Unknown argument "${verb}" - use /team [status|on|off|max <n>|overseer on|off].`,
+        `Unknown argument "${verb}" - use /team [status|on|off|max <n>|overseer on|off|model main|fast|<profile-name>].`,
       );
     },
   },
@@ -1001,44 +1103,23 @@ const COMMANDS: SlashCommand[] = [
     },
   },
   {
+    // REGISTRATION ONLY. The body lives in `commands/clear-command.ts`: this file
+    // is already past the 1000-line guideline, and `/clear` is no longer a
+    // two-line projection reset - it interrupts a run, waits for it, archives the
+    // conversation and then clears (clear-command-context-reset D-8).
     name: 'clear',
-    description: 'Clear the visible transcript and the todo panel',
-    run: (ctx) => {
-      // A USER OVERRIDE OF A PROJECTION, the same class as `/todo clear`, so it
-      // reuses reason `'user'`; I-2 and its standing exception are stated on
-      // `TodoStore`. Clearing the STORE and not merely the view mirror is what
-      // keeps `/save`, `/todo status|continue` and follow-through agreeing with
-      // the screen — they read the store directly. `messages` is untouched:
-      // clearing the conversation is still `/reset` alone.
-      //
-      // DELIBERATELY WITHOUT `/todo clear`'s two guards: an `isRunning()` refusal
-      // would leave `/clear` unable to clear even the transcript mid-run, and an
-      // early return on an empty list would skip the dispatch below entirely.
-      // Clearing an empty store is already silent — it emits into a reducer
-      // branch that writes two fields that are both already at their defaults.
-      //
-      // Bounded side effect: the emptied store re-arms `todo_write`'s "a fresh
-      // plan has at least two items" gate, so a model that shrinks a plan to one
-      // item right after a mid-run `/clear` gets the refusal text and retries.
-      ctx.controller.clearTodos();
-      ctx.dispatch({ type: 'clearTranscript' });
-    },
+    description: 'Start a new conversation; "/clear screen" only clears the screen',
+    run: runClearCommand,
   },
   {
+    // ALIAS BY DESIGN (D-2), AND THIS IS THE WHOLE FIX. Until this change `/clear`
+    // cleared the screen while `/reset` cleared the session, so the command a
+    // user reaches for in a long conversation was the one that kept the history.
+    // One implementation makes that drift structurally impossible rather than
+    // merely fixed: there is no second body left to diverge.
     name: 'reset',
-    description: 'Start a new conversation',
-    run: (ctx) => {
-      if (ctx.controller.isRunning()) {
-        ctx.notify('warn', 'Cannot reset while the agent is running. Wait for it to stop.');
-        return;
-      }
-      ctx.controller.clearMessages();
-      ctx.controller.clearAllQueues();
-      ctx.dispatch({ type: 'resetConversation' });
-      ctx.toast('info', 'Started a new conversation.');
-      if (ctx.state.pendingSteering.length) ctx.notify('warn',
-        `\u5df2\u53d6\u6d88 ${ctx.state.pendingSteering.length} \u6761\u672a\u63a5\u6536\u6d88\u606f`);
-    },
+    description: 'Alias of /clear',
+    run: runClearCommand,
   },
   {
     name: 'cwd',
@@ -1100,21 +1181,63 @@ const COMMANDS: SlashCommand[] = [
         }
         // Loading has validated and normalized every external value. Commit
         // synchronously so no new run can start between clearing and restoring.
+        //
+        // THE THREE CONTROLLER CALLS COME FROM THE SHARED PORT (tui-session-id-resume
+        // 3.8 / D-9): the startup `--resume` path and this command must never be
+        // two implementations of "adopt a saved conversation", which is exactly
+        // how `/clear` and `/reset` drifted apart once. `clearAllQueues` and the
+        // `restoreEntries` dispatch stay HERE: the first is indispensable for a
+        // live TUI and a no-op at startup, and the second is a VIEW action with
+        // no controller to hang it on.
         ctx.controller.clearAllQueues();
-        ctx.controller.replaceMessages(session.messages, session.compactionIdentity);
-        // Absence clears the previous conversation's list, including old files.
-        ctx.controller.restoreTodos(session.todos ?? []);
+        applyRestoredSession(ctx.controller, session);
         ctx.dispatch({ type: 'restoreEntries', entries: session.entries });
-        if (session.model?.providerId && session.model?.modelId) {
-          ctx.controller.setModel(session.model.providerId, session.model.modelId, session.model.baseUrl);
+        // A NEW ID, AND A ZEROED COUNTER, IN THAT ORDER (D-15 / D-10 / R-9).
+        // Without the rotation the next checkpoint would write THIS conversation
+        // into the previous id's file - silently destroying its disk record - and
+        // without the reset the new id's `meta.usage` would bill the previous
+        // conversation's spend to this one.
+        const rotated = ctx.session?.rotate(path);
+        // GATED ON THE ROTATION, NOT ON THE COMMAND (D-10: the criterion
+        // is 'the id changed'). With no session port - a host without this
+        // feature - or a failed claim the id is unchanged, and restarting
+        // the counter there would misreport this conversation's spend. A
+        // failed claim is also the one case where the NEXT checkpoint writes
+        // another conversation into this id's file, so it is said out loud
+        // rather than left to be discovered later.
+        if (rotated) ctx.dispatch({ type: 'resetUsage' });
+        if (ctx.session && !rotated) {
+          ctx.notify('warn',
+            'Could not claim a new session id; this conversation keeps the current one.');
         }
-        ctx.notify('info', `Resumed session from ${path}`);
+        ctx.notify(
+          'info',
+          rotated
+            ? `Resumed session from ${path} as ${rotated.id}.`
+            : `Resumed session from ${path}`,
+        );
         if (ctx.state.pendingSteering.length) ctx.notify('warn',
           `\u5df2\u53d6\u6d88 ${ctx.state.pendingSteering.length} \u6761\u672a\u63a5\u6536\u6d88\u606f`);
       } catch (err) {
         ctx.notify('error', `Resume failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     },
+  },
+  {
+    // REGISTRATION ONLY - the body lives in `commands/session-command.ts`, for
+    // the reason `/clear` and `/compact` do: this file is past the 1000-line
+    // guideline and `/session` is a report with three branches, not a one-liner.
+    name: 'session',
+    description: 'Show this session id and file; "/session copy" copies the resume command',
+    run: runSessionCommand,
+  },
+  {
+    // REGISTRATION ONLY - the body lives in `commands/branch-command.ts`, for the
+    // reason `/session` above does. `Ctrl+L` dispatches this same command, so the
+    // key and the typed word are one code path including the cooldown (D-2).
+    name: 'branch',
+    description: 'Open a new terminal on this session (Ctrl+L); the branch gets its own id',
+    run: (ctx) => runBranchCommand(ctx),
   },
   {
     name: 'copy',
@@ -1139,6 +1262,13 @@ const COMMANDS: SlashCommand[] = [
     name: 'mouse',
     description: 'Release the mouse to the terminal, or take it back',
     run: (ctx) => {
+      if (ctx.nativeScroll) {
+        ctx.notify(
+          'info',
+          'Mouse capture is not used in native scroll mode; your terminal handles scrolling and selection.',
+        );
+        return;
+      }
       const port = ctx.mouse;
       if (!port) {
         // Inline mode, `--no-mouse`, a non-TTY, or a console that cannot deliver
@@ -1277,7 +1407,7 @@ const COMMANDS: SlashCommand[] = [
   perfCommand,
   {
     name: 'bg',
-    description: 'Background services: list | logs <id> [n] | stop <id|all> | status',
+    description: 'Background jobs: list | logs <id> [n] | stop <id|all> | status',
     /**
      * THE USER'S HANDLE ON WHAT THE AGENT LEFT RUNNING (§5.3).
      *
@@ -1301,11 +1431,20 @@ const COMMANDS: SlashCommand[] = [
 
       if (verb === 'status') {
         const live = controller.liveServiceCount();
+        if (live === 0) {
+          ctx.notify('info', 'No background jobs running.');
+          return;
+        }
+        // THE KIND SPLIT IS THE INFORMATION (long-task-jobs §4.9): "2 jobs
+        // running" is not the same as "1 task, 1 service". A task will end on its
+        // own; a service will not, and that difference decides whether the user
+        // has to do anything.
+        const running = services.filter((job) => !isTerminalStatus(job.status));
+        const tasks = running.filter((job) => job.kind === 'task').length;
         ctx.notify(
           'info',
-          live === 0
-            ? 'No background services running.'
-            : `${live} background service${live === 1 ? '' : 's'} running.`,
+          `${live} background job${live === 1 ? '' : 's'} running ` +
+            `(${tasks} task, ${running.length - tasks} service).`,
         );
         return;
       }
@@ -1317,7 +1456,7 @@ const COMMANDS: SlashCommand[] = [
         }
         const service = controller.getServiceSnapshot(value);
         if (!service) {
-          ctx.notify('warn', `No service "${value}".`);
+          ctx.notify('warn', `No job "${value}".`);
           return;
         }
         const page = controller.readServiceLog(value);
@@ -1372,12 +1511,17 @@ const COMMANDS: SlashCommand[] = [
         return;
       }
       const now = Date.now();
+      // `id  kind  status  elapsed  progress|url  $ command` - the same column
+      // grammar `job_list` uses for the model, so a user reading `/bg list` and a
+      // model reading `job_list` see the same facts in the same order.
       const lines = services.map((svc) => {
         const uptime = formatDuration((svc.endedAt ?? now) - svc.startedAt);
-        const where = svc.url ? `  ${svc.url}` : '';
-        return `${svc.id}  ${svc.status}  ${uptime}${where}  $ ${svc.command}`;
+        const aside = svc.progress?.text ?? svc.url;
+        const where = aside ? `  ${aside}` : '';
+        const stalled = svc.stalled === true ? '  [no output]' : '';
+        return `${svc.id}  ${svc.kind}  ${svc.status}  ${uptime}${where}${stalled}  $ ${svc.command}`;
       });
-      ctx.notify('info', `Background services:\n${lines.join('\n')}`);
+      ctx.notify('info', `Background jobs:\n${lines.join('\n')}`);
     },
   },
   {
@@ -1394,6 +1538,9 @@ const DEFAULT_BG_LOG_ROWS = 40;
 export function registerBuiltinCommands(registry: CommandRegistry): void {
   for (const command of COMMANDS) registry.register(command);
   registerQueueCommand(registry);
+  // The command BODY lives in its own module (builtins.ts is already 1.5k lines);
+  // this line is the whole registration (agent-model-kits §4.9).
+  registerKitCommand(registry);
 }
 
 /**

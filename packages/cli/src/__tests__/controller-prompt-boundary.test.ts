@@ -191,7 +191,7 @@ describe('mounted App with the real pending-start controller', () => {
     } finally { view.unmount(); }
   });
 
-  it('rejects reset while the old engine is busy, then permits an idle reset', async () => {
+  it('interrupts a running turn for /reset, clears once it settles, then starts over', async () => {
     vi.useFakeTimers();
     const { controller, engine, prompt } = setup();
     const state = { ...engine.state, isRunning: false };
@@ -207,19 +207,20 @@ describe('mounted App with the real pending-start controller', () => {
       view.stdin.write('\r'); await flush();
       view.stdin.write('/reset'); await flush();
       view.stdin.write('\r'); await flush();
-      expect(view.lastFrame()).toContain('Interrupt the current run before switching conversations.');
+      // THE REFUSAL IS GONE (clear-command-context-reset D-4 / P1-7). A mid-run
+      // `/reset` now means "interrupt, wait, clear" - the old refusal was the dead
+      // end that left `/clear` (which did not clear the context) as the only
+      // command that worked while the agent was busy.
+      expect(view.lastFrame())
+        .not.toContain('Interrupt the current run before switching conversations.');
       expect(view.lastFrame()).toContain('/reset');
+      // NOTHING IS CLEARED BEFORE THE ENGINE SETTLES (I-4): the bounded wait is
+      // still open, so the plan and the history are exactly where they were.
       expect(controller.getTodoSnapshot()).not.toBeNull();
       expect(view.frames.join('\n')).not.toContain('The run ended without producing a response');
-      // Dismiss the preserved slash palette, then cancel the pending start.
-      view.stdin.write(ESC); await flush();
-      view.stdin.write(ESC); await flush();
-      view.stdin.write(ESC); await flush();
-      expect(view.lastFrame()).toContain('Pending run cancelled.');
       state.isRunning = false;
       release(); await flush();
-      expect(prompt).not.toHaveBeenCalled();
-      view.stdin.write('\r'); await flush();
+      // Settled: the reset lands, and the plan goes with the conversation.
       expect(controller.getTodoSnapshot()).toBeNull();
       view.stdin.write('new conversation'); await flush();
       view.stdin.write('\r'); await flush();

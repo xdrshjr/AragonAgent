@@ -18,6 +18,9 @@ function context(): CommandContext {
       getConfig: () => ({ provider: 'anthropic', model: 'custom' }),
       getMessages: () => [], getTodoSnapshot: () => null,
       clearMessages: vi.fn(), clearAllQueues: vi.fn(), replaceMessages: vi.fn(),
+      resetConversation: vi.fn(async () => ({
+        ok: true, interrupted: false, archivedPath: null, messagesCleared: 0,
+      })),
       restoreTodos: vi.fn(), setModel: vi.fn(),
     },
     dispatch: vi.fn(), notify: vi.fn(), toast: vi.fn(),
@@ -25,12 +28,18 @@ function context(): CommandContext {
 }
 
 describe('session command commit boundary', () => {
-  it('reports the number of unreceived messages cancelled by reset', () => {
+  it('reports the number of unreceived messages cancelled by clear', async () => {
     const ctx = context();
+    ctx.args = '';
     ctx.state.pendingSteering = [{ queueId: 'a', text: 'keep until reset' }];
-    registry.get('reset')!.run(ctx);
+
+    await registry.get('reset')!.run(ctx);
+
     expect(ctx.notify).toHaveBeenCalledWith('warn', expect.stringContaining('1'));
-    expect(ctx.controller.clearAllQueues).toHaveBeenCalledOnce();
+    // THE COUNT IS TAKEN BEFORE THE CLEAR (I-9): `clearAllQueues()` empties
+    // `pendingUserSteering`, so a count read afterwards would always be 0 - a
+    // notice that states a falsehood, which is worse than no notice.
+    expect(ctx.controller.resetConversation).toHaveBeenCalledOnce();
   });
   it.each(['missing', 'invalid-json'])('keeps the session on %s read failure', (kind) => {
     const ctx = context();
@@ -45,15 +54,33 @@ describe('session command commit boundary', () => {
     expect(ctx.notify).toHaveBeenCalledWith('error', expect.stringContaining('Resume failed'));
   });
 
-  it.each(['reset', 'resume'])('refuses %s while engine is running despite idle UI', (name) => {
+  it('refuses /resume while the engine is running despite an idle UI', () => {
     const ctx = context();
     vi.mocked(ctx.controller.isRunning).mockReturnValue(true);
-    registry.get(name)!.run(ctx);
-    expect(ctx.controller.clearMessages).not.toHaveBeenCalled();
+    registry.get('resume')!.run(ctx);
     expect(ctx.controller.clearAllQueues).not.toHaveBeenCalled();
     expect(ctx.controller.replaceMessages).not.toHaveBeenCalled();
     expect(ctx.dispatch).not.toHaveBeenCalled();
     expect(ctx.notify).toHaveBeenCalledWith('warn', expect.stringContaining('running'));
+  });
+
+  it('no longer refuses /reset while running: it interrupts and clears', async () => {
+    // THE DEAD END THIS FEATURE REMOVES (B-2): refusing reset mid-run left the
+    // only command that worked in a long conversation being the one that did not
+    // clear it. The reset port decides how to interrupt; the command's job is to
+    // ask, and `/resume` keeps its refusal because switching to a FILE mid-run is
+    // a different question (killed scope, K-4).
+    const ctx = context();
+    ctx.args = '';
+    vi.mocked(ctx.controller.isRunning).mockReturnValue(true);
+
+    await registry.get('reset')!.run(ctx);
+
+    expect(ctx.controller.resetConversation).toHaveBeenCalledWith(
+      expect.objectContaining({ interrupt: true }),
+    );
+    expect(ctx.dispatch).toHaveBeenCalledWith({ type: 'resetConversation' });
+    expect(ctx.notify).not.toHaveBeenCalledWith('warn', expect.stringContaining('running'));
   });
 
   it.each([

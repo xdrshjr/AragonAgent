@@ -50,6 +50,19 @@ describe('SELF_RENDERING_TOOLS suppression (D-10)', () => {
     expect(state.runPhase).toBe('preparing-tool');
   });
 
+  it("F-8 A'3: a task (subagent dispatch) call produces NO generic tool entry either", () => {
+    // Every dispatch renders a TeamCard the moment `teamStart` lands, so the
+    // generic `Dispatch subagents` card read as a SECOND block - and after a
+    // killed first dispatch, as a FAILED first block. One dispatch, one card.
+    const actions = reduceEvent({
+        type: 'message_update',
+        streamEvent: { type: 'tool_call_start', toolCallId: 't9', toolName: 'task' },
+      } as never);
+    const state = fold(actions);
+    expect(state.entries).toEqual([]);
+    expect(state.runPhase).toBe('preparing-tool');
+  });
+
   it('every OTHER tool is untouched', () => {
     expect(
       reduceEvent({

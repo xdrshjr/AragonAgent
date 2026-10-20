@@ -39,6 +39,7 @@ import {
   DEFAULT_BASH_CONFIG,
   clampTeamConfig,
   type CliConfig,
+  DEFAULT_JOBS_CONFIG,
 } from '../config/schema.js';
 import { normalizeSubagentSpecs } from '../team/normalize.js';
 import { buildDispatchReport } from '../team/report.js';
@@ -118,6 +119,10 @@ function config(over: Partial<CliConfig> = {}): CliConfig {
     team: { ...DEFAULT_TEAM_CONFIG, maxConcurrent: 2 },
     todo: DEFAULT_TODO_CONFIG,
     bash: DEFAULT_BASH_CONFIG,
+    // The ELEVENTH nested section (long-task-jobs). `enabled: true` because a
+    // fixture that says nothing about jobs should behave like a default session;
+    // the subsystems each fixture is about are switched off individually above.
+    jobs: DEFAULT_JOBS_CONFIG,
     retry: DEFAULT_RETRY_CONFIG,
     compaction: { ...DEFAULT_COMPACTION_CONFIG, enabled: false },
     // The tier is LIVE and resolvable: the parity assertions below therefore
@@ -188,6 +193,72 @@ describe('TeamRuntime - every child runs the lead`s model', () => {
     expect(outcome.usage).toEqual({ inputTokens: 200, outputTokens: 40 });
     expect('fastUsage' in outcome).toBe(false);
     expect('downgraded' in outcome).toBe(false);
+  }, 15_000);
+
+  // THE USER-OWNED SWITCH (subagent-model D-1/D-3): `team.model` is the one
+  // legitimate way off the lead's model, and each mode below re-resolves per
+  // dispatch through `team/model.ts` - never through a tool parameter.
+  it('runs children on the fast tier when the user set team.model = fast', async () => {
+    const captured: AgentConfig[] = [];
+    const runtime = new TeamRuntime({
+      getConfig: () => config({ team: { ...DEFAULT_TEAM_CONFIG, model: 'fast' } }),
+      providerRegistry: {} as ProviderRegistry,
+      getCwd: () => process.cwd(),
+      getMode: () => 'build',
+      getApiKey: () => 'k',
+      agentFactory: stubAgent(captured),
+    });
+    const { specs } = normalizeSubagentSpecs([raw()], 5);
+    await runtime.dispatch(specs, 1);
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.model.modelId).toBe('claude-haiku-4-5');
+    expect(captured[0]!.thinkingLevel).toBe(config().fast.thinkingLevel);
+  }, 15_000);
+
+  it('runs children on a bound profile when the user set team.model = profile', async () => {
+    const captured: AgentConfig[] = [];
+    const entry = { id: 'p1', name: 'cheap', provider: 'openai', model: 'gpt-5-mini',
+      baseUrl: 'https://gw.example', apiKey: 'entry-key', contextWindow: null };
+    const runtime = new TeamRuntime({
+      getConfig: () => config({
+        team: { ...DEFAULT_TEAM_CONFIG, model: 'profile', modelProfileId: 'p1' },
+        modelProfiles: { version: 1, entries: [entry], mainId: null, fastId: null },
+      }),
+      providerRegistry: {} as ProviderRegistry,
+      getCwd: () => process.cwd(),
+      getMode: () => 'build',
+      getApiKey: (providerId: string) => (providerId === 'openai' ? 'entry-key' : 'k'),
+      agentFactory: stubAgent(captured),
+    });
+    const { specs } = normalizeSubagentSpecs([raw()], 5);
+    await runtime.dispatch(specs, 1);
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.model).toEqual({
+      providerId: 'openai', modelId: 'gpt-5-mini', baseUrl: 'https://gw.example' });
+  }, 15_000);
+
+  it('degrades to the lead model when a fast team.model cannot resolve (D-4)', async () => {
+    const captured: AgentConfig[] = [];
+    const runtime = new TeamRuntime({
+      getConfig: () => config({
+        team: { ...DEFAULT_TEAM_CONFIG, model: 'fast' },
+        // The tier is on but names no model: resolveFastTier says no_model.
+        fast: { ...DEFAULT_FAST_CONFIG, enabled: true, model: '' },
+      }),
+      providerRegistry: {} as ProviderRegistry,
+      getCwd: () => process.cwd(),
+      getMode: () => 'build',
+      getApiKey: () => 'k',
+      agentFactory: stubAgent(captured),
+    });
+    const { specs } = normalizeSubagentSpecs([raw()], 5);
+    const outcome = await runtime.dispatch(specs, 1);
+
+    // The dispatch SUCCEEDS on the main model; the report discloses the why.
+    expect(outcome.runs).toHaveLength(1);
+    expect(captured[0]!.model.modelId).toBe('claude-sonnet-4-5-20250929');
   }, 15_000);
 });
 

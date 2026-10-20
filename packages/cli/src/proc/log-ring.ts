@@ -28,6 +28,17 @@ export interface LogRingPage {
   cursor: number;
   /** Rows between `since` and the first row returned were evicted. */
   truncated: boolean;
+  /**
+   * The not-yet-terminated line, or an empty string when the last chunk ended
+   * with a newline.
+   *
+   * THE ROWS ARRAY ENDS WITH THE CARRY LINE when one exists, so from the array
+   * alone a consumer cannot tell "the newest completed row" from "the progress bar
+   * being redrawn right now" - and that difference is the whole content of
+   * `JobProgress.source`. It is also what lets `job_wait` decline to reprint an
+   * unchanged, carriage-return-rewritten bar on every single wait (RV-P1-5).
+   */
+  carryRow: string;
 }
 
 /**
@@ -75,6 +86,20 @@ export class LogRing {
     return Object.freeze(all.length > n ? all.slice(-n) : [...all]);
   }
 
+  /**
+   * The not-yet-terminated line, exactly as the display would show it.
+   *
+   * THE PROGRESS EXTRACTOR NEEDS THIS SEPARATELY FROM `tail()`, and that is the
+   * only reason it is public: `tail()` appends the carry line as its last
+   * element, so a consumer that is handed the array cannot tell whether that last
+   * element is a completed row or the bar currently being redrawn. A tqdm run and
+   * a silent job would look identical, and the difference is precisely the
+   * information `JobProgress.source` carries.
+   */
+  get carryRow(): string {
+    return toDisplayRow(this.carry);
+  }
+
   /** Every completed row plus the in-progress line. */
   all(): readonly string[] {
     return this.tail(this.capacity + 1);
@@ -100,7 +125,12 @@ export class LogRing {
   page(since?: number): LogRingPage {
     const oldest = this.seen - this.rows.length;
     if (since === undefined || since < 0) {
-      return { rows: this.all(), cursor: this.seen, truncated: this.truncated };
+      return {
+        rows: this.all(),
+        cursor: this.seen,
+        truncated: this.truncated,
+        carryRow: toDisplayRow(this.carry),
+      };
     }
     const from = Math.max(since, oldest);
     const rows = this.rows.slice(from - oldest);
@@ -110,6 +140,7 @@ export class LogRing {
       rows: Object.freeze(withLive),
       cursor: this.seen,
       truncated: since < oldest,
+      carryRow: live,
     };
   }
 }

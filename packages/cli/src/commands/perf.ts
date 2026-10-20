@@ -18,6 +18,7 @@
 
 import type { FrameWriterStats } from '../ui/frame-differ.js';
 import type { ScrollbarBridge } from '../ui/scrollbar-controller.js';
+import type { AnchorSource } from '../ui/scrollback/canvas.js';
 import { clearRenderCaches, renderCacheStats } from '../ui/render-cache.js';
 import type { SlashCommand } from './registry.js';
 
@@ -37,11 +38,66 @@ export interface PerfSnapshot {
   heightsEstimated: number;
   cols: number;
   /** Geometry. */
-  mode: 'fullscreen';
+  mode: 'fullscreen' | 'native';
+  /** Full-screen: the transcript viewport. Native: the live region height. */
   viewportRows: number;
   offset: number;
   /** Right-edge scrollbar diagnostics; read lazily so it reflects the live bridge. */
   scrollbar?: ScrollbarPerf;
+  /**
+   * The native panel band, or `null` outside native mode
+   * (release-gate-and-native-panels §6.10).
+   *
+   * REQUIRED, WITH AN EXPLICIT `null`. This feature has six ways to show nothing and
+   * four of them are invisible, so "the rail is gone" has to be answerable from one
+   * line. An optional field would let a future caller forget it and leave `/perf`
+   * silently unable to explain the case the user is reporting.
+   */
+  band: BandPerf | null;
+}
+
+/**
+ * The band's projection, as `/perf` reads it. Counts only - the allocation itself lives
+ * in `ui/scrollback/band.ts` (`LiveBand`), and this type exists so the command layer
+ * does not have to import a UI module to describe it.
+ */
+export interface BandPerf {
+  reason: 'visible' | 'empty' | 'disabled' | 'overlay' | 'narrow' | 'short';
+  /**
+   * The band's height. In the full-height region this IS the pool
+   * (`tui-full-height-live-region` D5), which is why `/perf` prints one `pool=` number
+   * rather than two fields that can only ever be equal.
+   */
+  bandRows: number;
+  railRows: number;
+  railCols: number;
+  teamRows: number;
+  /** The tail column: the rows between the roster and the composer. */
+  previewRows: number;
+  contentCols: number;
+  previewCols: number;
+  heldRailRows: number;
+  heldTeamRows: number;
+  /**
+   * The tail window: first visible entry index and how many entries are in it.
+   *
+   * The ONLY number that makes "what is on screen" and "what has been printed"
+   * comparable. A long answer can push earlier entries out of sight while they are
+   * still inside the window, so they are neither visible nor printed yet; the readout
+   * turns that disclosed gap (known limitation 5) into a number instead of a guess.
+   */
+  windowStart: number;
+  windowEntries: number;
+  /**
+   * Rows the TOP GIVE-WAY has printed for entries that are still inside the window.
+   *
+   * `window=` says what the region holds; `head=` says how much of it the region could
+   * not show and therefore gave back to the terminal scrollback
+   * (tui-final-reply-truncated-unscrollable). Zero is the healthy answer for a
+   * conversation that always fits; a growing number means the box is smaller than the
+   * reply, which is exactly the state that used to be unrecoverable.
+   */
+  headRows: number;
 }
 
 /**
@@ -127,6 +183,80 @@ export function readFrameStats(): FrameWriterStats | null {
   return frameStats ? frameStats() : null;
 }
 
+/**
+ * Native-scroll writer counters (tui-native-terminal-scroll §5.1). A third
+ * module-level slot for the reason the one above records: the writer lives outside
+ * React. `guardHitsOutsideResize > 0` on a session with no resize is the defect
+ * signal (a live region reached the terminal height); `clippedRows > 0` means Ink
+ * and the terminal disagreed about a character's width (I-S13).
+ */
+export interface ScrollbackPerf {
+  /** LIVE REGION height (the Ink frame), NOT the canvas — see `anchorCanvasRows`. */
+  regionRows: number;
+  framesSeed: number;
+  framesDiff: number;
+  framesFull: number;
+  staticRowsWritten: number;
+  elidedEntries: number;
+  guardHits: number;
+  guardHitsOutsideResize: number;
+  clippedRows: number;
+  fallbacks: number;
+  resizes: number;
+  repaints: number;
+  /** `probe` = measured by CPR; `fill` = the one-off screen fill; `none` = unmeasured. */
+  anchorSource: AnchorSource;
+  /**
+   * Canvas height of the most recent batch, which is also the next erase distance.
+   *
+   * A SEPARATE FIELD RATHER THAN A RENAMED `regionRows` (P1-4): `/perf`'s
+   * "scrollback region N rows" is the first number anyone reads when the frame
+   * looks wrong, and quietly turning it into the canvas height would make a 6-row
+   * region report 24 during a short conversation.
+   */
+  anchorCanvasRows: number;
+  /** Content rows inside that canvas — how much of the conversation is on screen. */
+  anchorHeldRows: number;
+  /** Blank rows above the content. Zero by construction in the full-height region. */
+  anchorGapRows: number;
+  /**
+   * Canvas top row (0-based). 0 means the canvas starts on the terminal's first row and
+   * is the direct answer to "why does the app start halfway down the screen" - the one
+   * number that used to be missing from this block.
+   */
+  anchorTop: number;
+  /** Rows this session pushed into the terminal's own scrollback. */
+  anchorScrollRows: number;
+  /** Times the geometry was dropped on purpose (column change, shrink, geometry lost). */
+  anchorResets: number;
+  /** Measurements accepted after the first: the re-probe count, not the resize count. */
+  anchorReprobes: number;
+}
+
+let scrollbackStats: (() => ScrollbackPerf) | null = null;
+
+/** Called by `cli.tsx` in native mode. Passing `null` detaches. */
+export function setScrollbackStatsProvider(fn: (() => ScrollbackPerf) | null): void {
+  scrollbackStats = fn;
+}
+
+function formatScrollbackLine(): string[] {
+  const stats = scrollbackStats?.();
+  if (!stats) return [];
+  return [
+    `scrollback region ${stats.regionRows} rows  -  canvas ${stats.anchorCanvasRows} rows  -  ` +
+      `content ${stats.anchorHeldRows} rows  -  gap ${stats.anchorGapRows} rows  -  ` +
+      `anchor bottom via ${stats.anchorSource}  -  scrolled ${stats.anchorScrollRows} rows  -  ` +
+      `anchor resets ${stats.anchorResets}  -  reprobes ${stats.anchorReprobes}`,
+    `           batches seed ${stats.framesSeed}, ` +
+      `diff ${stats.framesDiff}, full ${stats.framesFull}, repaint ${stats.repaints}  -  ` +
+      `static rows ${stats.staticRowsWritten}  -  elided ${stats.elidedEntries}  -  ` +
+      `guardHits ${stats.guardHits} (outside resize ${stats.guardHitsOutsideResize})  -  ` +
+      `clippedRows ${stats.clippedRows}  -  fallbacks ${stats.fallbacks}  -  ` +
+      `resizes ${stats.resizes}`,
+  ];
+}
+
 function mb(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
@@ -167,12 +297,41 @@ function formatScrollbarLine(bar: ScrollbarPerf): string {
   return `${line}\n           waiting for a full frame matching ${size}`;
 }
 
-/** Format a snapshot as the six-line block documented in §5.4 (plus the scrollbar line). */
+/**
+ * `band:` - who got which rows, and why a panel is not on screen.
+ *
+ * `rail=<rows>x<cols>` reads `0x0` when the rail is not drawn, which is the only
+ * unambiguous "there is no rail" - a conservative width would look like a rail that
+ * merely has no height. One line, because `/perf` is a notice entry and a wrapping
+ * readout costs the repaint it exists to explain.
+ */
+function formatBandLine(band: BandPerf | null): string {
+  if (!band) return 'band       n/a (full-screen layout)';
+  return `band       rail=${band.railRows}x${band.railCols} team=${band.teamRows} ` +
+    `tail=${band.previewRows} pool=${band.bandRows} ` +
+    `cols=${band.contentCols}/${band.previewCols} ` +
+    `reason=${band.reason} held=${band.heldRailRows}/${band.heldTeamRows} ` +
+    `window=${band.windowStart}/${band.windowEntries} head=${band.headRows}`;
+}
+
+/**
+ * Format a snapshot as the seven-line block documented in §5.4 (plus the scrollbar
+ * line). The `band:` line is the newest one and the only place that answers "why is
+ * that panel not on screen".
+ */
 export function formatPerfReport(snap: PerfSnapshot): string {
   const caches = renderCacheStats();
   const eco = snap.rung > 0 ? '  -  eco' : '';
   const governor = snap.governorEnabled ? '' : '  -  governor off';
-  const scrollbar = snap.scrollbar ? [formatScrollbarLine(snap.scrollbar)] : [];
+  const native = snap.mode === 'native';
+  // The canvas top lives in the writer's counters, not in the snapshot: it is the direct
+  // explanation for "the app starts halfway down", so it belongs on the mode line next
+  // to the region height. `n/a` rather than 0 when no writer is attached, because 0 is a
+  // real and healthy answer.
+  const anchor = native ? scrollbackStats?.() ?? null : null;
+  const scrollbar = native
+    ? ['scrollbar  n/a (native scroll)']
+    : snap.scrollbar ? [formatScrollbarLine(snap.scrollbar)] : [];
   return [
     `render     rung ${snap.rung}  -  interval ${snap.intervalMs}ms  -  last commit ` +
       `${Math.round(snap.lastCommitMs)}ms${eco}${governor}`,
@@ -183,8 +342,13 @@ export function formatPerfReport(snap: PerfSnapshot): string {
     `caches     md ${caches.markdownEntries} (${mb(caches.markdownBytes)})  -  ` +
       `hl ${caches.highlightEntries} (${mb(caches.highlightBytes)})  -  ` +
       `lines ${caches.lineEntries}`,
-    `mode       ${snap.mode}  -  viewport ${snap.viewportRows} rows  -  offset ${snap.offset}`,
+    native
+      ? `mode       native  -  live region ${snap.viewportRows} rows  -  ` +
+        `top ${anchor ? anchor.anchorTop : 'n/a'}`
+      : `mode       ${snap.mode}  -  viewport ${snap.viewportRows} rows  -  offset ${snap.offset}`,
+    formatBandLine(snap.band),
     formatWriterLine(),
+    ...formatScrollbackLine(),
     ...scrollbar,
   ].join('\n');
 }

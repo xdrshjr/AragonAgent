@@ -33,6 +33,22 @@ export function clampDraftRows(rows: number, draftRows: number): number {
   return Math.max(1, Math.min(wanted, draftMaxRows(rows)));
 }
 
+/**
+ * The share of `popupMaxHeight` a completion menu may actually occupy (defect 10).
+ *
+ * `popupCapacity` answers "how much COULD the editor slot take", and its floor is
+ * one message row - right for a picker that owns the frame, wrong for a menu that
+ * opens over a conversation. At 20 rows the whole capacity is 13, which leaves one
+ * transcript row and no TODO rail at all (measured, `todo-app-layout.test.tsx`).
+ * Half keeps the menu growing with the terminal - 6 rows at 20, 11 at 30, 16 at 40 -
+ * while the conversation and the rail keep their rows.
+ *
+ * A divisor rather than a row count or a fraction of the terminal: it is the only
+ * form that stays derived from the frame budget instead of becoming a second
+ * authority beside it, and it cannot drift when `popupCapacity` changes.
+ */
+export const POPUP_CAPACITY_SHARE = 2;
+
 /** Total menu capacity, including its borders; reserve at least one message row. */
 export function popupCapacity(rows: number, draftRows: number, statusExpanded: boolean): number {
   return Math.max(0, rows - 1 - 1 - (statusExpanded ? 2 : 1)

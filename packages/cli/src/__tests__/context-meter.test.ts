@@ -12,6 +12,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Message, ModelInfo, TokenUsage } from '@aragon-agent/core';
 import { CONTEXT_METER_TICK_MS, ContextMeter, toContextUsage } from '../compaction/meter.js';
+import type { ContextWindowOrigin } from '../config/schema.js';
 import { getLogger } from '../logging/logger.js';
 
 const MODEL: ModelInfo = {
@@ -57,17 +58,20 @@ interface HarnessOpts {
   systemPrompt?: string;
   windowKnown?: boolean;
   windowOverride?: number | null;
+  windowOverrideOrigin?: ContextWindowOrigin;
 }
 
 function harness(opts: HarnessOpts = {}) {
   let messages: readonly Message[] = opts.messages ?? [];
   let windowOverride = opts.windowOverride ?? null;
+  let windowOverrideOrigin = opts.windowOverrideOrigin;
   const meter = new ContextMeter({
     getMessages: () => messages,
     getSystemPrompt: () => opts.systemPrompt ?? '',
     getModelInfo: () => MODEL,
     isWindowKnown: () => opts.windowKnown !== false,
     getWindowOverride: () => windowOverride,
+    getWindowOverrideOrigin: () => windowOverrideOrigin,
   });
 
   /** The agent-stream injector `attach` hands out. */
@@ -90,6 +94,9 @@ function harness(opts: HarnessOpts = {}) {
     },
     setWindowOverride: (next: number | null): void => {
       windowOverride = next;
+    },
+    setWindowOverrideOrigin: (next: ContextWindowOrigin | undefined): void => {
+      windowOverrideOrigin = next;
     },
   };
 }
@@ -422,6 +429,41 @@ describe('the denominator (I-6)', () => {
     expect(p.contextWindow).toBe(200_000);
     expect(p.windowKnown).toBe(false);
     expect(p.windowOverridden).toBe(false);
+  });
+
+  /**
+   * profile-context-window §6.1 / AC-9: the origin travels WITH the override
+   * through resolveWindow -> Pressure -> ContextUsageSnapshot, and moving it
+   * (same number, different surface) is a DIRTY event - `/context` must never
+   * name the old source after a save rebound the denominator.
+   */
+  it('carries the override origin end to end and re-measures when only it moves', () => {
+    const h = harness({ messages: [user('a')], windowOverride: 120_000,
+      windowOverrideOrigin: 'profile' });
+    const p = h.meter.current();
+    expect(p.windowOverrideOrigin).toBe('profile');
+    expect(toContextUsage(p).windowOverrideOrigin).toBe('profile');
+    // Same value, new surface: the published Pressure must still be refreshed.
+    h.setWindowOverrideOrigin('env');
+    expect(h.meter.current().windowOverrideOrigin).toBe('env');
+  });
+
+  it('an override without an origin dep stays byte-compatible (invariant 6)', () => {
+    const meter = new ContextMeter({ getMessages: () => [user('a')],
+      getSystemPrompt: () => '', getModelInfo: () => MODEL, isWindowKnown: () => true,
+      getWindowOverride: () => 500_000 });
+    const p = meter.current();
+    expect(p.windowOverridden).toBe(true);
+    expect(p).not.toHaveProperty('windowOverrideOrigin');
+    expect(toContextUsage(p)).not.toHaveProperty('windowOverrideOrigin');
+  });
+
+  it('the AUTO branch never carries an origin, even when one is configured', () => {
+    const h = harness({ messages: [user('a')], windowOverride: null,
+      windowOverrideOrigin: 'profile' });
+    const p = h.meter.current();
+    expect(p.windowOverridden).toBe(false);
+    expect(p).not.toHaveProperty('windowOverrideOrigin');
   });
 
   it('onWindowChanged re-measures WITHOUT dropping the measured base (RV-13)', () => {

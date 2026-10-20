@@ -1,20 +1,29 @@
 /**
- * `/clear` takes the todo panel with it (slash-clear-leaves-todo-panel).
+ * The todo panel and the two kinds of clearing (slash-clear-leaves-todo-panel,
+ * reworked by clear-command-context-reset T-19).
  *
  * Driven through `runSlashInput` rather than by calling the command object, so
- * the path a user actually reaches is the path under test — and because the
- * defect this pins was invisible to a reducer-level assertion. The rail mounts
- * on `ViewState.todos`, but `/save`, `/todo status`, `/todo continue` and
+ * the path a user actually reaches is the path under test - and because the
+ * defect this pins was invisible to a reducer-level assertion. The rail mounts on
+ * `ViewState.todos`, but `/save`, `/todo status`, `/todo continue` and
  * follow-through all read the STORE directly, so a fix that only nulled the
  * mirror would leave the screen and the data disagreeing. Both halves are
  * asserted below for exactly that reason: assert only `state.todos` and a
  * mirror-only regression passes.
+ *
+ * WHAT CHANGED AND WHY THESE CASES MOVED TO `/clear screen`: `/clear` is now the
+ * new-conversation boundary, so "clear the transcript but keep the conversation"
+ * is spelled `/clear screen`. Its behaviour - and its silence - is byte-identical
+ * to what the old `/clear` did, which is exactly what I-3 requires, and the
+ * conversation-clearing form gets its own case at the bottom.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { registerBuiltinCommands } from '../commands/builtins.js';
 import { CommandRegistry, runSlashInput, type CommandContext } from '../commands/registry.js';
-import { initialViewState, viewReducer, type ViewAction, type ViewState } from '../agent/reducer.js';
+import {
+  initialViewState, viewReducer, type ViewAction, type ViewState,
+} from '../agent/reducer.js';
 import { TodoStore } from '../todo/store.js';
 
 const registry = new CommandRegistry();
@@ -27,6 +36,7 @@ interface Harness {
   entryCount: () => number;
   notices: string[];
   toasts: string[];
+  resetConversation: ReturnType<typeof vi.fn>;
   ctx: (args: string) => CommandContext;
 }
 
@@ -57,9 +67,16 @@ function harness(opts: { withList?: boolean } = {}): Harness {
     ]);
   }
 
+  // THE RESET PORT, not the four separate calls it used to make. The command is
+  // allowed exactly one way to clear a conversation, so the fake offers exactly
+  // one; a fake that still carried `clearMessages` would let a regression that
+  // bypasses the ordered reset pass silently.
+  const resetConversation = vi.fn(async () => {
+    store.clear('reset');
+    return { ok: true, interrupted: false, archivedPath: null, messagesCleared: 2 };
+  });
   const controller = {
-    clearMessages: () => store.clear('reset'),
-    clearAllQueues: () => {},
+    resetConversation,
     clearTodos: () => store.clear('user'),
     getTodoSnapshot: () => store.snapshot(),
     isRunning: () => false,
@@ -71,6 +88,7 @@ function harness(opts: { withList?: boolean } = {}): Harness {
     entryCount: () => state.entries.length,
     notices,
     toasts,
+    resetConversation,
     ctx: (args: string) =>
       ({
         args,
@@ -85,13 +103,13 @@ function harness(opts: { withList?: boolean } = {}): Harness {
   };
 }
 
-describe('/clear and the todo panel (I-2 user override)', () => {
+describe('/clear screen and the todo panel (I-2 user override)', () => {
   it('clears the transcript AND both halves of the list', async () => {
     const h = harness();
     expect(h.railMounted()).toBe(true);
     expect(h.entryCount()).toBe(1);
 
-    await runSlashInput(registry, '/clear', h.ctx);
+    await runSlashInput(registry, '/clear screen', h.ctx);
 
     expect(h.entryCount()).toBe(0);
     expect(h.railMounted()).toBe(false);
@@ -107,7 +125,7 @@ describe('/clear and the todo panel (I-2 user override)', () => {
     // list." guard of the kind `/todo clear` has.
     const h = harness({ withList: false });
 
-    await runSlashInput(registry, '/clear', h.ctx);
+    await runSlashInput(registry, '/clear screen', h.ctx);
 
     expect(h.railMounted()).toBe(false);
     expect(h.store.snapshot()).toBeNull();
@@ -117,12 +135,12 @@ describe('/clear and the todo panel (I-2 user override)', () => {
 
   it('clears the transcript even mid-run, unlike /todo clear', async () => {
     // `/todo clear` refuses while a run is in progress. Copying that guard here
-    // would leave `/clear` unable to clear even the transcript — a worse
+    // would leave `/clear screen` unable to clear even the transcript — a worse
     // regression than the bug it was meant to bound. The cleared list heals on
     // the model's next full-replacement write.
     const h = harness();
     const running = {
-      ...h.ctx(''),
+      ...h.ctx('screen'),
       controller: {
         clearTodos: () => h.store.clear('user'),
         getTodoSnapshot: () => h.store.snapshot(),
@@ -130,17 +148,32 @@ describe('/clear and the todo panel (I-2 user override)', () => {
       } as unknown as CommandContext['controller'],
     };
 
-    await runSlashInput(registry, '/clear', () => running as CommandContext);
+    await runSlashInput(registry, '/clear screen', () => running as CommandContext);
 
     expect(h.entryCount()).toBe(0);
     expect(h.railMounted()).toBe(false);
     expect(h.store.snapshot()).toBeNull();
     expect(h.notices).toEqual([]);
   });
+});
+
+describe('/clear drops both halves and archives (the conversation boundary)', () => {
+  it('clears the store through the ordered reset and says so', async () => {
+    const h = harness();
+
+    await runSlashInput(registry, '/clear', h.ctx);
+
+    // The STORE goes through the reset port, which is the point: the six-part
+    // boundary owns the `'reset'` reason, not this command.
+    expect(h.resetConversation).toHaveBeenCalledOnce();
+    expect(h.store.snapshot()).toBeNull();
+    expect(h.railMounted()).toBe(false);
+    expect(h.toasts).toEqual(['Started a new conversation.']);
+  });
 
   it('/reset still drops both, and still says so', async () => {
-    // The contrast that localizes the change: `/reset` clears `messages` as
-    // well, and remains the only command that does.
+    // The contrast that localizes the change: `/reset` is an alias of `/clear`
+    // now, so it does the same thing through the same implementation.
     const h = harness();
 
     await runSlashInput(registry, '/reset', h.ctx);

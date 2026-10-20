@@ -17,6 +17,7 @@ import {
   DEFAULT_UPDATE_CONFIG,
   type CliConfig,
   type TeamConfig,
+  DEFAULT_JOBS_CONFIG,
 } from '../config/schema.js';
 
 /**
@@ -67,6 +68,10 @@ function config(team: Partial<TeamConfig> = {}, idleTimeoutMs = 210_000): CliCon
     team: { ...DEFAULT_TEAM_CONFIG, ...team },
     todo: DEFAULT_TODO_CONFIG,
     bash: DEFAULT_BASH_CONFIG,
+    // The ELEVENTH nested section (long-task-jobs). `enabled: true` because a
+    // fixture that says nothing about jobs should behave like a default session;
+    // the subsystems each fixture is about are switched off individually above.
+    jobs: DEFAULT_JOBS_CONFIG,
     retry: DEFAULT_RETRY_CONFIG,
     compaction: { ...DEFAULT_COMPACTION_CONFIG, enabled: false },
     cwd: process.cwd(),
@@ -474,5 +479,136 @@ describe('the cadence tick (D-3)', () => {
     expect(outcome.runs[0]!.lastIntervention!.action).toBe('abandon');
     expect(outcome.runs[0]!.lastIntervention!.reasonHead).toBe('not worth it');
     expect(typeof outcome.runs[0]!.lastIntervention!.at).toBe('number');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-8 A'1 / A'2 - the two ceilings subagent-overseer-v2 missed: the WHOLE
+// DISPATCH wall clock and the TURN CAP. Under supervision neither is a kill;
+// the cadence ladder and one turn-cap inspection are what look at them.
+// ---------------------------------------------------------------------------
+
+describe("F-8 A'1: the dispatch ceiling under supervision", () => {
+  it('arms NO dispatch timer: a dispatch that outlives the ceiling finishes', async () => {
+    // The child deliberately outlasts the configured ceiling (120 ms > 40 ms).
+    // Under the removed behaviour `abortAll()` fired at 40 ms, every child
+    // settled `aborted`, and the lead re-dispatched - the user-visible
+    // "first block all failed, second block green" pair.
+    const h = harness(
+      [{ ms: 120, summary: 'outlasts the ceiling' }],
+      {},
+      { team: { dispatchTimeoutMs: 40 }, idleTimeoutMs: 500 },
+    );
+    const outcome = await h.runtime.dispatch(h.specs, h.specs.length);
+    expect(h.agents[0]!.aborted).toBe(false);
+    expect(outcome.aborted).toBe(false);
+    expect(outcome.runs[0]!.phase).toBe('done');
+    expect(outcome.runs[0]!.summary).toBe('outlasts the ceiling');
+  });
+
+  it('overseer:false keeps the LEGACY hard abortAll at the ceiling (regression)', async () => {
+    const h = harness(
+      [{ hang: true }],
+      {},
+      { team: { overseer: false, dispatchTimeoutMs: 50 }, idleTimeoutMs: 500 },
+    );
+    const outcome = await h.runtime.dispatch(h.specs, h.specs.length);
+    expect(h.digests).toHaveLength(0);
+    expect(outcome.aborted).toBe(true);
+    expect(outcome.runs[0]!.phase).toBe('aborted');
+  });
+});
+
+describe("F-8 A'2: the turn cap under supervision", () => {
+  it('is ONE inspection at the crossing turn, and the child keeps working', async () => {
+    const h = harness(
+      [{ turns: 5, ms: 25, summary: 'needed every turn' }],
+      { single: () => ({ action: 'wait', reason: 'cap reached, work continues' }) },
+      { team: { maxTurnsPerSubagent: 2 }, idleTimeoutMs: 500 },
+    );
+    const outcome = await h.runtime.dispatch(h.specs, h.specs.length);
+
+    // The child was NOT stopped at the cap: all five turns ran...
+    expect(h.agents[0]!.aborted).toBe(false);
+    expect(outcome.runs[0]!.turns).toBe(5);
+    expect(outcome.runs[0]!.truncated).toBeUndefined();
+    expect(outcome.runs[0]!.phase).toBe('done');
+    // ...the supervisor looked exactly ONCE, through the single-inspection
+    // channel, with the trigger named in the ledger AND in the digest.
+    const caps = (outcome.interventions ?? []).filter((i) => i.trigger === 'turncap');
+    expect(caps).toHaveLength(1);
+    expect(caps[0]!.action).toBe('wait');
+    expect(h.digests.length).toBeGreaterThanOrEqual(1);
+    expect(h.digests[0]).toContain('turn cap reached');
+    const events = h.events.filter((e) => e.type === 'overseer' && e.trigger === 'turncap');
+    expect(events).toHaveLength(1);
+  });
+
+  it('an abandon at the turn cap stops the child through the verdict path', async () => {
+    // The supervisor MAY stop a child at the cap - that is its decision, not
+    // the ceiling's. The stop funnels through the same overseer-verdict path
+    // every other trigger uses, so the reason reaches the report.
+    const h = harness(
+      [{ turns: 5, ms: 25, summary: 'circling' }],
+      { single: () => ({ action: 'abandon', reason: 'cap reached and circling' }) },
+      { team: { maxTurnsPerSubagent: 2 }, idleTimeoutMs: 500 },
+    );
+    const outcome = await h.runtime.dispatch(h.specs, h.specs.length);
+    expect(h.agents[0]!.aborted).toBe(true);
+    expect(outcome.runs[0]!.phase).toBe('failed');
+    expect(outcome.runs[0]!.error).toContain('overseer abandoned');
+    expect((outcome.interventions ?? []).some((i) => i.trigger === 'turncap')).toBe(true);
+  });
+
+  it('no supervisor wired: the LEGACY hard stop still marks the run truncated', async () => {
+    // The unsupervised branch, asserted here so both arms of the gate are
+    // pinned in one file: without a provider the cap is the old hard stop.
+    const agents: StubAgent[] = [];
+    const runtime = new TeamRuntime({
+      getConfig: () => config({ maxTurnsPerSubagent: 2 }, 500),
+      providerRegistry: {} as ProviderRegistry,
+      getCwd: () => process.cwd(),
+      getMode: () => 'build',
+      getApiKey: () => 'k',
+      agentFactory: () => {
+        const agent = new StubAgent({ turns: 5, ms: 10, summary: 'partial' });
+        agents.push(agent);
+        return agent;
+      },
+    });
+    const specs: SubagentSpec[] = [
+      { label: 'a1', description: 'job', prompt: 'do', readOnly: false },
+    ];
+    const outcome = await runtime.dispatch(specs, 1);
+    expect(agents[0]!.aborted).toBe(true);
+    expect(outcome.runs[0]!.truncated).toBe(true);
+    expect(outcome.runs[0]!.turns).toBeLessThan(5);
+  });
+});
+
+describe('F-8 boundary: both ceilings with the fast tier OFF (provider wired)', () => {
+  it('degrades to announced waiting and kills nothing', async () => {
+    const h = harness(
+      [{ turns: 4, ms: 80, summary: 'unassisted but unbounded' }],
+      { active: () => false },
+      {
+        team: { dispatchTimeoutMs: 40, maxTurnsPerSubagent: 2, overseerIntervalMs: 40 },
+        idleTimeoutMs: 500,
+      },
+    );
+    const outcome = await h.runtime.dispatch(h.specs, h.specs.length);
+
+    // Neither ceiling killed anything: the child ran every turn, outlasted
+    // the dispatch ceiling, and settled done...
+    expect(outcome.aborted).toBe(false);
+    expect(h.agents[0]!.aborted).toBe(false);
+    expect(outcome.runs[0]!.turns).toBe(4);
+    expect(outcome.runs[0]!.truncated).toBeUndefined();
+    expect(outcome.runs[0]!.phase).toBe('done');
+    // ...no provider call was ever made, so no turncap inspection is in the
+    // ledger - and the cadence tick announced its unassisted waits instead.
+    expect(h.digests).toHaveLength(0);
+    expect((outcome.interventions ?? []).filter((i) => i.trigger === 'turncap')).toHaveLength(0);
+    expect(outcome.overseerDegraded).toBe(true);
   });
 });

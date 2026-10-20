@@ -186,6 +186,11 @@ describe('SKILL_TOOL_FLOOR / HOST_TOOL_NAMES (D-G6 / D-G7 / P1-8)', () => {
       // reads a buffer, it cannot write to disk or run a shell, and blocking it
       // in plan mode would let the agent start a service it then could not read.
       'bash_output',
+      // `job_wait` / `job_list` are the same shape one feature later
+      // (long-task-jobs D-12): waiting is reading, and a job started in build
+      // mode has to stay reachable after the user switches to plan mode.
+      'job_wait',
+      'job_list',
     ]);
     for (const mutating of [
       'write_file',
@@ -228,12 +233,17 @@ describe('SKILL_TOOL_FLOOR / HOST_TOOL_NAMES (D-G6 / D-G7 / P1-8)', () => {
     // option precisely because THIS assertion compares `HOST_TOOL_NAMES` against
     // what the factory produces.
     const procTools = ['bash_output', 'bash_kill'].map(stub);
+    // Same argument, one feature later (long-task-jobs §5.2): `job_wait` /
+    // `job_list` also arrive through a factory option, and THIS assertion is the
+    // reason.
+    const jobTools = ['job_wait', 'job_list'].map(stub);
     const produced = createBuiltinTools({
       getCwd: () => dir,
       skillTools,
       planTools,
       todoTools,
       procTools,
+      jobTools,
       teamTools,
     }).map((t) => t.name);
     expect([...HOST_TOOL_NAMES].sort()).toEqual(produced.sort());

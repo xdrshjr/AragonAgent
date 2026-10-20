@@ -5,7 +5,8 @@ import stringWidth from 'string-width';
 import stripAnsi from 'strip-ansi';
 import { QueueOverlay, projectQueueRows, restoreQueueAnchor } from '../ui/overlays/QueueOverlay.js';
 import { getTheme } from '../ui/theme.js';
-import { OVERLAY_PAGE } from '../ui/use-wheel-routing.js';
+import { pageSize } from '../ui/layout/scroll.js';
+import { overlayBodyRows } from '../ui/layout/OverlayFrame.js';
 import type { PendingSteering } from '../agent/queued-messages.js';
 import { createTerminalHarness, settleTerminal } from './helpers/terminal-harness.js';
 
@@ -123,10 +124,13 @@ describe('queue overlay ownership and anchors in real Ink', () => {
       latestOffset = offset;
       // The owner follows App's controlled-overlay routing. QueueOverlay must
       // never install a competing key listener or overwrite this with a stale clamp.
+      // A PAGE IS A WINDOW, NOT A CONSTANT (defect 11): this stub follows
+      // `App`'s routing, which asks `overlayPageSize` for the step.
+      const page = pageSize(overlayBodyRows(10, cols));
       useInput((_input, key) => {
         if (!key.pageUp) return;
         pageEvents += 1;
-        setOffset((current) => Math.max(0, current - OVERLAY_PAGE));
+        setOffset((current) => Math.max(0, current - page));
       });
       return <Box width={cols} flexDirection="column">
         <QueueOverlay pending={items} cols={cols} maxRows={10} scrollOffset={offset}
@@ -153,20 +157,27 @@ describe('queue overlay ownership and anchors in real Ink', () => {
       terminal.input('\x1b[5~');
       await settleTerminal();
       expect(pageEvents).toBe(1);
-      expect(latestOffset).toBe(28 - OVERLAY_PAGE);
-      expect(terminal.lastFrame()).toContain('B06');
+      // A PAGE IS THE WINDOW, NOT A CONSTANT (defect 11). Five body rows minus the
+      // two rows of context `pageSize` keeps is three - the old constant eight
+      // turned more than one screen per press and skipped content between pages.
+      const page = pageSize(overlayBodyRows(10, 80));
+      expect(page).toBe(3);
+      expect(latestOffset).toBe(28 - page);
+      expect(terminal.lastFrame()).toContain('B11');
       expect(terminal.lastFrame()).not.toContain('C02');
 
       terminal.rerender(<Frame items={remaining} cols={80} />);
       await settleTerminal();
-      expect(latestOffset).toBe(7);
-      expect(terminal.lastFrame()).toContain('B06');
+      // The anchor survives the accepted item: re-clamped to the shorter content,
+      // still inside B, never jumping to the top.
+      expect(latestOffset).toBe(12);
+      expect(terminal.lastFrame()).toContain('B11');
       expect(terminal.lastFrame()).not.toContain('A00');
       terminal.input('\x1b[5~');
       await settleTerminal();
       expect(pageEvents).toBe(2);
-      expect(latestOffset).toBe(0);
-      expect(terminal.lastFrame()).toContain('B00');
+      expect(latestOffset).toBe(9);
+      expect(terminal.lastFrame()).toContain('B08');
 
       terminal.rerender(<Frame items={last} cols={80} />);
       await settleTerminal();

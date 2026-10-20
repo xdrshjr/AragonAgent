@@ -15,6 +15,18 @@
  * with the other transient rows — toast, composer, status bar — rather than
  * inside the scrolling transcript, where it would be interleaved with history
  * and scroll out of sight exactly when the user wants to watch it.
+ *
+ * IT IS THE ONLY LIVE SUBAGENT SURFACE (tui-subagent-double-roster A-2). The
+ * transcript's `team` card is suppressed while its dispatch is active
+ * (`team-status.ts::isLiveTeamCard`), so this roster is what the user watches
+ * during a dispatch and the card becomes the history afterwards. Native mode
+ * draws it as the BOTTOM slot of the band's left column (`ScrollbackShell`),
+ * i.e. directly above the composer; full-screen mode draws it in the viewport
+ * footer, which is already above the composer.
+ *
+ * EVERY PHASE -> GLYPH / COLOUR / COUNT DECISION COMES FROM `team-status.ts`.
+ * The local copies this file used to carry are gone on purpose: the transcript
+ * card kept a second copy and the two disagreed about what "running" looks like.
  */
 
 import React from 'react';
@@ -23,6 +35,15 @@ import Spinner from 'ink-spinner';
 import type { Theme } from './theme.js';
 import type { TermCapabilities } from './capabilities.js';
 import { pickGlyphs } from './glyphs.js';
+import {
+  childElapsedMs,
+  childStatus,
+  isRunningStatus,
+  rosterCounts,
+  rosterHeadline,
+  statusColor,
+  statusMarkerCell,
+} from './team-status.js';
 import { formatDuration } from '../agent/usage.js';
 import { describeToolActivity, sanitizeActivity } from '../team/activity.js';
 import { TEAM_LIMITS } from '../team/limits.js';
@@ -45,22 +66,6 @@ export interface TeamPanelProps {
   /** Injectable clock so the panel test does not depend on wall time. */
   now?: number;
   layout?: TeamPanelLayout;
-}
-
-function isRunning(run: SubagentRun): boolean {
-  return run.phase === 'starting' || run.phase === 'thinking' || run.phase === 'tool' ||
-    run.phase === 'waiting';
-}
-
-function isSettled(run: SubagentRun): boolean {
-  return run.phase === 'done' || run.phase === 'failed' || run.phase === 'aborted';
-}
-
-function statusColor(run: SubagentRun, theme: Theme): string | undefined {
-  if (run.phase === 'failed' || run.phase === 'aborted') return theme.toolError;
-  if (run.phase === 'done') return theme.toolDone;
-  if (isRunning(run)) return theme.toolRunning;
-  return theme.muted;
 }
 
 /**
@@ -224,8 +229,10 @@ export function TeamPanel({
   if (projection.rowCount === 0) return null;
   const glyphs = pickGlyphs(caps);
   const at = now ?? Date.now();
-  const running = snapshot.runs.filter(isRunning).length;
-  const done = snapshot.runs.filter(isSettled).length;
+  // ONE COUNTING AUTHORITY (A-1): `queued` used to fall between `isRunning` and
+  // `isSettled`, so a fresh dispatch read `0 running  0 done` above rows that each
+  // said `queued`.
+  const counts = rosterCounts(snapshot.runs);
   const elapsed = formatDuration(Math.max(0, at - snapshot.startedAt));
 
   const header = (
@@ -233,7 +240,7 @@ export function TeamPanel({
       <Text wrap="truncate" color={theme.accent} bold>
         {glyphs.teamAgent} team{'  '}
         <Text color={theme.muted}>
-          {running} running {glyphs.midDot} {done} done {glyphs.midDot} {elapsed}
+          {rosterHeadline(counts, glyphs, cols)} {glyphs.midDot} {elapsed}
         </Text>
       </Text>
       {snapshot.messageCount > 0 && (
@@ -260,17 +267,18 @@ export function TeamPanel({
     <Box flexDirection="column" flexShrink={0}>
       {header}
       {visible.map((run) => {
-        const color = statusColor(run, theme);
+        const status = childStatus(run);
+        const color = statusColor(status, theme);
         // One spinner per RUNNING row, and the row cap is 5 precisely because
         // five is the documented maximum number of simultaneous spinners. Both
         // `reducedMotion` and a non-Unicode terminal fall back to the same
         // static marker, exactly as `AssistantEntry` and `ToolCard` already do.
-        const animate = isRunning(run) && !reducedMotion && caps.unicode;
+        const animate = isRunningStatus(status) && !reducedMotion && caps.unicode;
         return (
           <Box key={run.label} flexDirection="row">
             <Text color={color}>
               {' '}
-              {animate ? <Spinner type="dots" /> : marker(run, glyphs)}{' '}
+              {animate ? <Spinner type="dots" /> : statusMarkerCell(status, glyphs)}{' '}
             </Text>
             <Text color={theme.primary}>
               {run.label.padEnd(8).slice(0, 8)}
@@ -304,7 +312,7 @@ export function TeamPanel({
             </Box>
             <Text wrap="truncate" color={theme.muted}>
               {'  '}
-              {run.startedAt ? formatDuration(Math.max(0, (run.endedAt ?? at) - run.startedAt)) : ''}
+              {run.startedAt ? formatDuration(childElapsedMs(run, at)) : ''}
             </Text>
           </Box>
         );
@@ -335,11 +343,4 @@ export function TeamPanel({
       )}
     </Box>
   );
-}
-
-function marker(run: SubagentRun, glyphs: ReturnType<typeof pickGlyphs>): string {
-  if (run.phase === 'done') return glyphs.toolDone;
-  if (run.phase === 'failed' || run.phase === 'aborted') return glyphs.toolError;
-  if (run.phase === 'queued') return glyphs.toolPending;
-  return glyphs.spinnerStill;
 }

@@ -34,7 +34,9 @@ import {
 } from '../todo/follow-through.js';
 import type { ExecEmitter } from './emitter.js';
 import type { FastSnapshot } from '../fast/types.js';
-import type { ExecEvent, ExecStopReason } from './events.js';
+import type { ExecEvent, ExecJobEvent, ExecStopReason } from './events.js';
+import { EXEC_SCHEMA_VERSION } from './events.js';
+import type { ProcEvent, ServiceSnapshot } from '../proc/types.js';
 import { ExecProgressReporter } from './progress-reporter.js';
 import type { CompactionEvent } from '../compaction/types.js';
 
@@ -60,6 +62,14 @@ export interface ExecRunnerController extends HeadlessController {
    * it simply emits no `fast_tier` events.
    */
   fastSnapshot?(): FastSnapshot | null;
+  /**
+   * The CLI-local process stream, when this session supervises processes.
+   *
+   * OPTIONAL AND CALLED WITH `?.()`, exactly like the three optional streams
+   * above: this interface is minimal so a test can satisfy it with an object
+   * literal, and a host with no supervisor has nothing to report.
+   */
+  subscribeProc?(listener: (event: ProcEvent) => void): () => void;
 }
 
 /** Where the caller's messages come from. One turn, or an NDJSON stdin stream. */
@@ -137,6 +147,10 @@ export class ExecRunner {
 
   private controller: ExecRunnerController | null = null;
   private unsubscribers: (() => void)[] = [];
+  /** Per-job progress throttle state: the last text emitted, and when. */
+  private readonly jobProgressAt = new Map<string, { text: string; at: number }>();
+  /** Per-job `lastOutputAt` at which `stalled` was last reported. */
+  private readonly jobStalledAt = new Map<string, number>();
 
   private turns = 0;
   private readonly usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
@@ -308,7 +322,81 @@ export class ExecRunner {
       });
     });
     if (compaction) this.unsubscribers.push(compaction);
+    // Background jobs (long-task-jobs §4.10). SUBSCRIBED HERE, IN `attach()`, NOT
+    // IN `start()`: the follow-through chain enters `run()` more than once, and a
+    // subscription made there would be re-made every time and never released —
+    // one leaked listener per turn for the life of the process.
+    //
+    // The four-stream shape is deliberate: `?:` optional call, `unsubscribers`
+    // push, `detach()` releases. Identical to `subscribeTeam` / `subscribeTodos` /
+    // `subscribeFast` / `subscribeCompaction`, so a host without a supervisor
+    // simply emits nothing.
+    const proc = controller.subscribeProc?.((event) => this.onProcEvent(event));
+    if (proc) this.unsubscribers.push(proc);
     this.installTerminator();
+  }
+
+  /**
+   * Map a supervisor event onto the `job` channel.
+   *
+   * THROTTLING IS THE WHOLE DISCIPLINE HERE. `output` is already coalesced to
+   * <=10 Hz inside the supervisor, which is still far too fast for a machine
+   * consumer reading a 40-minute training run; `progress` is therefore emitted
+   * only when the extracted TEXT CHANGES and never more than once a second. The
+   * other three subtypes are one-shot per job, so they pass straight through.
+   */
+  private onProcEvent(event: ProcEvent): void {
+    const job = event.service;
+    if (event.type === 'started') {
+      this.emitJob(job, 'started');
+      return;
+    }
+    if (event.type === 'exited' || event.type === 'stopped') {
+      this.jobProgressAt.delete(job.id);
+      this.jobStalledAt.delete(job.id);
+      this.emitJob(job, 'exited');
+      return;
+    }
+    // `ready` is deliberately NOT mapped onto a second `started`: a service emits
+    // both, and a consumer that counted `started` events would see two. The
+    // readiness fact is already carried by `status` on any later event, and the
+    // four subtypes this channel publishes are one-shot per job.
+    if (event.type !== 'output') return;
+    if (job.stalled === true) {
+      if (this.jobStalledAt.get(job.id) === job.lastOutputAt) return;
+      this.jobStalledAt.set(job.id, job.lastOutputAt);
+      this.emitJob(job, 'stalled');
+      return;
+    }
+    const text = job.progress?.text;
+    if (text === undefined) return;
+    if (this.jobProgressAt.get(job.id)?.text === text) return;
+    const now = Date.now();
+    const last = this.jobProgressAt.get(job.id)?.at ?? 0;
+    // ONE SECOND IS THE FLOOR, and the first change of a job is always emitted
+    // (no previous entry), so a consumer sees the initial figure immediately.
+    if (last !== 0 && now - last < 1000) return;
+    this.jobProgressAt.set(job.id, { text, at: now });
+    this.emitJob(job, 'progress', text);
+  }
+
+  private emitJob(
+    job: ServiceSnapshot,
+    subtype: ExecJobEvent['subtype'],
+    progress?: string,
+  ): void {
+    this.emit({
+      type: 'job',
+      schemaVersion: EXEC_SCHEMA_VERSION,
+      sessionId: this.sessionId,
+      subtype,
+      jobId: job.id,
+      kind: job.kind,
+      status: job.status,
+      elapsedMs: Math.max(0, (job.endedAt ?? Date.now()) - job.startedAt),
+      ...(progress !== undefined ? { progress } : {}),
+      ...(subtype === 'exited' ? { exitCode: job.exitCode } : {}),
+    });
   }
 
   /**

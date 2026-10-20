@@ -42,7 +42,7 @@ import {
 import { looksLongRunning } from '../proc/classify.js';
 import { killTree } from '../proc/kill-tree.js';
 import { PROC_LIMITS } from '../proc/limits.js';
-import type { ProcSupervisorPort, ServiceSnapshot } from '../proc/types.js';
+import { isTerminalStatus, type JobKind, type ProcSupervisorPort, type ServiceSnapshot } from '../proc/types.js';
 import type { ToolDeps } from './fs-tools.js';
 
 /**
@@ -61,6 +61,19 @@ const BACKGROUND_DESCRIPTION =
   '`nohup` or `screen` to detach a command yourself; the runtime supervises ' +
   'background commands, and a self-detached process cannot be reported on or ' +
   'stopped.';
+
+/**
+ * The task half, appended only when the job tools are registered.
+ *
+ * APPENDED CONDITIONALLY FOR THE SAME REASON AS THE BLOCK ABOVE: with
+ * `jobs.enabled: false` this sentence would describe a `task` id and a
+ * `job_wait` the model does not have, which is worse than saying nothing.
+ */
+const TASK_DESCRIPTION =
+  ' For a command that DOES finish but takes far longer than one tool call - a ' +
+  'training run, a model download, a release build - `background: true` returns a ' +
+  'task id (`t1`, `t2`) instead of a service id, and you wait for it with ' +
+  '`job_wait` instead of polling `bash_output`.';
 
 /**
  * The settle window used when a supervisor is supplied WITHOUT one.
@@ -100,6 +113,17 @@ export interface BashToolOptions {
    * `/bg`, no event and nothing in the result saying so.
    */
   interactive?: boolean;
+  /**
+   * `cfg.jobs.enabled`, read LIVE: whether `job_wait` / `job_list` exist in this
+   * session (long-task-jobs §4.3).
+   *
+   * TWO DECISIONS DEPEND ON IT AND NEITHER IS COSMETIC: the tool description only
+   * advertises tasks when the tools that manage them are registered, and a
+   * `[note]` telling the model to call `job_wait` is only printed when
+   * `job_wait` is callable. A workaround the model cannot execute reads as a
+   * broken tool.
+   */
+  jobsAvailable?: () => boolean;
 }
 
 /**
@@ -114,24 +138,67 @@ function trackForeground(
   return supervisor ? supervisor.trackForeground(pid) : () => {};
 }
 
-/** Render a background launch's result block for the model (§3.5). */
+/**
+ * The sentence appended to a timed-out `bash` result when backgrounding is
+ * available.
+ *
+ * THE HIGHEST-VALUE LINE IN THIS FEATURE. Today a long job dies with
+ * `Command timed out after 120000ms` and nothing else: no pid, no handle, no way
+ * to continue - so the model reaches for a way to detach the process by hand,
+ * which is what produced the self-detached, unreportable children this runtime
+ * spent a whole feature removing. Naming the exact re-run command turns that into
+ * a plan the model can execute with tools it already has.
+ */
+function backgroundRetryNote(command: string, cwd: string): string {
+  return [
+    '[note] this command does not finish within the tool ceiling. If it is a long',
+    'job, re-run it in the background:',
+    `  bash({ command: ${JSON.stringify(command)}, background: true, cwd: ${JSON.stringify(cwd)} })`,
+    'then wait with job_wait({ job: "t1" }).',
+  ].join('\n');
+}
+
+/**
+ * Render a background launch's result block for the model (§3.5, long-task-jobs
+ * §4.2.1).
+ *
+ * THE STATUS WORDS TELL THE TRUTH ABOUT THE KIND. A `task` is `running` from the
+ * spawn, so "still alive, nothing to connect to (a watcher, most likely)" would
+ * describe a training run as if it were a watcher; and a job that WE stopped is
+ * neither `starting` nor "still coming up". Both sentences cost the model a
+ * wrong decision rather than a word.
+ */
 function renderServiceResult(
   service: ServiceSnapshot,
-  opts: { ephemeral: boolean },
+  opts: { ephemeral: boolean; jobsAvailable: boolean },
 ): ToolResult {
+  const noun = service.kind === 'task' ? 'task' : 'service';
   const lines: string[] = [`$ ${service.command}`];
-  lines.push(`[background] service ${service.id} started (pid ${service.pid ?? '?'})`);
+  lines.push(`[background] ${noun} ${service.id} started (pid ${service.pid ?? '?'})`);
 
   const elapsed = ((service.readyAt ?? service.endedAt ?? Date.now()) - service.startedAt) / 1000;
+  let terminal = false;
   if (service.status === 'ready') {
     const how = service.detectedBy === 'probe' ? 'port probe' : 'output';
     const where = service.url ?? (service.port ? `port ${service.port}` : '');
     lines.push(`[ready] ${where}  (detected from ${how} after ${elapsed.toFixed(1)}s)`);
   } else if (service.status === 'running') {
-    lines.push(`[running] still alive, nothing to connect to (a watcher, most likely)`);
+    lines.push(
+      service.kind === 'task'
+        ? `[running] still running after ${elapsed.toFixed(1)}s - it has not finished yet`
+        : '[running] still alive, nothing to connect to (a watcher, most likely)',
+    );
   } else if (service.status === 'exited' || service.status === 'failed') {
     const code = service.exitCode === null ? `signal ${service.signal}` : `code ${service.exitCode}`;
     lines.push(`[exited] ${code} after ${elapsed.toFixed(1)}s`);
+    terminal = true;
+  } else if (service.status === 'stopped') {
+    // BEFORE long-task-jobs this fell into the `else` below and told the model
+    // "[starting] not ready yet - still coming up" about a job that had already
+    // been killed or reaped. That is a false statement in the one field the model
+    // reads first.
+    lines.push(`[stopped] before it finished, after ${elapsed.toFixed(1)}s`);
+    terminal = true;
   } else {
     lines.push(`[starting] not ready yet after ${elapsed.toFixed(1)}s - still coming up`);
   }
@@ -139,6 +206,8 @@ function renderServiceResult(
   if (service.portPreoccupied && service.port !== undefined) {
     lines.push(`[note] port ${service.port} was already in use before start`);
   }
+
+  if (service.progress) lines.push(`[progress] ${service.progress.text}`);
 
   if (service.rows.length > 0) {
     lines.push('[log tail]');
@@ -148,7 +217,16 @@ function renderServiceResult(
   if (opts.ephemeral) {
     // D-15 / P1-8: headless has no user who could keep it alive, and saying so
     // is the difference between a surprise and a documented behaviour.
-    lines.push('[note] this service will be stopped when the run ends.');
+    lines.push(`[note] this ${noun} will be stopped when the run ends.`);
+  }
+
+  // A FINISHED JOB EARNS NO ADVICE TO WAIT FOR IT (AC-5). Suggesting `job_wait`
+  // for something that already exited is how a model learns to poll.
+  if (!terminal && opts.jobsAvailable && service.kind === 'task') {
+    lines.push(
+      `[note] wait for it with job_wait({ job: "${service.id}" }) - a bounded wait ` +
+        'returns its status and only the output since your cursor.',
+    );
   }
 
   lines.push(
@@ -170,6 +248,7 @@ function renderServiceResult(
 export function makeBash(deps: ToolDeps, options: BashToolOptions = {}): AgentTool {
   const supervisor = options.supervisor;
   const backgroundAvailable = supervisor !== undefined;
+  const taskAvailable = backgroundAvailable && options.jobsAvailable?.() === true;
 
   return defineTool({
     name: 'bash',
@@ -179,7 +258,8 @@ export function makeBash(deps: ToolDeps, options: BashToolOptions = {}): AgentTo
       'stdout+stderr and exit code. `timeout` (ms) may only shrink within the ' +
       'agent tool-timeout ceiling; `cwd` defaults to the working directory. ' +
       'Emit shell syntax compatible with the OS/shell stated in the system prompt.' +
-      (backgroundAvailable ? BACKGROUND_DESCRIPTION : ''),
+      (backgroundAvailable ? BACKGROUND_DESCRIPTION : '') +
+      (taskAvailable ? TASK_DESCRIPTION : ''),
     parameters: {
       type: 'object',
       properties: {
@@ -221,17 +301,24 @@ export function makeBash(deps: ToolDeps, options: BashToolOptions = {}): AgentTo
       // `false` -> foreground, always. The escape hatch; nothing overrides it.
       // absent  -> the classifier, and only where a card can be rendered.
       if (supervisor && params.background !== false) {
+        const longRunning = looksLongRunning(command);
         const auto =
           options.interactive !== false &&
           options.autoBackground?.() !== false &&
-          looksLongRunning(command);
+          longRunning;
         if (params.background === true || auto) {
+          // THE KIND IS DECIDED HERE, ONCE (long-task-jobs §4.3). An explicit
+          // `background: true` on a command the classifier does not recognise is
+          // a TASK; the automatic path can only ever produce a service, because
+          // the classifier firing is what set it in motion.
           return runBackground(supervisor, {
             command,
             cwd,
             toolCallId: id,
+            kind: longRunning ? 'service' : 'task',
             settleMs: options.startupSettleMs?.() ?? FALLBACK_STARTUP_SETTLE_MS,
             ephemeral: options.interactive === false,
+            jobsAvailable: taskAvailable,
           });
         }
       }
@@ -294,8 +381,15 @@ export function makeBash(deps: ToolDeps, options: BashToolOptions = {}): AgentTo
         }): ToolResult => {
           const body = captured();
           if (killReason === 'timeout') {
-            // BYTE-IDENTICAL TO THE PRE-CHANGE BUILD for the `timeout` param.
-            return errorResult(`Command timed out after ${params.timeout}ms.\n${body}`);
+            // BYTE-IDENTICAL TO THE PRE-CHANGE BUILD when background launches are
+            // unavailable; with them available the note below is the single
+            // highest-value sentence in this feature, because it is what turns
+            // "the tool ceiling killed my training run" into "re-run it in the
+            // background, then wait for it".
+            const timedOut = `Command timed out after ${params.timeout}ms.\n${body}`;
+            return errorResult(
+              backgroundAvailable ? `${timedOut}\n${backgroundRetryNote(command, cwd)}` : timedOut,
+            );
           }
           if (killReason === 'abort') {
             // P1-5. The captured output is the evidence the model needs, and
@@ -459,17 +553,20 @@ async function runBackground(
     command: string;
     cwd: string;
     toolCallId: string;
+    kind: JobKind;
     settleMs: number;
     ephemeral: boolean;
+    jobsAvailable: boolean;
   },
 ): Promise<ToolResult> {
   const started = await supervisor.start({
     command: args.command,
     cwd: args.cwd,
     toolCallId: args.toolCallId,
+    kind: args.kind,
   });
   if (!started.ok || !started.service) {
-    return errorResult(started.error ?? 'Could not start the background service.');
+    return errorResult(started.error ?? 'Could not start the background job.');
   }
   const id = started.service.id;
 
@@ -490,11 +587,22 @@ async function runBackground(
     });
     const timer = setTimeout(() => finish(supervisor.get(id) ?? started.service!), args.settleMs);
     timer.unref?.();
-    // A service that finished between `start()` and this subscription (a crash
-    // inside 1 ms is not hypothetical) would otherwise wait out the whole window.
+    // A job that finished between `start()` and this subscription (a crash inside
+    // 1 ms is not hypothetical) would otherwise wait out the whole window.
+    //
+    // THE PREDICATE IS TERMINAL, NOT `!== 'starting'` (long-task-jobs RV-P0-1 /
+    // I-12). For a service the two happened to agree, because `starting` was its
+    // only non-terminal state on this path. A `task` is `running` from the spawn,
+    // so `!== 'starting'` was true on the FIRST tick: `bash` returned `[running]`
+    // in ~0 ms, the settle window never applied, and a training script that
+    // crashed in 300 ms was reported as still running with no output and no exit
+    // code - the exact defect this feature exists to remove.
     const now = supervisor.get(id);
-    if (now && now.status !== 'starting') finish(now);
+    if (now && isTerminalStatus(now.status)) finish(now);
   });
 
-  return renderServiceResult(settled, { ephemeral: args.ephemeral });
+  return renderServiceResult(settled, {
+    ephemeral: args.ephemeral,
+    jobsAvailable: args.jobsAvailable,
+  });
 }

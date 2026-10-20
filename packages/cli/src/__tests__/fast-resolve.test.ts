@@ -20,6 +20,7 @@ import {
   DEFAULT_BASH_CONFIG,
   type CliConfig,
   type FastConfig,
+  DEFAULT_JOBS_CONFIG,
 } from '../config/schema.js';
 import { describeFastTierProblem, resolveFastTier } from '../fast/resolve.js';
 
@@ -60,6 +61,10 @@ function config(fast: Partial<FastConfig> = {}, over: Partial<CliConfig> = {}): 
     team: DEFAULT_TEAM_CONFIG,
     todo: DEFAULT_TODO_CONFIG,
     bash: DEFAULT_BASH_CONFIG,
+    // The ELEVENTH nested section (long-task-jobs). `enabled: true` because a
+    // fixture that says nothing about jobs should behave like a default session;
+    // the subsystems each fixture is about are switched off individually above.
+    jobs: DEFAULT_JOBS_CONFIG,
     retry: DEFAULT_RETRY_CONFIG,
     // The NINTH nested section. `enabled: false` on purpose: these fixtures
     // are about other subsystems, and the same `enabled: false` appears above
@@ -188,7 +193,7 @@ describe('配置方案独立地址和角色凭据', () => {
       baseUrl: 'https://main.example/v1',
       modelProfiles: { version: 1, mainId: null, fastId: 'fast-profile', entries: [{
         id: 'fast-profile', name: '快速配置', provider: 'anthropic', model: 'haiku',
-        baseUrl: null, apiKey: 'fast-key',
+        baseUrl: null, apiKey: 'fast-key', contextWindow: null,
       }] },
     });
   }

@@ -32,6 +32,8 @@ import { makeBash } from './bash-tool.js';
 // supervisor is a PORT here, and a value import would put its implementation in
 // the graph of every TUI, headless and subagent build for a shape that is erased.
 import type { ProcSupervisorPort } from '../proc/types.js';
+import type { JobNotice } from '../proc/notices.js';
+import { withJobNoticeTail } from './job-tools.js';
 
 export interface ConfirmRequest {
   tool: string;
@@ -201,6 +203,27 @@ export interface BuiltinToolsOptions {
    */
   procTools?: AgentTool[];
   /**
+   * `job_wait` / `job_list`, appended verbatim (long-task-jobs §4.3 / D-10).
+   *
+   * THROUGH THE FACTORY FOR THE REASON `teamTools`, `todoTools` AND `procTools`
+   * EACH RECORD IN CAPITALS: `tools.test.ts::C7` asserts `HOST_TOOL_NAMES` equals
+   * what this factory PRODUCES, so appending them in `AgentController` after the
+   * factory returned would turn that test red with a message about two lists of
+   * names. An empty array (`jobs.enabled: false`) leaves the array byte-identical
+   * to the pre-feature build.
+   */
+  jobTools?: AgentTool[];
+  /**
+   * The completion-notice queue's read side, for the PULL channel (§4.6).
+   *
+   * A PORT, NOT THE CLASS: this file may not import `proc/notices.ts` at runtime
+   * (the same rule `procs` follows), and all the wrapper needs is "take
+   * everything and give it to me". Omitting it leaves every tool object
+   * untouched, provable by identity, which is how `-p`, the TUI and every
+   * subagent are shown to be unchanged.
+   */
+  jobNotices?: { drain(): JobNotice[] };
+  /**
    * `cfg.bash.autoBackground`, READ AT CALL TIME.
    *
    * Never cached: `aragon config set bash.autoBackground false` takes effect in
@@ -312,6 +335,14 @@ export const SKILL_TOOL_FLOOR = [
   // membership test. Blocking it in plan mode would also let the agent start a
   // service it then could not read — the dead end the floor exists to prevent.
   'bash_output',
+  // `job_wait` / `job_list` join the FLOOR for the same reason, one feature
+  // later (long-task-jobs D-12). Waiting is READING: neither can start, stop or
+  // mutate anything, and plan mode's whole purpose - read the code, ask, then
+  // propose - is served by being able to wait for a job that was already
+  // running. Blocking them would also make a running job unreachable from the
+  // mode the user is actually in.
+  'job_wait',
+  'job_list',
 ] as const;
 
 /**
@@ -380,6 +411,12 @@ export const HOST_TOOL_NAMES = [
   // `skills doctor` already has with `--no-skills`.
   'bash_output',
   'bash_kill',
+  // The two job names join the SUPERSET for exactly the reason the two above
+  // did: a skill's `allowed-tools: [job_wait]` must be answerable by `doctor`
+  // even in a session where `jobs.enabled` is false and neither is registered
+  // (long-task-jobs §4.3).
+  'job_wait',
+  'job_list',
   // `team_send` / `team_wait` are DELIBERATELY ABSENT (P2-5). This constant
   // answers "can a skill's `allowed-tools` declaration ever take effect?", and
   // those two are never registered on a lead — so a skill naming them genuinely
@@ -520,6 +557,10 @@ export function createBuiltinTools(options: BuiltinToolsOptions): AgentTool[] {
             ...(options.autoBackground ? { autoBackground: options.autoBackground } : {}),
             ...(options.startupSettleMs ? { startupSettleMs: options.startupSettleMs } : {}),
             ...(options.interactive !== undefined ? { interactive: options.interactive } : {}),
+            // `jobs.enabled`, spread conditionally: with the job tools off the
+            // description and the `[note]` are the ones the pre-feature build
+            // produced, byte for byte (I-3).
+            ...(options.jobTools && options.jobTools.length > 0 ? { jobsAvailable: () => true } : {}),
           }
         : {},
     ),
@@ -548,6 +589,13 @@ export function createBuiltinTools(options: BuiltinToolsOptions): AgentTool[] {
   // `HOST_TOOL_NAMES` changes by two insertions rather than a reshuffle.
   if (options.procTools && options.procTools.length > 0) {
     tools = [...tools, ...options.procTools];
+  }
+
+  // AFTER `procTools` (long-task-jobs §5.2): the job tools are the third group of
+  // server-side handles and belong with the two they extend. A lead's `task` is
+  // still last.
+  if (options.jobTools && options.jobTools.length > 0) {
+    tools = [...tools, ...options.jobTools];
   }
 
   // BEFORE both wrappers, so the lead's `task` is covered by the plan gate and
@@ -616,7 +664,23 @@ export function createBuiltinTools(options: BuiltinToolsOptions): AgentTool[] {
   //
   // The plan gate is applied LAST, which makes it OUTERMOST at call time: it
   // needs no I/O and no state, so it must not sit behind a human wait.
-  if (!options.agentMode) return tools;
+  //
+  // THE NOTICE TAIL IS THE ONE EXCEPTION TO "both tail returns are identical",
+  // and it is deliberately the OUTERMOST wrapper of all (long-task-jobs §4.6):
+  // whatever a tool did - succeeded, errored, or was refused by the plan gate -
+  // its result is a delivery opportunity for a `<job_notices>` block, so the
+  // wrapper has to run after every other decision has been made.
+  //
+  // `withJobNotices` RETURNS ITS ARGUMENT when no queue was supplied, so the
+  // identity claim the `AC-G17` tests make about `--no-skills` and about every
+  // headless and subagent toolset survives verbatim.
+  const withJobNotices = (list: AgentTool[]): AgentTool[] => {
+    const queue = options.jobNotices;
+    if (!queue) return list;
+    return list.map((tool) => withJobNoticeTail(tool, () => queue.drain()));
+  };
+
+  if (!options.agentMode) return withJobNotices(tools);
   const getMode = options.agentMode;
-  return tools.map((t) => withPlanModeGate(t, getMode));
+  return withJobNotices(tools.map((t) => withPlanModeGate(t, getMode)));
 }

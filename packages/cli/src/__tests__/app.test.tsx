@@ -103,10 +103,15 @@ import {
   DEFAULT_BASH_CONFIG,
   type CliConfig,
   type TodoConfig,
+  DEFAULT_JOBS_CONFIG,
 } from '../config/schema.js';
 import type { SkillService } from '../skills/service.js';
 import type { HeadlessController } from '../agent/headless.js';
 import type { AgentMode } from '../agent/agent-mode.js';
+// TYPE-ONLY: the Ctrl+L tests below need the SHAPE of the bridge and the
+// identity, never the writer they are normally built from.
+import type { SessionBridge } from '../ui/App.js';
+import type { SessionIdentity } from '../session/startup-session.js';
 import type { TeamEvent, TeamSnapshot } from '../team/types.js';
 import type { TodoEvent, TodoSnapshot } from '../todo/types.js';
 import { normalizePlan, normalizeQuestions } from '../tools/human-input.js';
@@ -142,6 +147,9 @@ const ESC = '\u001B';
  *  brand text have to look at the plain glyphs. */
 // eslint-disable-next-line no-control-regex
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+
+/** The identity every Ctrl+L test branches from. */
+const SESSION: SessionIdentity = { id: 'a4k2m9', kind: 'fresh' };
 
 const MODEL: ModelInfo = {
   id: 'm',
@@ -202,6 +210,10 @@ const CONFIG: CliConfig = {
   // fixture without it crashes the first full-screen frame.
   todo: DEFAULT_TODO_CONFIG,
   bash: DEFAULT_BASH_CONFIG,
+  // The ELEVENTH nested section (long-task-jobs). `enabled: true` because a
+  // fixture that says nothing about jobs should behave like a default session;
+  // the subsystems each fixture is about are switched off individually above.
+  jobs: DEFAULT_JOBS_CONFIG,
   retry: DEFAULT_RETRY_CONFIG,
   // The NINTH nested section, and it is read at CONSTRUCTION by
   // `AgentController` — so a fixture without it crashes before the first
@@ -395,6 +407,42 @@ class FakeController {
   }
   /** Rung two of the Esc ladder; counted so the ladder tests can assert on it. */
   forceStopCalls = 0;
+  /**
+   * The compaction gate the queue drain asks about (B-6). `App` calls
+   * `isCompactionBusy()` WITHOUT optional chaining inside `drainCompactionQueue`,
+   * and a conversation switch now drains on its way out of every `/clear` /
+   * `/reset` - so a stub without these members turns each of those commands into
+   * an unhandled rejection AFTER the test that ran it has already passed.
+   */
+  isCompactionBusy(): boolean {
+    return false;
+  }
+  hasPendingUserMessages(): boolean {
+    return false;
+  }
+  areModelSettingsBlocked(): boolean {
+    return false;
+  }
+  cancelCompaction(): Promise<void> {
+    return Promise.resolve();
+  }
+  /**
+   * `/clear`'s port (clear-command-context-reset). `/reset` is an alias of
+   * `/clear`, so BOTH slash commands now reach the controller through this method
+   * instead of calling `clearMessages` / `clearAllQueues` directly - and a stub
+   * without it turns every reset in this suite into
+   * `resetConversation is not a function`, surfaced to the user as
+   * "Command failed".
+   */
+  resetConversationCalls = 0;
+  resetConversation(): Promise<{
+    ok: true; interrupted: boolean; archivedPath: null; messagesCleared: number;
+  }> {
+    this.resetConversationCalls += 1;
+    return Promise.resolve({
+      ok: true, interrupted: false, archivedPath: null, messagesCleared: 0,
+    });
+  }
   runGen = 0;
   get runGeneration(): number {
     return this.runGen;
@@ -525,10 +573,15 @@ function mount(
   fc: FakeController,
   extra: {
     initialPrompt?: string;
-        humanInputBridge?: HumanInputBridge;
+    humanInputBridge?: HumanInputBridge;
     updateBridge?: UpdateBridge;
+    session?: SessionIdentity;
+    sessionBridge?: SessionBridge;
   } = {},
 ) {
+  // The session props are OPTIONAL and absent in every pre-existing call, which is
+  // what keeps those frames byte-identical (I-6). Only the Ctrl+L tests below pass
+  // them, because `/branch` needs both an identity and the port.
   return render(
     <App
       controller={fc as unknown as AgentController}
@@ -536,6 +589,8 @@ function mount(
       initialPrompt={extra.initialPrompt}
       humanInputBridge={extra.humanInputBridge}
       updateBridge={extra.updateBridge}
+      session={extra.session}
+      sessionBridge={extra.sessionBridge}
     />,
   );
 }
@@ -636,21 +691,40 @@ describe('App (interactive)', () => {
     unmount();
   });
 
-  it.each(['/reset', '/resume missing.json'])('refuses %s during a live run', async (command) => {
+  it('refuses /resume during a live run', async () => {
+    // THE HALF OF B-3 THAT SURVIVES (P1-7 / C-4). `/resume` replaces the whole
+    // history from a FILE, which is a session-lock question rather than an
+    // interrupt one, so it keeps refusing mid-run. This assertion is the only
+    // place that rule is still visible - do not delete it along with the `/reset`
+    // half it used to share an `it.each` with.
     const fc = new FakeController();
     Object.assign(fc, { clearMessages: vi.fn(), clearAllQueues: vi.fn() });
     fc.onPrompt = () => new Promise<void>(() => { fc.emit({ type: 'agent_start' }); });
     const { stdin, lastFrame, unmount } = mount(fc, { initialPrompt: 'go' });
     await delay(40);
-    stdin.write(command); await delay(40);
+    stdin.write('/resume missing.json'); await delay(40);
     stdin.write('\r'); await delay(40);
     expect(lastFrame()).toContain('Interrupt the current run before switching conversations.');
-    expect(lastFrame()).toContain(command);
-    // Rejection keeps the bare slash draft and its palette. Dismiss it first.
-    if (command === '/reset') { stdin.write(ESC); await delay(20); }
+    expect(lastFrame()).toContain('/resume missing.json');
     stdin.write(ESC); await delay(20);
     stdin.write(ESC); await delay(40);
     expect(fc.aborted).toBe(true);
+    unmount();
+  });
+
+  it('accepts /reset during a live run: it interrupts and clears', async () => {
+    // THE OTHER HALF, AND THE DEFECT ITSELF (B-2). Refusing here meant the only
+    // clearing command that worked in a long conversation was `/clear` - the one
+    // that did NOT clear the context. `/reset` is now an alias of `/clear`, and
+    // `/clear` interrupts, so there is nothing left to refuse.
+    const fc = new FakeController();
+    fc.onPrompt = () => new Promise<void>(() => { fc.emit({ type: 'agent_start' }); });
+    const { stdin, lastFrame, unmount } = mount(fc, { initialPrompt: 'go' });
+    await delay(40);
+    stdin.write('/reset'); await delay(40);
+    stdin.write('\r'); await delay(60);
+    expect(lastFrame()).not.toContain('Interrupt the current run before switching conversations.');
+    expect(fc.resetConversationCalls).toBe(1);
     unmount();
   });
 
@@ -975,18 +1049,22 @@ describe('App (fullscreen frame)', () => {
     unmount();
   });
 
-  it('repaints on Ctrl+L instead of leaving a blank screen (I-5)', async () => {
+  it('repaints on Ctrl+R instead of leaving a blank screen (I-5)', async () => {
+    // Ctrl+L IS THE BRANCH KEY NOW (tui-branch-terminal-shortcut D-1); the repaint
+    // moved to Ctrl+R. The byte written here is the Ctrl+R one, and the three
+    // assertions below are the ones that used to guard Ctrl+L - the capability
+    // survived the move unchanged.
     const fc = new FakeController();
     const { lastFrame, frames, stdin, unmount } = mount(fc);
     await delay(60);
 
     const before = frames.length;
     const previous = lastFrame();
-    stdin.write('\f'); // Ctrl+L
+    stdin.write('\x12'); // Ctrl+R
     await delay(60);
 
     // Other pending React effects can flush an additional frame under full-suite
-    // load. Ctrl+L promises a real repaint, not a globally exact render count.
+    // load. Ctrl+R promises a real repaint, not a globally exact render count.
     expect(frames.length).toBeGreaterThan(before);
     const repaint = lastFrame() ?? '';
     expect(repaint.length).toBeGreaterThan(0);
@@ -998,6 +1076,64 @@ describe('App (fullscreen frame)', () => {
     unmount();
   });
 
+  it('dispatches /branch on Ctrl+L instead of repainting (D-1 / D-2)', async () => {
+    // THE KEY MIGRATION, FROM THE VIEW SIDE. Ctrl+L used to bump the redraw
+    // nonce; it now dispatches the slash command, which is the only path that
+    // gives the gesture the same cooldown, error handling and /help listing a
+    // typed `/branch` gets.
+    const fc = new FakeController();
+    const open = vi.fn(async (_request: unknown) => ({
+      ok: true as const, command: 'aragon --resume a4k2m9', shell: 'bash', rung: 'konsole',
+    }));
+    const { stdin, lastFrame, unmount } = mount(fc, {
+      session: SESSION,
+      sessionBridge: { branch: { open } },
+    });
+    await delay(60);
+
+    stdin.write('\f'); // Ctrl+L
+    await delay(120);
+
+    expect(open).toHaveBeenCalledTimes(1);
+    // The id comes from the identity the App publishes, and the cwd from the
+    // CONTROLLER (never `process.cwd()`), because `/cwd` can change it and
+    // `--resume` never restores it (D-16).
+    expect(open.mock.calls[0]![0]).toMatchObject({ id: SESSION.id, cwd: '/work' });
+    // The gesture went through the command path, which is what gives it the
+    // cooldown, the error handling and the /help listing - the echo line is the
+    // visible proof of that route (D-21). A repaint would leave no line at all.
+    expect(stripAnsi(lastFrame() ?? '')).toContain('Command: /branch');
+    unmount();
+  });
+
+  it('leaves exactly ONE Command: /branch line per press (D-21 / I-5 / T-49)', async () => {
+    // THE BOUNDARY OF THE GESTURE'S FOOTPRINT. `/branch` goes through
+    // `executeSlashInput`, whose prefix is `recordPrompt` + `notify('Command: ...')`,
+    // so one press leaves one line - not zero (which would mean the key bypassed
+    // the command path) and not two (which would mean the echo is per-attempt).
+    const fc = new FakeController();
+    const open = vi.fn(async (_request: unknown) => ({
+      ok: true as const, command: 'aragon --resume a4k2m9', shell: 'bash', rung: 'konsole',
+    }));
+    const { stdin, lastFrame, unmount } = mount(fc, {
+      session: SESSION,
+      sessionBridge: { branch: { open } },
+    });
+    await delay(60);
+
+    const countEchoes = (): number =>
+      (stripAnsi(lastFrame() ?? '').match(/Command: \/branch/g) ?? []).length;
+    expect(countEchoes()).toBe(0);
+
+    stdin.write('\f');
+    await delay(120);
+    expect(countEchoes()).toBe(1);
+
+    stdin.write('\f');
+    await delay(120);
+    expect(countEchoes()).toBe(2);
+    unmount();
+  });
   it('actually scrolls when the content overflows the viewport (invariant I-2)', async () => {
     // This is the behavioral form of the `flexShrink={0}` assertion: drop it and
     // yoga squeezes the content to the viewport height, `measureElement` reports

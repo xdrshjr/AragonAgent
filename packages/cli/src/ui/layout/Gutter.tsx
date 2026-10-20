@@ -41,7 +41,15 @@ export function Gutter({ glyph, color, children }: GutterProps): React.ReactElem
       <Box flexShrink={0} width={GUTTER_WIDTH}>
         <Text color={color}>{glyph}</Text>
       </Box>
-      <Box flexDirection="column" flexShrink={0}>
+      {/*
+        `flexBasis={0} flexGrow={1}` AND NOT AN EXPLICIT WIDTH (defect 1, RC-1).
+        `virtual-window.ts:264` already estimates every entry against
+        `cols - GUTTER_WIDTH`; that estimator and this layout are two authorities on
+        one number, so the available width has to be computed once — by yoga, from
+        the parent — rather than spelled a second time here. `flexShrink={0}` stays:
+        see INVARIANT I-2 above.
+      */}
+      <Box flexDirection="column" flexBasis={0} flexGrow={1} flexShrink={0}>
         {children}
       </Box>
     </Box>

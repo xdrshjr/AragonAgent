@@ -77,6 +77,9 @@ describe('AC-4 / AC-5: stream-json framing', () => {
     expect(parsed[0]?.tools).toEqual(['read_file', 'bash']);
     expect(parsed[0]?.capabilities).toEqual([
       'interrupt', 'fast-policy', 'fast-tier-events', 'session-file', 'turn-lifecycle', 'execution-progress',
+      // APPENDED, never inserted (long-task-jobs §6.4): the array is a published
+      // contract, so a new token goes on the end.
+      'background-jobs',
     ]);
     expect(parsed[1]?.type).toBe('user');
     expect(parsed[2]?.type).toBe('result');

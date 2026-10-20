@@ -27,8 +27,17 @@ import { getLogger } from '../logging/logger.js';
  * every bare-name and default `/save` target in `getSessionsDir()`. So
  * `aragon sessions list` / `prune` operate ONLY on files carrying `meta.id`,
  * which is what stops a maintenance command destroying conversations a human
- * saved by hand. Anything that starts writing `meta` from the TUI path must
- * revisit that scoping first.
+ * saved by hand.
+ *
+ * THE TUI NOW WRITES `meta`, AND THE RE-EXAMINATION THAT WARNING DEMANDED IS
+ * DONE (tui-session-id-resume 3.7 / R-7). Two axes were hiding in the one
+ * `managed` flag: "may a maintenance command see this row" (still `meta.id`) and
+ * "which writer produced it" (`origin`). `prune` now defaults to
+ * `origin === 'exec'`, so it behaves EXACTLY as it did before this feature on
+ * every file that existed before it; `--all` still only means "also consider
+ * files with no metadata at all" and can no longer reach a TUI checkpoint;
+ * `pinned` is a permanent opt-out and `live` plus a live owner pid is a
+ * temporary one. Four fields, four different jobs - none derivable from another.
  */
 export interface SessionMeta {
   id: string;
@@ -42,6 +51,20 @@ export interface SessionMeta {
   provider: string;
   model: string;
   usage: { inputTokens: number; outputTokens: number };
+  /**
+   * Who wrote this file. Absent (every pre-feature file) reads as 'exec'.
+   *
+   * OPTIONAL AND ADDITIVE, so SESSION_VERSION stays 1: validate-session.ts does
+   * not shape-check `meta` at all, so an older build reads a newer file and a
+   * newer build reads an older one without a migration.
+   */
+  origin?: 'exec' | 'tui';
+  /** `--save <id>` / `/session pin`: `sessions prune` never deletes it. */
+  pinned?: true;
+  /** The writer was alive at this write; omitted by the exit flush. */
+  live?: true;
+  /** The id this session branched from (D-5); absent for a fresh or named one. */
+  branchOf?: string;
 }
 
 export interface SavedSession {
@@ -60,13 +83,15 @@ export interface SavedSession {
    */
   todos?: TodoItem[];
   /**
-   * Written only by `aragon exec` (cli-integration-surface §5.2 / D-10).
+   * Written by `aragon exec` (cli-integration-surface §5.2 / D-10) AND by the
+   * TUI's session checkpoint (tui-session-id-resume §6.1).
    *
    * `SESSION_VERSION` STAYS 1 for the reason `todos?` records above, and this is
    * the precedent that file's own comments already set: the field is additive
    * and optional. Boundary validation preserves it without changing its shape.
-   * A TUI `/save` file simply has no `meta`, which is exactly how
-   * `sessions list` tells the two apart.
+   * A TUI `/save` EXPORT still has no `meta` at all, which is what keeps a
+   * hand-made file out of the maintenance commands' scope; a TUI CHECKPOINT has
+   * one, and is told apart from an exec file by `meta.origin`.
    */
   meta?: SessionMeta;
 }
@@ -279,7 +304,9 @@ export function normalizeLoadedEntries(entries: Entry[]): Entry[] {
       entry.kind === 'service' &&
       (entry.status === 'starting' || entry.status === 'ready' || entry.status === 'running')
     ) {
-      return { ...entry, status: 'stopped', rows: [] };
+      // `stalled: false` for the same reason: nothing is running, so a silence
+      // badge restored from disk would describe a process that no longer exists.
+      return { ...entry, status: 'stopped', rows: [], stalled: false };
     }
     // THE SEVENTH CLAUSE (tui-shift-enter-copy-queue 5.2.5). Core's steering
     // queue is memory-only, so a `queued` entry on disk is a promise this

@@ -28,8 +28,13 @@ describe('sanitisePaste (G2)', () => {
     expect(sanitisePaste('a\n\nb')).toBe('a\n\nb');
   });
 
-  it('T-2: strips ESC / BEL / NUL, keeps TAB, and leaves non-ASCII untouched', () => {
-    expect(sanitisePaste('a\x1b[31mb\x07c\x00d')).toBe('a[31mbcd');
+  it('T-2: strips a whole SGR sequence, BEL and NUL, keeps TAB, keeps non-ASCII', () => {
+    // THE OLD EXPECTATION HERE WAS `'a[31mbcd'`, AND IT PINNED THE DEFECT: it
+    // asserted that removing the ESC byte and KEEPING the parameter bytes is the
+    // contract, which is exactly the `[38;2;18;52;86m` garbage a user reads on
+    // screen and the model receives. The sequence is not content, so it goes as
+    // a unit. This is not a relaxed assertion -- it is the corrected one.
+    expect(sanitisePaste('a\x1b[31mb\x07c\x00d')).toBe('abcd');
     expect(sanitisePaste('\tindented')).toBe('\tindented');
     expect(sanitisePaste('CJK: 中文 emoji: \u{1F600}')).toBe('CJK: 中文 emoji: \u{1F600}');
   });
@@ -111,5 +116,55 @@ describe('trailingPastePrefixLength', () => {
 
   it('holds nothing once the marker is complete', () => {
     expect(trailingPastePrefixLength(`hello${PASTE_BEGIN_MARK}`)).toBe(0);
+  });
+});
+
+/**
+ * THE ORIGINAL PROBE, REWRITTEN AS THE CORRECT EXPECTATION (SAN-1 / SAN-3).
+ *
+ * `docs/diagnoses/paste-control-sequence-residue/repro/probe-paste-sanitise.test.ts`
+ * asserted the DEFECT ("0 digits removed" was the passing state). The five
+ * inputs below are copied from it verbatim; the expectations are what the user
+ * is entitled to see, and every one of them is asserted to contain no digits
+ * left over from a sequence.
+ */
+describe("sanitisePaste removes control SEQUENCES, not just the ESC byte (fix A'-1)", () => {
+  it.each([
+    ['a short SGR pair', '\u001b[32mINFO\u001b[0m build ok', 'INFO build ok'],
+    ['a truecolour SGR', '\u001b[38;2;18;52;86mconst x = 1;\u001b[0m', 'const x = 1;'],
+    ['an OSC title', '\u001b]0;window title\u0007after OSC', 'after OSC'],
+    ['a private mode pair', '\u001b[?25lafter private mode\u001b[?25h',
+      'after private mode'],
+    ['a mid-line SGR', 'code \u001b[1;31mbold red\u001b[0m end', 'code bold red end'],
+  ])('cleans %s', (_name, input, expected) => {
+    expect(sanitisePaste(input as string)).toBe(expected);
+  });
+
+  it('SAN-3: a 20-line coloured log keeps every line and no digit run', () => {
+    const lines: string[] = [];
+    for (let i = 0; i < 20; i += 1) lines.push(`\u001b[32mINFO\u001b[0m step ${i} \u001b[2mok\u001b[0m`);
+    const sent = sanitisePaste(lines.join('\r\n'));
+    expect(sent.split('\n')).toHaveLength(20);
+    expect(sent.match(/\[[0-9;]*m/g)).toBeNull();
+    expect(sent.split('\n')[0]).toBe('INFO step 0 ok');
+  });
+
+  it('keeps a C1 CSI from leaking its parameters (R-3)', () => {
+    expect(sanitisePaste('\u009b38;2;18;52;86mconst x = 1;')).toBe('const x = 1;');
+  });
+
+  it('leaves text that only LOOKS like a sequence body exactly as it is', () => {
+    // Rule 4 of the boundary table: no introducer byte means no sequence.
+    expect(sanitisePaste('[38;2;18;52;86mconst x = 1;'))
+      .toBe('[38;2;18;52;86mconst x = 1;');
+  });
+
+  it('never eats the character after a truncated sequence', () => {
+    expect(sanitisePaste('\u001b[38;2;18;52 no final byte'))
+      .toBe(' no final byte');
+  });
+
+  it('TAB is still content, and a TAB-indented block survives unchanged', () => {
+    expect(sanitisePaste('\tif x:\r\n\t\treturn 1\r\n')).toBe('\tif x:\n\t\treturn 1\n');
   });
 });

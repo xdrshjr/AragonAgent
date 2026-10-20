@@ -222,6 +222,18 @@ export interface FrameDiffer {
    * appears one frame later instead of never.
    */
   repaint(): string;
+  /**
+   * The stream was resized. Optional (tui-native-terminal-scroll §5.1): the
+   * full-screen differ does not implement it and is invalidated instead, which is
+   * its existing behaviour; the scrollback writer keeps its cache for a reflow
+   * estimate.
+   */
+  onResize?(): void;
+  /**
+   * An own write that moves neither a cell nor the cursor (OSC 52 copy). Optional
+   * for the same reason: absent, the write invalidates the cache as before.
+   */
+  cursorNeutralWrite?(): void;
 }
 
 // ---------------------------------------------------------------------------

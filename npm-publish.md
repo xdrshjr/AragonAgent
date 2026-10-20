@@ -537,6 +537,48 @@ npm exec --yes `
 | `EPUBLISHCONFLICT` | 相同版本已经进入 registry | 递增版本、更新 CHANGELOG/lockfile，并重新执行完整验证 |
 | CLI 安装时 Core 404 | Core 尚未发布或未同步 | 等 `npm view` 能查询 Core 后再发 CLI |
 
+### 安装阶段网络中断（`ECONNRESET` / `ETIMEDOUT` / `EAI_AGAIN`）
+
+`Invoke-ReleaseChecks` 的第一条 `npm ci --include=dev --ignore-scripts` 是整条发布路径里
+**唯一没有本地闸门保护的网络动作**：它按 `package-lock.json` 里的 `resolved` 地址去拉 tarball
+（本机 `.npmrc` 指向镜像时就是镜像的 CDN），任何一个大包被重置都会让整次 reify 中止。表现是
+还没跑到任何闸门就退出，并打印：
+
+```text
+npm error code ECONNRESET
+警告: Release failed before npm publish; version files were restored.
+```
+
+此时**什么都没发出去**，版本文件已被脚本回滚（`packages/*/package.json` 与
+`package-lock.json` 都会恢复），不要用 `-Resume`，也不要手工改版本号。按下面两步恢复：
+
+1. 先把依赖树装回来。`npm ci` 的定义行为是先删 `node_modules`，所以失败后树是不完整的
+   （只剩 workspace 软链），此时跑 build 或测试都会失败得莫名其妙。镜像上重装同样的包通常
+   走本地缓存，几秒完成：
+
+   ```powershell
+   npm ci --include=dev --ignore-scripts --prefer-offline
+   ```
+
+2. 再重跑完整发布：
+
+   ```powershell
+   .\publish-latest.ps1
+   ```
+
+脚本本身已经把 npm 的重试预算从默认的「2 次重试 / 300 秒超时」抬到
+`NPM_CONFIG_FETCH_RETRIES=5`、`FETCH_RETRY_MINTIMEOUT=10s`、`FETCH_RETRY_MAXTIMEOUT=120s`、
+`FETCH_TIMEOUT=600s`，通过环境变量传给所有 npm 子进程（命令行一个字都不改，发布测试断言
+的正是这条命令行），结束时在 `finally` 里清掉。**这些只是默认值**：自己在环境里设过的变量
+会被原样保留，需要更保守或更激进的预算时直接设环境变量即可，不必改脚本。
+
+镜像本身不稳定时，可以让这次发布绕开镜像（只影响这一次进程，不改 `.npmrc`）：
+
+```powershell
+$env:NPM_CONFIG_REGISTRY = 'https://registry.npmjs.org/'
+.\publish-latest.ps1
+```
+
 ## 10. 发布记录与后续工作
 
 发布完成后：
@@ -612,9 +654,21 @@ chore(release): publish core vX.Y.Z and cli vA.B.C
 npm run preflight -- --bump minor # 发布前体检：npm 身份 / 作用域 / 仓库链接 / 版本计划 / 工作树
                                   # （默认档位是 patch，本次 cutover 必须显式传 minor）
 npm run verify:brand              # 品牌闸门：扫描两个 tarball 会包含的全部文件（已接入发布路径）
+npm run verify:test-gate          # 测试闸门：vitest/vite 三方版本一致且为精确版本 + 临时目录可写且有空间
+npm run verify:test-gate -- --classify <log>  # 失败归因：所有失败都是模块镜像 ENOENT 才算环境故障
 npm run verify:published -- --core <v> --cli <v>   # 发布后验收
 npm run test:tooling              # 上述工具自身的单元测试
 ```
+
+`npm run verify:test-gate` 也在发布路径里：`Invoke-ReleaseChecks` 的第一条是
+`npm ci --include=dev --ignore-scripts`，紧接着是版本断言，然后是
+`npm run verify:test-gate`，之后才是 `npm run build` 与两条 workspace 测试。
+顺序就是这条闸门的全部意义——把安装放到测试之后，等于让「钉死的运行时」去保护
+一道已经跑完的闸门。测试失败时脚本会用 `--classify` 读日志：只有**每一个**失败
+文件的首要错误都是 `ENOENT .../(ssr|client)/`（vitest 的模块镜像目录在运行中被删）
+才判为环境故障并重跑一次；其余一律判真实失败、不重试，报错文本与以前逐字相同。
+注意 `npm ci --ignore-scripts` 之后 `isolated-vm` 没有原生构建产物，发布结束后在
+同一棵树上跑 core 的集成测试前需要一次普通 `npm install`。
 
 `npm run verify:brand` 已经接进 `publish-latest.ps1` 的 `Invoke-ReleaseChecks`，
 位置在 `verify:dist` 之后、两条 `pack --dry-run` 之前——必须在构建之后（否则扫的是

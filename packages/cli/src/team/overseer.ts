@@ -66,8 +66,10 @@ import type {
  * Bumped whenever either supervisor protocol prompt changes (D-9), so a
  * behaviour report can be tied to a prompt revision with one grep.
  * `TEAM_BLOCK_VERSION` covers only the LEAD's `<team>` block, not these.
+ *
+ * v3 adds the turn-cap trigger to the single-inspection prompt (F-8 A'2).
  */
-export const OVERSEER_PROMPT_VERSION = 'v2-2026-10';
+export const OVERSEER_PROMPT_VERSION = 'v3-2026-10';
 
 // ---------------------------------------------------------------------------
 // Digest
@@ -86,7 +88,7 @@ export interface ChildDigestInput {
   run: SubagentRun;
   /** False only in the post-mortem inspection, after the child settled. */
   childAlive: boolean;
-  trigger: 'silence' | 'clock' | 'postmortem';
+  trigger: 'silence' | 'clock' | 'turncap' | 'postmortem';
   /** The child's LIVE history (`SubagentAgentLike.state.messages`). */
   messages: readonly Message[];
   memory: readonly OverseerMemoryEntry[];
@@ -120,6 +122,14 @@ function clampChars(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 3))}...`;
 }
 
+/** One line per trigger, as the digest names it (a union VALUE, never prose). */
+const TRIGGER_LABELS: Record<ChildDigestInput['trigger'], string> = {
+  silence: 'event silence (suspected stall)',
+  clock: 'wall-clock check',
+  turncap: 'turn cap reached (inspection trigger, not a stop)',
+  postmortem: 'post-mortem (child already ended)',
+};
+
 /**
  * Build the bounded text one inspection reads.
  *
@@ -133,9 +143,7 @@ export function buildChildDigest(input: ChildDigestInput): string {
   const { run, childAlive, trigger, messages, memory, elapsedSec } = input;
   const lines: string[] = [];
   lines.push(`child: ${run.label} "${run.description}"`);
-  lines.push(
-    `trigger: ${trigger === 'silence' ? 'event silence (suspected stall)' : trigger === 'clock' ? 'wall-clock check' : 'post-mortem (child already ended)'}`,
-  );
+  lines.push(`trigger: ${TRIGGER_LABELS[trigger]}`);
   lines.push(`elapsed: ${Math.round(elapsedSec)}s, alive: ${childAlive ? 'yes' : 'no'}`);
   lines.push(
     `phase: ${run.phase}, turns: ${run.turns}, toolCalls: ${run.toolCalls}` +
@@ -391,8 +399,10 @@ export interface FastOverseerDeps {
 
 const OVERSEER_SYSTEM_PROMPT = [
   'You are the supervisor of a team of subagents. You are shown ONE subagent',
-  'that crossed a time trigger (event silence or a wall-clock check) and must',
-  'decide what to do with it. Answer with ONE JSON object and nothing else:',
+  'that crossed a supervision trigger (event silence, a wall-clock check, or',
+  'the configured turn cap) and must decide what to do with it. Crossing a',
+  'ceiling does NOT stop the child - your decision does. Answer with ONE JSON',
+  'object and nothing else:',
   '{"action": "wait" | "nudge" | "replace" | "abandon", "reason": "<= 200 chars",',
   ' "guidance": "<= 1200 chars, nudge only", "nextCheckMs": <ms, wait only>}.',
   'wait: the child looks healthy or is legitimately blocked (API backoff,',
@@ -572,7 +582,7 @@ export function createFastOverseerProvider(deps: FastOverseerDeps): OverseerProv
 export interface OverseerInspectRequest {
   run: SubagentRun;
   messages: readonly Message[];
-  trigger: 'silence' | 'clock' | 'postmortem';
+  trigger: 'silence' | 'clock' | 'turncap' | 'postmortem';
   childAlive: boolean;
 }
 

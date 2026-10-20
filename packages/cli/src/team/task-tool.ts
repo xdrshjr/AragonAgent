@@ -20,16 +20,19 @@
  * in the schema would behave differently depending on whether `ajv`, an OPTIONAL
  * dependency of core, happened to install.
  *
- * EVERY CHILD RUNS THE LEAD'S OWN MODEL (main-agent parity): same provider,
- * model, thinking level and token ambition, resolved from the LIVE config at
- * dispatch. There is no per-child `model` property and no cheap tier to pick -
- * a delegation is never a downgrade, and the fast tier reaches children the
- * same way it reaches the lead (compaction summaries, per-child reviews).
+ * WHICH MODEL A CHILD RUNS IS THE USER'S SETTING, NOT THE MODEL'S (D-1):
+ * `team.model` defaults to the lead's own connection (main-agent parity) and
+ * can name the fast tier or a profile; there is still no per-child `model`
+ * property, so a delegation is never a self-downgrade. Resolution lives in
+ * `team/model.ts` and is re-read from the LIVE config at every dispatch; the
+ * fast tier otherwise reaches children the way it reaches the lead
+ * (compaction summaries, per-child reviews).
  */
 
 import { errorResult, textResult, type AgentTool, type ToolResult } from '@aragon-agent/core';
 import type { ModelCost } from '@aragon-agent/core';
 import { TEAM_LIMITS } from './limits.js';
+import type { SubagentModelResolution } from './model.js';
 import { normalizeSubagentSpecs } from './normalize.js';
 import { buildDispatchReport } from './report.js';
 import type { TeamRuntime } from './runtime.js';
@@ -42,8 +45,24 @@ export interface TaskToolDeps {
   /** Whether a usable key exists for the active provider right now (P2-3). */
   hasApiKey: () => boolean;
   activeProvider: () => string;
-  /** The lead's cost table, so the report header states real spend (R-5). */
+  /**
+   * The cost table of the model children ACTUALLY run (subagent-model §3.4).
+   *
+   * The controller resolves `team.model` live and prices `modelCost` at the
+   * EFFECTIVE model's table: with the default `main` mode this is exactly the
+   * lead's own table, so the report's spend line is byte-identical to the
+   * parity behavior; with `fast` / `profile` it is that model's table, and an
+   * UNPRICED one yields `undefined` so the header says `pricing unknown`
+   * rather than fabricating `$0.00` (C-11 / RV-4).
+   */
   modelCost: () => ModelCost | undefined;
+  /**
+   * The dispatch-time subagent model resolution, for the report's disclosure
+   * line (D-4): rendered ONLY when children did not run the main model, and
+   * carrying the fallback reason when they could not. OPTIONAL so existing
+   * construction sites compile; absent simply omits the line.
+   */
+  subagentModel?: () => SubagentModelResolution;
   /**
    * The FAST tier's cost table, so the report's supervisor spend line states
    * real spend (subagent-overseer-v2 D-7 / R-P1-2). OPTIONAL and returning
@@ -77,8 +96,9 @@ const TEAM_OFF_REFUSAL =
 const TASK_DESCRIPTION =
   'Run several independent subagents in parallel and get one combined report. Each ' +
   'subagent is a fresh agent with the same tools and working directory but NO memory of ' +
-  'this conversation - its prompt must be self-contained. Each runs on the same model ' +
-  'you are running on. Use this when a task splits ' +
+  'this conversation - its prompt must be self-contained. Each runs on the model the ' +
+  'user configured for subagents (the main model by default). Use this when a task ' +
+  'splits ' +
   'into 2 or more parts that do not depend on each other\'s output, especially reading or ' +
   'searching several areas at once. Do NOT use it when one part needs another part\'s ' +
   'result (do those yourself, in order), when two parts would edit the same file, or for ' +
@@ -172,14 +192,17 @@ export function createTaskTool(deps: TaskToolDeps): AgentTool {
       //    A cancellation or a partial result rendered as a tool FAILURE invites
       //    the model to retry the whole fan-out, which is the most expensive
       //    possible reaction (the same reasoning as `ask_user`'s cancelled
-      //    shape, and D-14 one level up). Every child ran the lead's own model,
-      //    so the lead's cost table is the one honest price for the total.
+      //    shape, and D-14 one level up). `modelCost` is priced at the model
+      //    children ACTUALLY ran - the lead's own table under the default
+      //    `main` mode - so the total stays one honest price.
       const cost = deps.modelCost();
       const fastCost = deps.fastModelCost?.();
+      const subagentModel = deps.subagentModel?.();
       return textResult(
         buildDispatchReport(outcome, {
           ...(cost ? { cost } : {}),
           ...(fastCost ? { fastCost } : {}),
+          ...(subagentModel ? { subagentModel } : {}),
         }),
       );
     },

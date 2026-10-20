@@ -554,6 +554,28 @@ describe('TeamCard (§6.3)', () => {
       />,
     );
     expect(frame).toContain('interrupted (session resumed)');
+    // ...AND NO ELAPSED COLUMN EITHER. `session/persist.ts` settles the entry on load,
+    // but nothing invents an `endedAt` for the child, so a figure computed against
+    // `Date.now()` claimed hours of work beside a headline saying nothing measured it.
+    expect(frame).not.toMatch(/\d+(\.\d+)?(ms|s|m|h)/);
+  });
+
+  it('advances a running child with the live clock instead of `0ms` (A-1 / E4)', () => {
+    const frame = frameOf(
+      <TeamCard
+        requested={1}
+        runs={[run({ phase: 'tool', startedAt: 1_000 })]}
+        aborted={false}
+        active
+        nowSec={66}
+        theme={getTheme('cool', ASCII)}
+        caps={ASCII}
+      />,
+    );
+    // 65s of work, read off the same 1 Hz clock the roster uses: the old
+    // `(endedAt ?? 0) - startedAt` printed `0ms` for this exact row.
+    expect(frame).toContain('1m05s');
+    expect(frame).not.toContain('0ms');
   });
 
   it('AC-9: emits no non-ASCII byte with caps.unicode === false', () => {

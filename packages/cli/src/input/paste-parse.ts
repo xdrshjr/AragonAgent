@@ -17,6 +17,7 @@
  */
 
 import { PASTE_MIN_BURST_CHARS } from './limits.js';
+import { stripControlSequences } from './control-sequences.js';
 
 /** `DECSET 2004` wraps a paste in these two markers. */
 export const PASTE_BEGIN_MARK = '\x1b[200~';
@@ -80,20 +81,31 @@ export function classifyChunk(text: string, minBurstChars = PASTE_MIN_BURST_CHAR
  *    newline in pasted text, and a lone LF is dropped by Ink's key parser
  *    entirely, so both have to be normalised here or a pasted line break either
  *    submits the message or silently vanishes.
- * 2. Every C0 byte except `\n` and `\t` is removed. Ink writes `<Text>` children
- *    to the terminal without escaping anything, so a surviving `\r` overwrites
- *    the row it is drawn on and a surviving `\x1b` repaints the frame's colours.
- * 3. DEL and every C1 byte (U+0080..U+009F) go too, and that is NOT padding:
- *    U+009B is the single-byte CSI and U+0085 is NEL, and a terminal that decodes
- *    them acts on them exactly as it acts on `\x1b[`. A file pasted out of a
- *    non-UTF-8 editor walks straight through a "strip C0" rule.
- * 4. TAB is KEPT. Indentation is content, and it is what the model receives.
+ * 2. Every escape SEQUENCE is removed AS A SEQUENCE (`stripControlSequences`).
+ *    Deleting only the introducer byte is what produced the reported defect:
+ *    `ESC [ 3 8 ; 2 ; 1 8 ; 5 2 ; 8 6 m` minus its ESC is `[38;2;18;52;86m`,
+ *    a run of digits Ink then writes to the terminal as ordinary text -- and it
+ *    reached the model, the prompt history and the session file too, because
+ *    this function is the only cleaning the payload ever gets.
+ * 3. Every remaining C0 byte except `\n` and `\t` is removed. Ink writes
+ *    `<Text>` children to the terminal without escaping anything, so a
+ *    surviving `\r` overwrites the row it is drawn on and a surviving `ESC`
+ *    repaints the frame colours. Sequences are gone by this point, so what is
+ *    left for this step is a stray byte, never half of one.
+ * 4. DEL and every C1 byte (U+0080..U+009F) go too, and that is NOT padding:
+ *    U+009B is the single-byte CSI and U+0085 is NEL, and a terminal that
+ *    decodes them acts on them exactly as it acts on `ESC [`. A file pasted out
+ *    of a non-UTF-8 editor walks straight through a "strip C0" rule.
+ * 5. TAB is KEPT. Indentation is content, and it is what the model receives.
+ *    Expanding it is the RENDERERS' job (`ui/display-tab.ts`), so the model
+ *    keeps the original indentation while the screen, the composer and the
+ *    terminal all agree on what column a TAB lands on.
  *
  * Applied to PAYLOAD ONLY, never to keystrokes, so `Ctrl+A` and Escape keep
- * working. Non-ASCII text (CJK, emoji) is untouched.
+ * working. Non-ASCII text (CJK, emoji) is untouched. Idempotent, so the
+ * second pass in `ui/paste-frames.ts` stays a byte-identical no-op.
  */
 export function sanitisePaste(raw: string): string {
-  return raw
-    .replace(/\r\n?/g, '\n')
+  return stripControlSequences(raw.replace(/\r\n?/g, '\n'))
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '');
 }

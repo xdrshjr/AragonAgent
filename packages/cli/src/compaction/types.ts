@@ -21,6 +21,7 @@
  */
 
 import type { ModelRef, TokenUsage } from '@aragon-agent/core';
+import type { ContextWindowOrigin } from '../config/schema.js';
 
 /** Billing belongs to the actual call, including fallback and late responses. */
 export interface CompactionBilling {
@@ -99,6 +100,14 @@ export interface Pressure {
    */
   windowOverridden: boolean;
   /**
+   * WHICH override surface supplied the denominator (profile-context-window
+   * §5.2): env / legacy top-level key / the profile bound as Main. Optional
+   * and PURE PASS-THROUGH - present only when `windowOverridden` is true, and
+   * `undefined` there means "config", the pre-feature answer. The arithmetic
+   * never reads it; only `/context`'s window line does.
+   */
+  windowOverrideOrigin?: ContextWindowOrigin;
+  /**
    * `occupiedTokens(lastUsage) - estimateOf(the history that produced it)`,
    * clamped to `>= 0`, or `undefined` before the first `turn_end`.
    *
@@ -157,6 +166,8 @@ export interface ContextUsageSnapshot {
   windowKnown: boolean;
   /** Whether the denominator came from the user's `contextWindow` (I-6). */
   windowOverridden: boolean;
+  /** Which override surface named the denominator; see `Pressure` (pass-through). */
+  windowOverrideOrigin?: ContextWindowOrigin;
 }
 
 /** One compaction, in whatever state it reached. Rendered by `CompactionCard`. */

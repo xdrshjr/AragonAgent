@@ -13,7 +13,8 @@ const { loadConfig, makeGetApiKey } = await import('../config/load.js');
 beforeEach(() => rmSync(store.getConfigPath(), { force: true }));
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
 const profiles = { version: 1 as const, entries: [{ id: 'p', name: 'P', provider: 'openai',
-  model: 'custom', baseUrl: null, apiKey: null as string | null }], mainId: 'p', fastId: null };
+  model: 'custom', baseUrl: null, apiKey: null as string | null,
+  contextWindow: null }], mainId: 'p', fastId: null };
 
 describe('strict profile persistence', () => {
   it('refuses to overwrite malformed JSON and array roots', () => {

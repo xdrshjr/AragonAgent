@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import type { AgentEvent, TokenUsage } from '@aragon-agent/core';
 import {
   buildToolPreview,
@@ -30,6 +31,95 @@ function run(events: AgentEvent[], start = initialViewState()): ViewState {
 function assistantEntries(state: ViewState): Extract<Entry, { kind: 'assistant' }>[] {
   return state.entries.filter((e): e is Extract<Entry, { kind: 'assistant' }> => e.kind === 'assistant');
 }
+
+describe('defect 5 - a settled, entirely empty assistant bubble is pruned', () => {
+  // `turnStart` ALWAYS appends an assistant entry, so a tool-only turn leaves a
+  // bubble behind that renders nothing. The prune drops it at the SETTLE points
+  // only: before then the entry is the live target of every `textDelta`.
+  it('leaves zero assistant entries after turnEnd + runEnd of a tool-only turn', () => {
+    let state = fold(initialViewState(), [
+      { type: 'submit', text: 'go' },
+      { type: 'runStart' },
+      { type: 'turnStart' },
+      { type: 'toolCallStart', toolCallId: 't1', toolName: 'bash' },
+      { type: 'toolCallEnd', toolCallId: 't1', args: { command: 'ls' } },
+    ]);
+    // Still streaming, so still KEPT - see the third case below.
+    expect(assistantEntries(state)).toHaveLength(1);
+
+    state = fold(state, [
+      { type: 'turnEnd', usage: { inputTokens: 10, outputTokens: 0 }, costDelta: 0 },
+      { type: 'runEnd' },
+    ]);
+
+    expect(assistantEntries(state)).toHaveLength(0);
+    expect(state.streamingId).toBeUndefined();
+    // The prune is surgical: the tool card of the same turn survives.
+    expect(state.entries.filter((e) => e.kind === 'tool')).toHaveLength(1);
+  });
+
+  it('keeps a settled assistant entry that carries text', () => {
+    const state = fold(initialViewState(), [
+      { type: 'submit', text: 'go' },
+      { type: 'runStart' },
+      { type: 'turnStart' },
+      { type: 'textDelta', delta: 'All done.' },
+      { type: 'turnEnd', usage: { inputTokens: 10, outputTokens: 3 }, costDelta: 0 },
+      { type: 'runEnd' },
+    ]);
+
+    const kept = assistantEntries(state);
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toMatchObject({ text: 'All done.', streaming: false });
+  });
+
+  it('keeps a settled entry whose only content is thinking', () => {
+    // The prune condition is "no text AND no thinking". A turn that reasoned but
+    // never answered still has something to show (the collapsed thinking marker),
+    // so dropping it would lose the one record that it thought at all.
+    const state = fold(initialViewState(), [
+      { type: 'submit', text: 'go' },
+      { type: 'runStart' },
+      { type: 'turnStart' },
+      { type: 'thinkingDelta', delta: 'pondering' },
+      { type: 'turnEnd', usage: { inputTokens: 10, outputTokens: 0 }, costDelta: 0 },
+      { type: 'runEnd' },
+    ]);
+
+    const kept = assistantEntries(state);
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toMatchObject({ text: '', thinking: 'pondering', streaming: false });
+  });
+
+  it('keeps an empty assistant entry that is STILL streaming, with its live id', () => {
+    // I-L1-1 and `retry-reducer.test.ts:191-193`: pruning this one would strand
+    // `streamingId` on an entry no `mapEntry` can match, silently.
+    const state = fold(initialViewState(), [
+      { type: 'submit', text: 'go' },
+      { type: 'runStart' },
+      { type: 'turnStart' },
+    ]);
+
+    const live = assistantEntries(state);
+    expect(live).toHaveLength(1);
+    expect(state.streamingId).toBe(live[0]!.id);
+  });
+
+  it('abortMark prunes the empty bubble AND clears the id that pointed at it', () => {
+    // The one settle path that does not clear `streamingId` itself, so the id the
+    // prune clears has to be written back into the returned state.
+    const state = fold(initialViewState(), [
+      { type: 'submit', text: 'go' },
+      { type: 'runStart' },
+      { type: 'turnStart' },
+      { type: 'abortMark' },
+    ]);
+
+    expect(assistantEntries(state)).toHaveLength(0);
+    expect(state.streamingId).toBeUndefined();
+    expect(state.aborted).toBe(true);
+  });
+});
 
 describe('event reducer — full turn', () => {
   it('accumulates text, tool cards, usage totals, and status transitions', () => {
@@ -439,6 +529,74 @@ describe('T14 - `resetConversation` clears spend, never the gauge (I-1)', () => 
       cacheWriteTokens: 0,
       costUsd: 0,
     });
+  });
+});
+
+describe('T16 - `resetConversation` zeroes the run facts it used to keep', () => {
+  it('clears the six fields the two-pass reducer left behind', () => {
+    // THE REAL GAP (P0-3). `reduceRunFacts` runs BEFORE this branch and already
+    // resets `runPhase` / `activeTool` / `runOutcome` / `seenSteeringIds`, so the
+    // change table is six fields, not nine - and a reader who "fixed" all nine
+    // would write three same-valued assignments and believe they had closed a
+    // hole that was already closed.
+    const seeded: ViewState = {
+      ...initialViewState(),
+      status: 'running',
+      team: { dispatchId: 'dispatch-1' } as unknown as ViewState['team'],
+      fastEntryId: 'e9',
+      turnProduced: true,
+      errorNoticed: true,
+      aborted: true,
+    };
+    const reset = viewReducer(seeded, { type: 'resetConversation' });
+
+    expect(reset.status).toBe('idle');
+    expect(reset.team).toBeNull();
+    expect(reset.fastEntryId).toBeUndefined();
+    expect(reset.turnProduced).toBe(false);
+    expect(reset.errorNoticed).toBe(false);
+    expect(reset.aborted).toBe(false);
+  });
+
+  it('leaves the four fields `reduceRunFacts` owns to `reduceRunFacts`', () => {
+    // A SOURCE ASSERTION, because a behavioural one cannot tell the difference:
+    // writing `runPhase: 'idle'` twice produces the same state as writing it
+    // once. What it does NOT produce is a readable branch - and the next field
+    // someone adds to `reduceRunFacts` would silently have two owners.
+    const source = readFileSync(new URL('../agent/reducer.ts', import.meta.url), 'utf8');
+    const start = source.indexOf("case 'resetConversation':", source.indexOf('export function viewReducer'));
+    const end = source.indexOf('case ', start + 10);
+    const branch = source.slice(start, end);
+    const code = branch.split('\n').filter((line) => !line.trim().startsWith('//'));
+    for (const owned of ['runPhase', 'activeTool', 'runOutcome', 'seenSteeringIds']) {
+      expect(code.some((line) => line.trim().startsWith(`${owned}:`))).toBe(false);
+    }
+    // And it DOES still clear the four the pass above it clears, so this test
+    // fails loudly if the two halves ever disagree about who owns them.
+    const live = viewReducer(
+      { ...initialViewState(), runPhase: 'tool', runOutcome: 'interrupted',
+        activeTool: { toolCallId: 't1', name: 'bash' }, seenSteeringIds: new Set(['q1']) },
+      { type: 'resetConversation' },
+    );
+    expect(live.runPhase).toBe('idle');
+    expect(live.runOutcome).toBe('none');
+    expect(live.activeTool).toBeUndefined();
+    expect(live.seenSteeringIds.size).toBe(0);
+  });
+
+  it('keeps the subsystems that outlive a conversation', () => {
+    // `fast` / `compaction` are live subsystem state, not projections of the run
+    // that just ended, and `context` has ONE writer (I-2). Zeroing any of them
+    // here would be the mirror-image of the bug this branch fixes.
+    const seeded: ViewState = {
+      ...initialViewState(),
+      fast: { model: 'haiku', reviews: 1 } as unknown as ViewState['fast'],
+      compaction: { enabled: true } as unknown as ViewState['compaction'],
+    };
+    const reset = viewReducer(seeded, { type: 'resetConversation' });
+    expect(reset.fast).toBe(seeded.fast);
+    expect(reset.compaction).toBe(seeded.compaction);
+    expect(reset.context).toBe(seeded.context);
   });
 });
 

@@ -52,6 +52,18 @@ export function AutocompletePopup({
         const active = idx === selected;
         return (
           <Text key={idx} inverse={active} wrap="truncate">
+            {/*
+              A VISIBLE CARET, NOT ONLY `inverse` (defect 7). `inverse` is chalk's
+              `inverse`, which is the IDENTITY at colour level 0, and every
+              `theme.*` colour is `undefined` there too - so under `--no-color`,
+              in a screen recording, or down a remote pipe the selected row was
+              byte-identical to the others and Enter was a guess. Same affordance
+              the `/model` picker already uses; the two cells are spent on both
+              sides, so no row changes width.
+            */}
+            <Text color={active ? theme.accent : theme.muted}>
+              {active ? `${glyphs.caret} ` : '  '}
+            </Text>
             <Text color={active ? undefined : theme.primary}>{item.label.replace(/\s+/g, ' ')}</Text>
             {item.hint ? <Text color={theme.muted}>  {item.hint.replace(/\s+/g, ' ')}</Text> : null}
           </Text>

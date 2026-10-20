@@ -47,9 +47,11 @@ export interface TodoSnapshot {
 /**
  * Why a list went away.
  *
- *   `user`  - `/todo clear`, or `/clear`. Both are an explicit user instruction,
- *             which is I-2's standing exception; neither touches `messages`.
- *   `reset` - `/reset`, or a `/resume` whose file carried no list (§3.13).
+ *   `user`  - `/todo clear`, or `/clear screen` (the screen-only form). Both are
+ *             an explicit user instruction, which is I-2's standing exception;
+ *             neither touches `messages`.
+ *   `reset` - `/clear` (or its alias `/reset`) through `clearMessages()`, or a
+ *             `/resume` whose file carried no list (§3.13).
  *   `turn`  - a new TUI task started, or a legacy caller began a turn after
  *             every item was completed.
  *   `stale` - unfinished, and unwritten for more than `TODO_LIMITS.staleTurns`

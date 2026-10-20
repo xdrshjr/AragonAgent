@@ -27,9 +27,12 @@ import { extractPortHint } from './classify.js';
 import { isAlive, killTree, killTreeSync } from './kill-tree.js';
 import { PROC_LIMITS } from './limits.js';
 import { LogRing } from './log-ring.js';
+import { extractProgress } from './progress.js';
 import { probePort, ReadinessWatcher } from './readiness.js';
 import {
   isTerminalStatus,
+  type JobKind,
+  type JobLogMirrorPort,
   type ProcEvent,
   type ProcEventListener,
   type ProcSupervisorPort,
@@ -43,6 +46,19 @@ import {
 export interface ProcSupervisorOptions {
   /** `cfg.bash.readyTimeoutMs`, read once per service at spawn. */
   readyTimeoutMs: () => number;
+  /**
+   * `cfg.jobs.stallSeconds * 1000`, read per snapshot.
+   *
+   * A CLOSURE RATHER THAN A NUMBER, exactly like `readyTimeoutMs`: a
+   * `config set jobs.stallSeconds` has to reach the card of the job already
+   * running, and a value captured at construction would not.
+   */
+  stallMs?: () => number;
+  /**
+   * The optional write-through log mirror. `undefined` when `jobs.persistLog` is
+   * false, and in every test that does not care about disk.
+   */
+  mirror?: JobLogMirrorPort;
   /** Injected by the tests; production uses a real TCP connect. */
   probe?: (port: number) => Promise<boolean>;
 }
@@ -84,7 +100,15 @@ export class ProcSupervisor implements ProcSupervisorPort {
    */
   private readonly foreground = new Set<number>();
   private readonly listeners = new Set<ProcEventListener>();
-  private nextId = 1;
+  /**
+   * TWO COUNTERS, NEVER ONE (long-task-jobs §4.2 / I-2).
+   *
+   * `s1` and `t1` are separate id spaces so a `bash_kill({ service: "s1" })` can
+   * never reach a task, and so the model can tell "this will finish" from "this
+   * will not" from the id alone. Ids are never reused - see `evictTerminal`.
+   */
+  private nextServiceId = 1;
+  private nextTaskId = 1;
   private disposed = false;
 
   constructor(private readonly opts: ProcSupervisorOptions) {}
@@ -128,7 +152,7 @@ export class ProcSupervisor implements ProcSupervisorPort {
     if (this.disposed) return { ok: false, error: 'The process supervisor is shut down.' };
 
     this.evictTerminal();
-    if (this.services.size >= PROC_LIMITS.maxServices) {
+    if (this.services.size >= PROC_LIMITS.maxJobs) {
       // NO EVICTION AND NO SILENT FOREGROUNDING (P2-8). Every record is live, so
       // dropping the oldest would orphan a running server that nothing can any
       // longer name or stop. Naming the ids is what makes the error actionable.
@@ -140,36 +164,48 @@ export class ProcSupervisor implements ProcSupervisorPort {
       return {
         ok: false,
         error:
-          `Too many background services (${PROC_LIMITS.maxServices}). ` +
+          `Too many background jobs (${PROC_LIMITS.maxJobs}). ` +
           `Stop one first with bash_kill({ service: "<id>" }) - oldest live: ${live}.`,
       };
     }
 
-    const id = `s${this.nextId}`;
-    this.nextId += 1;
+    const kind: JobKind = req.kind ?? 'service';
+    const id = kind === 'task' ? `t${this.nextTaskId++}` : `s${this.nextServiceId++}`;
 
-    // THE PRE-FLIGHT PROBE RUNS BEFORE THE SPAWN (R-3). An unrelated process
-    // already answering on 3000 would otherwise make every launch instantly and
-    // falsely ready; finding it there disables the probe detector for this
-    // service and annotates the card, leaving the URL detector to do the work.
-    const hint = extractPortHint(req.command);
+    // THE PRE-FLIGHT PROBE RUNS ONLY FOR A SERVICE (R-3), and the reason is the
+    // kind itself: a `task` connects to nothing, so probing its (usually
+    // non-existent) port hint would spend a socket timeout per launch to learn
+    // nothing. For a service, an unrelated process already answering on 3000
+    // would make every launch instantly and falsely ready; finding it there
+    // disables the probe detector and annotates the card, leaving the URL
+    // detector to do the work.
+    const hint = kind === 'service' ? extractPortHint(req.command) : undefined;
     const preoccupied =
       hint === undefined ? false : await (this.opts.probe ?? probePort)(hint).catch(() => false);
 
+    const startedAt = Date.now();
     const ring = new LogRing();
     const record: ServiceRecord = {
       id,
+      kind,
       toolCallId: req.toolCallId,
       command: req.command,
       cwd: req.cwd,
       pid: undefined,
-      status: 'starting',
-      startedAt: Date.now(),
+      // A TASK IS `running` FROM THE SPAWN (D-14). It has no readiness to wait
+      // for: the old behaviour left it `starting` for `readyTimeoutMs` (60s) and
+      // told the model "not ready yet - still coming up" about a job that was
+      // already training. Note that this changes the STATUS only - the settle
+      // window in `runBackground` still applies, via a TERMINAL predicate rather
+      // than a `!== 'starting'` one (I-12).
+      status: kind === 'task' ? 'running' : 'starting',
+      startedAt,
       exitCode: null,
       signal: null,
       rows: [],
       rowsSeen: 0,
       truncated: false,
+      lastOutputAt: startedAt,
       ...(hint !== undefined ? { port: hint } : {}),
       ...(preoccupied ? { portPreoccupied: true } : {}),
     };
@@ -222,11 +258,23 @@ export class ProcSupervisor implements ProcSupervisorPort {
     record.pid = child.pid;
 
     const onChunk = (chunk: Buffer | string): void => {
-      const rows = ring.append(typeof chunk === 'string' ? chunk : chunk.toString());
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      const rows = ring.append(text);
+      // EVERY CHUNK, NOT EVERY COMPLETED ROW. A `\r`-rewritten progress bar
+      // moves continuously while completing no row at all, so a row-based clock
+      // would call a healthy download stalled after `jobs.stallSeconds`.
+      record.lastOutputAt = Date.now();
       record.rowsSeen = ring.rowsSeen;
       record.truncated = ring.truncated;
       record.rows = ring.tail(PROC_LIMITS.cardTailRows);
       if (rows.length > 0) entry.watcher?.offerRows(rows);
+      if (this.opts.mirror) {
+        this.opts.mirror.write(id, text);
+        // The path exists only once the mirror has actually opened a file, and
+        // `bash_output`'s truncation note is useful when it names a real one - so
+        // it is read back rather than assumed.
+        record.logPath ??= this.opts.mirror.pathOf(id);
+      }
       this.scheduleOutput(entry);
     };
     child.stdout?.on('data', onChunk);
@@ -259,30 +307,37 @@ export class ProcSupervisor implements ProcSupervisorPort {
       this.finish(entry, asked ? 'stopped' : 'exited');
     });
 
-    const watcher = new ReadinessWatcher({
-      // The hint is dropped when the port was ALREADY answering: probing it
-      // would report ready in the first 40 ms for somebody else's server.
-      ...(hint !== undefined && !preoccupied ? { portHint: hint } : {}),
-      readyTimeoutMs: this.opts.readyTimeoutMs(),
-      ...(this.opts.probe ? { probe: this.opts.probe } : {}),
-      onReady: (result) => {
-        if (isTerminalStatus(record.status) || record.status === 'ready') return;
-        record.status = 'ready';
-        record.readyAt = Date.now();
-        if (result.url) record.url = result.url;
-        if (result.port !== undefined) record.port = result.port;
-        record.detectedBy = result.detectedBy;
-        this.emit({ type: 'ready', service: this.snapshot(entry) });
-      },
-      onTimeout: () => {
-        if (isTerminalStatus(record.status) || record.status === 'ready') return;
-        // AN HONEST THIRD STATE (D-4). It is alive and it listens on nothing.
-        record.status = 'running';
-        this.emit({ type: 'ready', service: this.snapshot(entry) });
-      },
-    });
-    entry.watcher = watcher;
-    watcher.start();
+    // A TASK HAS NO READINESS TO DETECT (AC-4), and starting a watcher for it
+    // would be actively wrong: the watcher's `onTimeout` path would later flip
+    // `running` -> `running` and emit a `ready` event for a job that has no
+    // address, and a 60s timer would keep firing for the whole life of a task
+    // that is already `running`.
+    if (kind === 'service') {
+      const watcher = new ReadinessWatcher({
+        // The hint is dropped when the port was ALREADY answering: probing it
+        // would report ready in the first 40 ms for somebody else's server.
+        ...(hint !== undefined && !preoccupied ? { portHint: hint } : {}),
+        readyTimeoutMs: this.opts.readyTimeoutMs(),
+        ...(this.opts.probe ? { probe: this.opts.probe } : {}),
+        onReady: (result) => {
+          if (isTerminalStatus(record.status) || record.status === 'ready') return;
+          record.status = 'ready';
+          record.readyAt = Date.now();
+          if (result.url) record.url = result.url;
+          if (result.port !== undefined) record.port = result.port;
+          record.detectedBy = result.detectedBy;
+          this.emit({ type: 'ready', service: this.snapshot(entry) });
+        },
+        onTimeout: () => {
+          if (isTerminalStatus(record.status) || record.status === 'ready') return;
+          // AN HONEST THIRD STATE (D-4). It is alive and it listens on nothing.
+          record.status = 'running';
+          this.emit({ type: 'ready', service: this.snapshot(entry) });
+        },
+      });
+      entry.watcher = watcher;
+      watcher.start();
+    }
 
     this.emit({ type: 'started', service: this.snapshot(entry) });
     return { ok: true, service: this.snapshot(entry) };
@@ -399,6 +454,15 @@ export class ProcSupervisor implements ProcSupervisorPort {
       if (entry.escalation) clearTimeout(entry.escalation);
       entry.outputTimer = undefined;
       entry.escalation = undefined;
+      // THE ONE EMIT THIS METHOD IS ALLOWED (long-task-jobs RV-P1-4). Without it a
+      // waiter that subscribed to `ProcEvent` is never woken here: this method
+      // sets a terminal status, and `child.on('exit')` then returns EARLY because
+      // the status is already terminal - so it does not emit either. A `job_wait`
+      // would sleep out its full timeout and only then learn the job was stopped.
+      //
+      // Safe on a signal-hook path: `emit` wraps every listener in try/catch, so
+      // this cannot throw, and it neither awaits nor spawns anything (I-9).
+      this.emit({ type: 'stopped', service: this.snapshot(entry) });
       for (const wake of entry.waiters.splice(0)) wake();
     }
   }
@@ -452,9 +516,41 @@ export class ProcSupervisor implements ProcSupervisorPort {
     if (entry.outputTimer) return;
     entry.outputTimer = setTimeout(() => {
       entry.outputTimer = undefined;
+      // PROGRESS IS COMPUTED HERE, NOT PER CHUNK (long-task-jobs §4.5): a
+      // 10 kHz stream of chunks would otherwise run the extraction table 10,000
+      // times a second to publish the same `47%`. At most 10 times a second, from
+      // the coalesced tick, is also what makes the result a stable value two
+      // waits in a row can be compared against.
+      this.refreshProgress(entry);
       this.emit({ type: 'output', service: this.snapshot(entry) });
     }, PROC_LIMITS.outputCoalesceMs);
     entry.outputTimer.unref?.();
+  }
+
+  /**
+   * Recompute the extracted progress line from the tail of the ring.
+   *
+   * The scan window is `tail(progressScanRows)` SPLIT AROUND THE CARRY: `tail()`
+   * appends the not-yet-terminated line as its last element, and
+   * `extractProgress` needs to know which one that is, because `source: 'carry'`
+   * is how the caller knows a `\r`-rewritten bar (a download, a tqdm run) is
+   * moving rather than silent.
+   */
+  private refreshProgress(entry: ServiceEntry): void {
+    const tail = entry.ring.tail(PROC_LIMITS.progressScanRows);
+    const carry = entry.ring.carryRow;
+    const rows = carry.length > 0 ? tail.slice(0, -1) : tail;
+    const progress = extractProgress(rows, carry);
+    if (progress) entry.record.progress = progress;
+    else delete entry.record.progress;
+  }
+
+  /** `now - lastOutputAt` past `jobs.stallSeconds`, on a job that has not ended. */
+  private isStalled(record: ServiceRecord): boolean {
+    if (isTerminalStatus(record.status)) return false;
+    const ms = this.opts.stallMs?.();
+    if (ms === undefined || ms <= 0) return false;
+    return Date.now() - record.lastOutputAt > ms;
   }
 
   /** Release every timer, wake every waiter, and announce the terminal state. */
@@ -471,6 +567,10 @@ export class ProcSupervisor implements ProcSupervisorPort {
     entry.record.rows = entry.ring.tail(PROC_LIMITS.cardTailRows);
     entry.record.rowsSeen = entry.ring.rowsSeen;
     entry.record.truncated = entry.ring.truncated;
+    // ONE LAST EXTRACTION, so a job that printed `100%` and exited carries that
+    // line into its card, its notice and its `job_wait` result rather than the
+    // value from the last coalesced tick 100 ms earlier.
+    this.refreshProgress(entry);
     this.emit({ type, service: this.snapshot(entry) });
     for (const wake of entry.waiters.splice(0)) wake();
   }
@@ -483,9 +583,9 @@ export class ProcSupervisor implements ProcSupervisorPort {
    * something else.
    */
   private evictTerminal(): void {
-    if (this.services.size < PROC_LIMITS.maxServices) return;
+    if (this.services.size < PROC_LIMITS.maxJobs) return;
     for (const [id, entry] of this.services) {
-      if (this.services.size < PROC_LIMITS.maxServices) break;
+      if (this.services.size < PROC_LIMITS.maxJobs) break;
       if (isTerminalStatus(entry.record.status)) this.services.delete(id);
     }
   }
@@ -494,6 +594,7 @@ export class ProcSupervisor implements ProcSupervisorPort {
     const r = entry.record;
     return Object.freeze({
       id: r.id,
+      kind: r.kind,
       toolCallId: r.toolCallId,
       command: r.command,
       cwd: r.cwd,
@@ -512,6 +613,17 @@ export class ProcSupervisor implements ProcSupervisorPort {
       rowsSeen: r.rowsSeen,
       truncated: r.truncated,
       ...(r.killIncomplete ? { killIncomplete: true } : {}),
+      // THE THREE FIELDS THIS HAND-COPIED LITERAL WOULD OTHERWISE LOSE
+      // (long-task-jobs RV-P1-8). `kind` and `lastOutputAt` are REQUIRED on
+      // `ServiceSnapshot`, so forgetting one is a compile error; `progress` and
+      // `logPath` cannot be required (they genuinely may not exist) and are
+      // covered by AC-26 / AC-38 instead.
+      lastOutputAt: r.lastOutputAt,
+      ...(r.progress
+        ? { progress: { text: r.progress.text, kind: r.progress.kind } }
+        : {}),
+      ...(this.isStalled(r) ? { stalled: true } : {}),
+      ...(r.logPath !== undefined ? { logPath: r.logPath } : {}),
     });
   }
 }

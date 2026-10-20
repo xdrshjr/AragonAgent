@@ -16,6 +16,7 @@ import type { Theme } from '../theme.js';
 import type { TermCapabilities } from '../capabilities.js';
 import { pickGlyphs } from '../glyphs.js';
 import { USER_ENTRY_MAX_ROWS } from '../composer-limits.js';
+import { expandTabs } from '../display-tab.js';
 
 function UserEntryImpl({
   text,
@@ -27,7 +28,13 @@ function UserEntryImpl({
   caps: TermCapabilities;
 }): React.ReactElement {
   const glyphs = pickGlyphs(caps);
-  const all = text.split('\n');
+  // TAB IS EXPANDED HERE, AT THE RENDER BOUNDARY, AND NOWHERE ABOVE IT.
+  // The payload keeps its `\t` (the model must receive the original
+  // indentation), so `<Text>` used to hand the raw byte to the terminal and
+  // the terminal painted an EIGHT-column stop while the composer painted a
+  // FOUR-column one. Splitting first and expanding per line keeps this row
+  // identical to the row the user saw in the draft.
+  const all = text.split('\n').map((line) => expandTabs(line));
   // A submitted 5 000-line paste otherwise asks Yoga to lay out 5 000 nodes
   // inside a measured entry -- the hazard `render-cache.ts:37` already records
   // in the same words ("a multi-megabyte 'code block' is almost always a pasted

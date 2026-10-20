@@ -1,0 +1,19 @@
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.9 [39m[90mM:/repo/aragon-agent-core/packages/cli[39m
+
+[31m[1m[41m Failed Tests 1 [49m[22m[31m-------------[39m
+System.Management.Automation.RemoteException
+[41m[1m FAIL [22m[49m [30m[46m env-isolated [49m[39m src/__tests__/model-profile-runtime.test.ts[2m > [22msettings transaction > [2m[22mthe real App save rebinds the role
+[31m[1mError[22m: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".[39m
+[36m [2mX[22m src/__tests__/model-profile-runtime.test.ts:[2m117:3[22m[39m
+    [90m117|[39m   [34mit[39m([32m"the real App save rebinds the role"[39m[33m,[39m [35masync[39m () [33m=>[39m {
+    [90m   |[39m   [31m^[39m
+System.Management.Automation.RemoteException
+[31m[2m--------------[1/1][22m[39m
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m338 passed[39m[22m[90m (339)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m5063 passed[39m[22m[2m | [22m[33m6 skipped[39m[90m (5070)[39m
+
+npm error Lifecycle script `test` failed with error:
+npm error code 1

@@ -39,6 +39,9 @@ $cliBinNormalizedPath = 'dist/launcher.js'
 $versionFiles = @($coreManifestPath, $cliManifestPath, $lockfilePath)
 $publishMayHaveStarted = $false
 $snapshots = @{}
+# Set by Invoke-WorkspaceTests so a failing workspace is reported with the same
+# `npm command failed (<code>): npm test -w <ws>` wording the release has always used.
+$script:lastNpmExitCode = 0
 $npmExecutable = $NpmCommand
 $npmPrefixArguments = @()
 $nodeOptionsWasPresent = Test-Path Env:NODE_OPTIONS
@@ -47,6 +50,19 @@ $nodeOptionsChanged = $false
 # The direct-registry probe below talks to the real npmjs.org. Gate it on the real
 # npm so the fake-npm fixture stays hermetic and offline.
 $registryProbeEnabled = ($NpmCommand -eq 'npm')
+# THE INSTALL STEP IS THE ONE UNGUARDED NETWORK EDGE IN THE RELEASE. It resolves tarballs
+# through whatever registry the operator configured, and a single reset mid-download fails
+# the run before a single gate has spoken: the version files are restored and the whole
+# install starts over. npm's default budget (2 retries, 300s timeout) was measured
+# against npmjs.org, not against a CDN that can stall a large native tarball for 30s.
+# These are DEFAULTS ONLY. An operator who exports a variable keeps their own value.
+$npmResilienceDefaults = [ordered]@{
+  NPM_CONFIG_FETCH_RETRIES = '5'
+  NPM_CONFIG_FETCH_RETRY_MINTIMEOUT = '10000'
+  NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT = '120000'
+  NPM_CONFIG_FETCH_TIMEOUT = '600000'
+}
+$script:appliedNpmResilienceDefaults = @()
 
 if ($NpmCommand -eq 'npm' -and $env:OS -eq 'Windows_NT') {
   $npmCmd = Get-Command 'npm.cmd' -CommandType Application -ErrorAction Stop
@@ -149,6 +165,26 @@ function Restore-NodeOptions {
   $script:nodeOptionsChanged = $false
 }
 
+# Named after the npm configuration keys they set, because that is the contract: an npm
+# child process inherits them from the environment and no command line changes shape
+# (the release tests assert the exact `npm ci` argument list).
+function Enable-NpmNetworkResilience {
+  foreach ($name in $npmResilienceDefaults.Keys) {
+    if (-not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name))) {
+      continue
+    }
+    [Environment]::SetEnvironmentVariable($name, $npmResilienceDefaults[$name])
+    $script:appliedNpmResilienceDefaults += $name
+  }
+}
+
+function Restore-NpmNetworkResilience {
+  foreach ($name in $script:appliedNpmResilienceDefaults) {
+    [Environment]::SetEnvironmentVariable($name, $null)
+  }
+  $script:appliedNpmResilienceDefaults = @()
+}
+
 function Invoke-NpmCommand {
   param([string[]]$Arguments)
 
@@ -162,6 +198,20 @@ function Invoke-NpmCommand {
   if ($LASTEXITCODE -ne 0) {
     throw "npm command failed ($LASTEXITCODE): npm $($Arguments -join ' ')"
   }
+}
+
+# PowerShell hands every stderr line of a native command back as an ErrorRecord, and a
+# stderr write that carries NO text (vitest separates its report sections with bare
+# newlines) arrives as a record whose ToString() is the exception's TYPE NAME. Joining
+# those verbatim is how a captured release log filled up with
+# "System.Management.Automation.RemoteException" where a blank line belonged: noise a
+# human has to read past, and a line `verify:test-gate --classify` has to step over. The
+# MESSAGE is the line; the type name never is.
+function ConvertTo-NpmOutputLine($Entry) {
+  if ($Entry -is [System.Management.Automation.ErrorRecord]) {
+    return [string]$Entry.Exception.Message
+  }
+  return $Entry.ToString()
 }
 
 function Invoke-NpmCapture {
@@ -183,7 +233,7 @@ function Invoke-NpmCapture {
   return [pscustomobject]@{
     ExitCode = $exitCode
     Output = $output
-    Text = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+    Text = ($output | ForEach-Object { ConvertTo-NpmOutputLine $_ }) -join [Environment]::NewLine
   }
 }
 
@@ -196,6 +246,99 @@ function Invoke-GitCapture {
     Output = $output
     Text = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
   }
+}
+
+# THE TEST RUNTIME IS THE ONE DEPENDENCY NO TEST CAN PROTECT (release-gate-and-native-panels
+# A-1). It decides HOW the tests are executed, so a caret range plus an `npm install` in
+# the bump step is precisely how the same commit went green one day and red the next.
+# The authority is the INSTALLED TREE, not `npm ls --json`: that command exits non-zero on
+# any extraneous or peer complaint and its JSON shape follows the workspace count, which
+# makes it a display layer rather than an assertion source.
+function Assert-TestRuntimePinned {
+  $declared = [ordered]@{}
+  foreach ($manifestPath in @($coreManifestPath, $cliManifestPath)) {
+    $devDependencies = Get-ObjectProperty (Read-JsonFile $manifestPath) 'devDependencies'
+    $declaredVersion = [string](Get-ObjectProperty $devDependencies 'vitest')
+    if ([string]::IsNullOrEmpty($declaredVersion)) {
+      throw "$manifestPath does not declare devDependencies.vitest, so the test runtime is unpinned"
+    }
+    if ($declaredVersion -notmatch '^\d+\.\d+\.\d+$') {
+      throw "The test runtime must be pinned exactly; $manifestPath declares vitest '$declaredVersion'"
+    }
+    $declared[$manifestPath] = $declaredVersion
+  }
+
+  foreach ($runtimePackage in @('vitest', 'vite')) {
+    $manifestFile = Join-Path (Get-Location) "node_modules/$runtimePackage/package.json"
+    if (-not (Test-Path -LiteralPath $manifestFile)) {
+      throw "node_modules/$runtimePackage/package.json is missing; install from the lockfile before asserting the pin"
+    }
+  }
+  $installedVitest = [string](Get-ObjectProperty (Read-JsonFile 'node_modules/vitest/package.json') 'version')
+  $installedVite = [string](Get-ObjectProperty (Read-JsonFile 'node_modules/vite/package.json') 'version')
+  $versions = @(
+    "$coreManifestPath=$($declared[$coreManifestPath])"
+    "$cliManifestPath=$($declared[$cliManifestPath])"
+    "installed vitest=$installedVitest"
+    "installed vite=$installedVite"
+  ) -join ', '
+
+  # A nested copy is the only PHYSICAL evidence that the two workspaces run on
+  # different runtimes; no declared version can prove its absence.
+  foreach ($nestedPath in @('packages/cli/node_modules/vitest', 'packages/core/node_modules/vitest')) {
+    if (Test-Path -LiteralPath (Join-Path (Get-Location) $nestedPath)) {
+      throw "A second test runtime is installed at ${nestedPath}: $versions"
+    }
+  }
+
+  if ($declared[$coreManifestPath] -ne $installedVitest -or $declared[$cliManifestPath] -ne $installedVitest) {
+    throw "Test runtime versions disagree: $versions"
+  }
+  Write-Host "> test runtime pinned: vitest $installedVitest, vite $installedVite" -ForegroundColor DarkGray
+}
+
+# Runs one workspace's tests. Returns $false on a genuine failure and $true otherwise.
+#
+# IT CAPTURES INSTEAD OF STREAMING because the captured log is the only input of
+# `verify:test-gate --classify`, and because the verdict decides whether ONE retry is
+# allowed. The retry is not a fix - the fix is `pool: 'threads'` - it only gives a
+# failure that already happened on somebody else's machine an explainable way out.
+# A real failure is never retried and its message is byte-identical to the old wording
+# (`publish-latest.tests.ps1` asserts that text on purpose).
+function Invoke-WorkspaceTests {
+  param([string]$Workspace)
+
+  $logName = 'aragon-test-' + ($Workspace -replace '[/\\]', '-') + '-' + (Get-Date).ToString('yyyyMMddHHmmss') + '.log'
+  $logPath = Join-Path ([IO.Path]::GetTempPath()) $logName
+  $first = Invoke-NpmCapture @('test', '-w', $Workspace)
+  Set-Content -LiteralPath $logPath -Value $first.Text -Encoding utf8
+  Write-Host $first.Text
+  if ($first.ExitCode -eq 0) {
+    return $true
+  }
+
+  # THE `--` SEPARATOR IS LOAD-BEARING. `npm run <script> --classify <log>` swallows the
+  # flag as an npm config key and runs the script with the path alone, so the gate would
+  # answer "pinned + writable" (exit 0) and every real failure would be classified as an
+  # environment fault and retried - the exact inversion this attribution exists to stop.
+  # The gate refuses unexpected arguments for the same reason, and this call is asserted
+  # through the fixture log by publish-latest.tests.ps1.
+  $classification = Invoke-NpmCapture @('run', 'verify:test-gate', '--', '--classify', $logPath)
+  Write-Host $classification.Text
+  if ($classification.ExitCode -ne 0) {
+    $script:lastNpmExitCode = $first.ExitCode
+    return $false
+  }
+
+  Write-Host "[release] $Workspace failed only on the vitest module-mirror race; retrying once" -ForegroundColor Yellow
+  $second = Invoke-NpmCapture @('test', '-w', $Workspace)
+  Write-Host $second.Text
+  if ($second.ExitCode -eq 0) {
+    Write-Host "[release] $Workspace passed on the retry; the first run was an environment failure" -ForegroundColor Yellow
+    return $true
+  }
+  $script:lastNpmExitCode = $second.ExitCode
+  return $false
 }
 
 function Read-JsonFile([string]$Path) {
@@ -494,12 +637,25 @@ function Assert-CliPackContents {
 }
 
 function Invoke-ReleaseChecks($PackageState) {
+  # INSTALL FROM THE LOCKFILE FIRST, AND ASSERT THE PIN IMMEDIATELY AFTER.
+  # Any later position makes the pin decorative: the tree that runs the tests would then
+  # be whatever an earlier install left behind. `--ignore-scripts` keeps native builds
+  # out of the release path (afterwards a plain `npm install` restores a developable
+  # tree - that is `npm ci`'s definitional behaviour, not a defect).
+  Invoke-NpmCommand @('ci', '--include=dev', '--ignore-scripts')
+  Assert-TestRuntimePinned
+  # Invoked as an npm script, not as `& node ...`, so the fake-npm fixture intercepts it
+  # like every other release step; a step that cannot be intercepted is a step no test
+  # can protect.
+  Invoke-NpmCommand @('run', 'verify:test-gate')
   # Tests inspect dist entry points (including post-build shebangs), so rebuild
   # before testing rather than validating stale or partially compiled output.
   Invoke-NpmCommand @('run', 'build')
   # npm's --workspaces runner continues after failures, so a passing Core summary
   # can hide an earlier CLI failure. Stop at the failing workspace and name it.
-  Invoke-NpmCommand @('test', '-w', 'packages/cli')
+  if (-not (Invoke-WorkspaceTests 'packages/cli')) {
+    throw "npm command failed ($script:lastNpmExitCode): npm test -w packages/cli"
+  }
   Invoke-NpmCommand @('test', '-w', 'packages/core')
   Invoke-NpmCommand @('run', 'verify:dist', '-w', 'packages/core')
   # Brand gate. Must run AFTER `npm run build` (or it scans a stale/absent dist)
@@ -614,6 +770,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $coreManifestPath)) -o
 Push-Location $PSScriptRoot
 try {
   Enable-InsecureTlsWarningFilterForNodeChildren
+  Enable-NpmNetworkResilience
   Assert-RepositoryState
   Save-VersionFileSnapshots
 
@@ -631,15 +788,18 @@ try {
     # A freshly created scope has no such fallback: the very first `-Bump minor`
     # dies at step one with `E404 ... is not in this registry`.
     #
-    # Skipping the intermediate reify costs nothing: the two installs below rebuild
-    # the lockfile and node_modules once the CLI's range already points at the new
-    # Core version, and Assert-PackageState verifies the result.
+    # Skipping the intermediate reify costs nothing: the lockfile pass below recomputes
+    # package-lock.json once the CLI's range already points at the new Core version, and
+    # Assert-PackageState verifies the result.
     Invoke-NpmCommand @('version', $Bump, '-w', 'packages/core', '--no-git-tag-version', '--no-workspaces-update')
     $newCoreVersion = [string](Read-JsonFile $coreManifestPath).version
     Invoke-NpmCommand @('pkg', 'set', "dependencies.@aragon-agent/core=^$newCoreVersion", '-w', 'packages/cli')
     Invoke-NpmCommand @('version', $Bump, '-w', 'packages/cli', '--no-git-tag-version', '--no-workspaces-update')
+    # The lockfile must follow the new versions or the NEXT `npm ci` fails with EUSAGE.
     Invoke-NpmCommand @('install', '--package-lock-only', '--ignore-scripts')
-    Invoke-NpmCommand @('install', '--include=dev', '--ignore-scripts')
+    # A second `npm install --include=dev` used to live here. It is gone on purpose: the
+    # tree was already installed from the lockfile before any gate ran, and installing
+    # again would hand the pinned versions straight back to npm's resolver.
   }
 
   $packageState = Assert-PackageState
@@ -698,6 +858,7 @@ try {
   throw
 } finally {
   try {
+    Restore-NpmNetworkResilience
     Restore-NodeOptions
   } finally {
     Pop-Location

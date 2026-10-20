@@ -231,6 +231,24 @@ describe('estimateEntryRows', () => {
     }
   });
 
+  it('counts DISPLAY COLUMNS, so a CJK row is two cells per glyph', () => {
+    // The old counter advanced once per UTF-16 code unit, which UNDER-estimates
+    // -- this file names that as the unsafe direction. 40 CJK glyphs are 80
+    // cells, so at 40 usable columns they need two rows, not one.
+    const cjk: Entry = { id: 'e1', kind: 'user', text: '\u4e2d'.repeat(40) };
+    const ascii: Entry = { id: 'e2', kind: 'user', text: 'x'.repeat(40) };
+    expect(estimateEntryRows(ascii, 42, 'compact', false)).toBe(1);
+    expect(estimateEntryRows(cjk, 42, 'compact', false)).toBe(2);
+  });
+
+  it('counts a TAB as up to eight cells, matching what the renderer paints', () => {
+    // `UserEntry` expands the stored TAB at paint time, so an estimate that read
+    // it as one column would keep the row short while the painted row got taller.
+    const tabbed: Entry = { id: 'e1', kind: 'user', text: '\t'.repeat(5) };
+    expect(estimateEntryRows(tabbed, 42, 'compact', false)).toBe(1);
+    expect(estimateEntryRows({ ...tabbed, text: '\t'.repeat(6) }, 42, 'compact', false)).toBe(2);
+  });
+
   it('estimates a patch card from the PATCH, not the one-line preview', () => {
     // A patch-bearing entry's stored preview is one line (D-19), so estimating
     // from it would report a 3-row card for a 12-row diff — an UNDER-estimate,

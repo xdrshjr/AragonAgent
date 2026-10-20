@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { enterAltScreen, writeExitTranscript } from '../ui/screen.js';
+import { enterAltScreen, enterNativeScreen, writeExitTranscript } from '../ui/screen.js';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -86,8 +86,11 @@ describe('CLI 渲染退出的真实进程验证', () => {
         if(url!==${JSON.stringify(pathToFileURL(join(buildDirectory, 'ui/App.js')).href)})return next(url,ctx);
         return {format:'module',shortCircuit:true,source:${JSON.stringify(app)}};
       }`;
+      // These probes assert the FULL-SCREEN screen handling, so they pin `app`
+      // (tui-native-terminal-scroll: the default is now `native`).
       const env: NodeJS.ProcessEnv = {
         ...process.env, TERM: 'dumb', CI: '1', ARAGON_HOME: commandHome,
+        ARAGON_SCROLL_MODE: 'app',
       };
       for (const key of ['WT_SESSION', 'TERM_PROGRAM', 'LANG', 'LC_ALL', 'LC_CTYPE',
         'NO_COLOR', 'FORCE_COLOR', 'COLORTERM']) delete env[key];
@@ -148,7 +151,7 @@ describe('CLI 渲染退出的真实进程验证', () => {
     const result = spawnSync(process.execPath, ['--import', ttyPreload, '--experimental-loader',
       `data:text/javascript,${encodeURIComponent(loader)}`, join(buildDirectory, 'launcher.js'), 'config'], {
       windowsHide: true, encoding: 'utf8', timeout: 10_000, cwd: home,
-      env: { ...process.env, TERM: 'dumb', CI: '1', ARAGON_HOME: home },
+      env: { ...process.env, TERM: 'dumb', CI: '1', ARAGON_HOME: home, ARAGON_SCROLL_MODE: 'app' },
     });
     expect(result.error).toBeUndefined();
     expect(result.status, result.stderr).toBe(failed ? 1 : 0);
@@ -219,7 +222,7 @@ describe('CLI 渲染退出的真实进程验证', () => {
         join(buildDirectory, 'cli.js'), 'config'], {
         cwd: home, windowsHide: true, encoding: 'utf8', timeout: 10_000,
         env: { ...process.env, TERM: 'dumb', CI: '1', ARAGON_FULLSCREEN: '0',
-          ARAGON_HOME: home, PROBE_MARKER: marker,
+          ARAGON_SCROLL_MODE: 'app', ARAGON_HOME: home, PROBE_MARKER: marker,
           PROBE_NORMAL: normal ? '1' : '0', PROBE_CLEANUP_THROW: cleanupThrows ? '1' : '0',
           PROBE_WORKER_SCRIPT: workerScript, PROBE_WORKER_MARKER: workerMarker },
       });
@@ -237,6 +240,48 @@ describe('CLI 渲染退出的真实进程验证', () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  }, 15_000);
+
+  it('rejects an invalid --scroll-mode with exit code 2 and one sentence', () => {
+    const result = spawnSync(process.execPath, [join(buildDirectory, 'cli.js'),
+      '--scroll-mode', 'bogus'], {
+      windowsHide: true, encoding: 'utf8', timeout: 10_000,
+      env: { ...process.env, ARAGON_HOME: commandHome },
+    });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('Invalid --scroll-mode "bogus" (expected native or app).');
+  });
+
+  it('native scroll (the default) never enters the alternate screen or asks for the mouse', () => {
+    const app = `
+      import React from 'react';
+      import {Text,useApp} from 'ink';
+      export function App() {
+        const {exit}=useApp();
+        React.useEffect(()=>{const t=setTimeout(()=>exit(),150);return()=>clearTimeout(t)},[]);
+        return React.createElement(Text,null,'NATIVE_PROBE');
+      }`;
+    const loader = `export async function load(url,ctx,next){
+      if(url!==${JSON.stringify(pathToFileURL(join(buildDirectory, 'ui/App.js')).href)})return next(url,ctx);
+      return {format:'module',shortCircuit:true,source:${JSON.stringify(app)}};
+    }`;
+    const result = spawnSync(process.execPath, ['--import', ttyPreload, '--experimental-loader',
+      `data:text/javascript,${encodeURIComponent(loader)}`, join(buildDirectory, 'cli.js'), 'config'], {
+      windowsHide: true, encoding: 'utf8', timeout: 10_000, cwd: commandHome,
+      env: { ...process.env, TERM: 'dumb', CI: '1', ARAGON_HOME: commandHome,
+        ARAGON_SCROLL_MODE: 'native' },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('NATIVE_PROBE');
+    for (const forbidden of ['\x1b[?1049', '\x1b[?1047', '\x1b[?1000', '\x1b[?1002', '\x1b[?1006',
+      '\x1b[?1007', '\x1b[3J', '\x1b[2J']) {
+      expect(result.stdout, forbidden).not.toContain(forbidden);
+    }
+    // Bracketed paste is the one mode it touches, and it must be unwound.
+    expect(result.stdout).toContain('\x1b[?2004h');
+    expect(result.stdout).toContain('\x1b[?2004l');
+    // The cursor is shown again on exit (Ink hides it while the region is live).
+    expect(result.stdout.lastIndexOf('\x1b[?25h')).toBeGreaterThan(result.stdout.lastIndexOf('\x1b[?25l'));
   }, 15_000);
 });
 
@@ -285,6 +330,62 @@ describe('enterAltScreen', () => {
 
   it('is a no-op for a missing stdout', () => {
     expect(() => enterAltScreen(undefined).restore()).not.toThrow();
+  });
+});
+
+describe('enterNativeScreen (tui-native-terminal-scroll §4.8)', () => {
+  const FORBIDDEN = ['[?1049', '[?1047', '[?47', '[?1000', '[?1002',
+    '[?1003', '[?1006', '[?1007', '[2J', '[3J'];
+
+  it('only enables bracketed paste, and never the alternate screen or the mouse', () => {
+    const { stdout, all } = fakeStdout(true);
+    const handle = enterNativeScreen(stdout, { bracketedPaste: true });
+    handle.setMouseCapture(true);
+    handle.restore();
+    expect(all().startsWith('[?2004h')).toBe(true);
+    for (const sequence of FORBIDDEN) expect(all()).not.toContain(sequence);
+  });
+
+  it('writes nothing on entry when paste is off', () => {
+    const { stdout, writes } = fakeStdout(true);
+    enterNativeScreen(stdout);
+    expect(writes).toEqual([]);
+  });
+
+  it('restore() writes ?2004l and shows the cursor, exactly once', () => {
+    const { stdout, all } = fakeStdout(true);
+    const handle = enterNativeScreen(stdout, { bracketedPaste: true });
+    handle.restore();
+    handle.restore();
+    expect(all().split('[?2004l').length - 1).toBe(1);
+    expect(all().split('[?25h').length - 1).toBe(1);
+  });
+
+  it('is a hard no-op on a non-TTY or a missing stdout', () => {
+    const { stdout, writes } = fakeStdout(false);
+    enterNativeScreen(stdout, { bracketedPaste: true }).restore();
+    expect(writes).toEqual([]);
+    expect(() => enterNativeScreen(undefined).restore()).not.toThrow();
+  });
+
+  it('fills the screen FIRST when the bottom anchor could not be measured', () => {
+    // tui-bottom-anchored-live-region §6.5: the fill goes before everything else, or
+    // it would scroll away whatever was just written.
+    const { stdout, all } = fakeStdout(true);
+    enterNativeScreen(stdout, { bracketedPaste: true, anchorFillRows: 5 });
+    expect(all()).toBe('\r\n\r\n\r\n\r\n\r\n\x1b[?2004h');
+  });
+
+  it('writes no fill bytes when the anchor was measured', () => {
+    const { stdout, all } = fakeStdout(true);
+    enterNativeScreen(stdout, { bracketedPaste: true, anchorFillRows: 0 });
+    expect(all()).toBe('\x1b[?2004h');
+  });
+
+  it('ignores a nonsense or negative fill count', () => {
+    const { stdout, writes } = fakeStdout(true);
+    enterNativeScreen(stdout, { anchorFillRows: -4 });
+    expect(writes).toEqual([]);
   });
 });
 

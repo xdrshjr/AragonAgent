@@ -29,6 +29,7 @@
  */
 
 import type { AgentEvent, Message, ModelInfo, TokenUsage } from '@aragon-agent/core';
+import type { ContextWindowOrigin } from '../config/schema.js';
 import { getLogger } from '../logging/logger.js';
 import { computeEstimateOffset, computePressure, isInputSideUnmeasured } from './pressure.js';
 import type { ContextUsageSnapshot, Pressure } from './types.js';
@@ -67,6 +68,14 @@ export interface ContextMeterDeps {
    * measurement, so a live settings edit moves the denominator without a relaunch.
    */
   getWindowOverride(): number | null;
+  /**
+   * WHERE the override above came from, read live beside it
+   * (profile-context-window §6.1). Optional so every existing construction
+   * site stays untouched: a meter built without it reports an overridden
+   * window with origin `undefined`, and `/context` falls back to its
+   * pre-feature "from contextWindow configuration" wording byte-for-byte.
+   */
+  getWindowOverrideOrigin?(): ContextWindowOrigin | undefined;
   getRequestVersion?(): number;
 }
 
@@ -95,6 +104,9 @@ export function toContextUsage(p: Pressure): ContextUsageSnapshot {
     deltaTokens: p.deltaTokens,
     windowKnown: p.windowKnown,
     windowOverridden: p.windowOverridden,
+    ...(p.windowOverrideOrigin !== undefined
+      ? { windowOverrideOrigin: p.windowOverrideOrigin }
+      : {}),
   };
 }
 
@@ -468,6 +480,10 @@ export class ContextMeter {
         window.contextWindow !== last?.contextWindow ||
         window.windowKnown !== last?.windowKnown ||
         window.windowOverridden !== last?.windowOverridden ||
+        // ORIGIN IS PART OF THE DIRTY CHECK: a save that keeps the same number
+        // but moves it from the legacy key to the bound profile would otherwise
+        // leave `/context` naming the old source until the next measurement.
+        window.windowOverrideOrigin !== last?.windowOverrideOrigin ||
         this.deps.getModelInfo().contextWindowSource !== last?.windowSource) this.dirty = true;
   }
 
@@ -494,6 +510,9 @@ export class ContextMeter {
       windowSource: this.deps.getModelInfo().contextWindowSource,
       windowKnown: window.windowKnown,
       windowOverridden: window.windowOverridden,
+      ...(window.windowOverrideOrigin !== undefined
+        ? { windowOverrideOrigin: window.windowOverrideOrigin }
+        : {}),
       ...(this.estimateOffset !== undefined ? { estimateOffset: this.estimateOffset } : {}),
       ...(this.measuredPrefixLength !== undefined
         ? { measuredPrefixLength: this.measuredPrefixLength }
@@ -514,10 +533,16 @@ export class ContextMeter {
     contextWindow: number;
     windowKnown: boolean;
     windowOverridden: boolean;
+    windowOverrideOrigin?: ContextWindowOrigin;
   } {
     const override = this.deps.getWindowOverride();
     if (override !== null && Number.isFinite(override) && override > 0) {
-      return { contextWindow: override, windowKnown: true, windowOverridden: true };
+      // ORIGIN ONLY RIDES THE OVERRIDE BRANCH: the AUTO branch names its own
+      // source through `getModelInfo().contextWindowSource`, and the two must
+      // never both claim the denominator (profile-context-window §6.1).
+      const origin = this.deps.getWindowOverrideOrigin?.();
+      return { contextWindow: override, windowKnown: true, windowOverridden: true,
+        ...(origin !== undefined ? { windowOverrideOrigin: origin } : {}) };
     }
     return {
       contextWindow: this.deps.getModelInfo().contextWindow,

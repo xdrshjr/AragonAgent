@@ -15,6 +15,7 @@ import { QueuedEntry } from './entries/QueuedEntry.js';
 import { AssistantEntry } from './entries/AssistantEntry.js';
 import { ToolCard, statusColor, toolEntryGlyph } from './entries/ToolCard.js';
 import { TeamCard, teamCardColor } from './entries/TeamCard.js';
+import { isLiveTeamCard, rosterCounts } from './team-status.js';
 import { TodoCard, todoCardColor } from './entries/TodoCard.js';
 import { RetryCard, retryCardColor } from './entries/RetryCard.js';
 import { FastCard, fastCardColor } from './entries/FastCard.js';
@@ -58,13 +59,29 @@ interface TranscriptProps {
  * `undefined` for everything that is not a running tool, which is what keeps
  * every other card's memo boundary intact — `undefined === undefined` in the
  * comparator, on every frame, forever.
+ *
+ * EXPORTED for `ui/scrollback/LiveTail.tsx` (release-gate-and-native-panels §6.5), and
+ * that is the whole of this feature's change to this file: the live region mounts the
+ * same `EntryView` the transcript does, so it must feed it the same per-entry clock.
+ * A copy of this rule in the band would be a second answer to "does this card tick?"
+ * and the two would disagree the first time a consumer is added.
  */
-function nowSecFor(entry: Entry, nowSec: number | undefined): number | undefined {
+export function nowSecFor(entry: Entry, nowSec: number | undefined): number | undefined {
   if (entry.kind === 'tool' && entry.status === 'running') return nowSec;
   // THE LIVE COMPACTION CARD IS THE SECOND CONSUMER (hardening W5). It is at most
   // ONE entry in the whole transcript, and it settles - so the memo boundary this
   // function protects is unchanged for every other card, forever.
   if (entry.kind === 'compaction' && entry.live) return nowSec;
+  // THE FOURTH CONSUMER IS A LIVE DISPATCH CARD (tui-subagent-double-roster A-1):
+  // a child's elapsed time must advance while it works, and `TeamCard` reads this
+  // same 1 Hz clock instead of a second `Date.now()` per render. A suppressed card
+  // never mounts, so this only keeps the reading honest for a directly mounted one.
+  if (entry.kind === 'team' && entry.active) return nowSec;
+  // THE THIRD CONSUMER IS A LIVE JOB (long-task-jobs D-8), and it is the reason
+  // this stays a single 1 Hz clock: a task's elapsed time and its `no output`
+  // badge both have to move, and a per-card `setInterval` would be one timer per
+  // job. `terminal` entries are excluded so a settled record never re-renders.
+  if (entry.kind === 'service' && !entry.terminal) return nowSec;
   return undefined;
 }
 
@@ -138,6 +155,13 @@ function EntryViewImpl({
         <QueuedEntry text={entry.text} theme={theme} caps={caps} />,
       );
     case 'assistant': {
+      // Render-layer backstop for the reducer prune (defect 5) - the reducer is the
+      // source of truth, and this only catches a settled, entirely empty bubble
+      // that reached here some other way. Returned BEFORE `frame(...)`, so neither
+      // the glyph row nor the separation row is drawn.
+      if (!entry.streaming && entry.text.trim() === '' && (entry.thinking ?? '').trim() === '') {
+        return null;
+      }
       const animate = entry.streaming && !reducedMotion && caps.unicode;
       return frame(
         animate ? <Spinner type="dots" /> : glyphs.assistant,
@@ -183,10 +207,21 @@ function EntryViewImpl({
           caps={caps}
         />,
       );
-    case 'team':
+    case 'team': {
+      // THE LIVE DISPATCH HAS EXACTLY ONE SURFACE (tui-subagent-double-roster A-2):
+      // while `active`, the roster (`TeamPanel`) is the only live subagent block, so
+      // the transcript draws nothing for this entry and the card appears - once - as
+      // history the moment the dispatch settles. Returning BEFORE `frame(...)` draws
+      // neither the rail marker nor the separation row.
+      //
+      // `renderer.tsx`'s offscreen measurement goes through THIS function too, which is
+      // what makes the native print pump's `measureWindow` agree with the frame for
+      // free. `estimateEntryRows` carries the same predicate (0 rows), so no other
+      // arithmetic has to know about the suppression.
+      if (isLiveTeamCard(entry)) return null;
       return frame(
         glyphs.teamAgent,
-        teamCardColor(entry.runs, entry.active, entry.aborted, theme),
+        teamCardColor(rosterCounts(entry.runs), entry.active, entry.aborted, theme),
         <TeamCard
           requested={entry.requested}
           runs={entry.runs}
@@ -197,8 +232,10 @@ function EntryViewImpl({
           reducedMotion={reducedMotion}
           theme={theme}
           caps={caps}
+          nowSec={nowSecFor(entry, nowSec)}
         />,
       );
+    }
     case 'todo':
       return frame(
         toolGlyph(glyphs, 'todo_write'),
@@ -300,6 +337,7 @@ function EntryViewImpl({
         serviceCardColor(entry, theme),
         <ServiceCard
           serviceId={entry.serviceId}
+          jobKind={entry.jobKind}
           command={entry.command}
           status={entry.status}
           url={entry.url}
@@ -311,6 +349,10 @@ function EntryViewImpl({
           rows={entry.rows}
           terminal={entry.terminal}
           killIncomplete={entry.killIncomplete}
+          progress={entry.progress}
+          stalled={entry.stalled}
+          lastOutputAt={entry.lastOutputAt}
+          nowSec={nowSec}
           expanded={expanded}
           reducedMotion={reducedMotion}
           theme={theme}

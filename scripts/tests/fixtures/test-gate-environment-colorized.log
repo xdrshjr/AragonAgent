@@ -1,0 +1,10 @@
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.9 [39m[90mM:/repo/aragon-agent-core/packages/cli[39m
+
+[41m[1m FAIL [22m[49m [30m[46m env-isolated [49m[39m src/skills/__tests__/usage.test.ts[2m [ src/skills/__tests__/usage.test.ts ][22m
+Error: ENOENT: no such file or directory, open 'C:\Users\dev\AppData\Local\Temp\l9cvG3vXRBN7NkoijzXS8\ssr\.tmp-1792458768098-ng66o9nxhkq'
+System.Management.Automation.RemoteException
+[41m[1m FAIL [22m[49m [30m[46m env-isolated [49m[39m src/agent/__tests__/controller.test.ts[2m [ src/agent/__tests__/controller.test.ts ][22m
+Error: ENOENT: no such file or directory, open 'C:\Users\dev\AppData\Local\Temp\l9cvG3vXRBN7NkoijzXS8\ssr\84afe19c2d1f4b0e'
+
+[2m Test Files [22m [1m[31m2 failed[39m[22m[90m (2)[39m

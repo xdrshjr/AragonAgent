@@ -91,3 +91,28 @@ describe('short overlay body budget', () => {
     }
   });
 });
+
+// DEFECT 11. A PgUp/PgDn - and a Shift+wheel notch - inside a controlled overlay
+// moved a constant eight rows. `/help` on a 100x24 terminal shows 19 rows, so that
+// was 42% of a page with eleven rows of overlap on every turn. The step is now the
+// overlay's own window minus the two context rows the transcript's page keeps.
+describe('overlay page size', () => {
+  it('turns one window minus two rows of context', async () => {
+    const { overlayBodyRows, overlayPageSize } = await import('../ui/layout/OverlayFrame.js');
+    for (const [maxRows, cols] of [[24, 100], [30, 100], [40, 80], [12, 60]] as const) {
+      const body = overlayBodyRows(maxRows, cols);
+      expect(overlayPageSize(maxRows, cols)).toBe(Math.max(1, body - 2));
+    }
+  });
+
+  it('never returns zero, even for a body too short to overlap', async () => {
+    const { overlayPageSize } = await import('../ui/layout/OverlayFrame.js');
+    expect(overlayPageSize(6, 100)).toBe(1);
+  });
+
+  it('is larger than the old constant on a normal terminal', async () => {
+    const { overlayPageSize } = await import('../ui/layout/OverlayFrame.js');
+    // 21 usable overlay rows on 100x24 => a 16-row body => a 14-row page.
+    expect(overlayPageSize(21, 100)).toBe(14);
+  });
+});

@@ -61,6 +61,7 @@ import {
   DEFAULT_BASH_CONFIG,
   type CliConfig,
   type TodoConfig,
+  DEFAULT_JOBS_CONFIG,
 } from '../config/schema.js';
 import type { SkillService } from '../skills/service.js';
 import type { AgentMode } from '../agent/agent-mode.js';
@@ -146,6 +147,10 @@ const CONFIG: CliConfig = {
   skillsRuntime: DEFAULT_SKILLS_RUNTIME,
   todo: DEFAULT_TODO_CONFIG,
   bash: DEFAULT_BASH_CONFIG,
+  // The ELEVENTH nested section (long-task-jobs). `enabled: true` because a
+  // fixture that says nothing about jobs should behave like a default session;
+  // the subsystems each fixture is about are switched off individually above.
+  jobs: DEFAULT_JOBS_CONFIG,
   retry: DEFAULT_RETRY_CONFIG,
   // The NINTH nested section, and it is read at CONSTRUCTION by
   // `AgentController` — so a fixture without it crashes before the first

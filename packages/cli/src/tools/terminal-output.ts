@@ -23,6 +23,8 @@
  * presentation round's job.
  */
 
+import { stripControlSequences } from '../input/control-sequences.js';
+
 /** Columns a live row may occupy before it is clipped. */
 export const LIVE_ROW_MAX_CHARS = 200;
 
@@ -80,23 +82,25 @@ export interface SanitizeResult {
   carry: string;
 }
 
-/** CSI: `\x1b[` params intermediates final. */
-const CSI = /\x1b\[[0-?]*[ -/]*[@-~]/g;
-/** OSC: `\x1b]` ... terminated by BEL or ST. */
-const OSC = /\x1b\][\s\S]*?(?:\x07|\x1b\\)/g;
-/** The two-byte forms: `\x1b` followed by one character. */
-const ESC_PAIR = /\x1b[\s\S]/g;
 /** C1, plus every C0 control except `\t` `\n` `\r`. */
 const CONTROLS = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
 
 /**
  * Remove every escape sequence and control byte except `\t` `\n` `\r`.
  *
+ * SEQUENCE SYNTAX HAS ONE OWNER (`input/control-sequences.ts`); this function
+ * adds only the control-byte sweep a DISPLAY row wants. Both call sites in this
+ * module already cut an unfinished escape off into the carry before calling it
+ * (`partialEscapeStart`), so the shared one-shot rule for a truncated sequence
+ * is exactly what they need -- and it fixes AC-24's failure in place: the old
+ * two-byte rule consumed the `\x1b[` of an unfinished CSI and left the
+ * PARAMETERS behind, so `\x1b[31m` split across chunks rendered as `red 3`.
+ *
  * Exported for the tests, and used by `toDisplayRow` as the second line of
  * defence over a carry that ends mid-escape.
  */
 export function stripAnsi(text: string): string {
-  return text.replace(CSI, '').replace(OSC, '').replace(ESC_PAIR, '').replace(CONTROLS, '');
+  return stripControlSequences(text).replace(CONTROLS, '');
 }
 
 /**

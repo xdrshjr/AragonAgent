@@ -10,6 +10,34 @@
  * first and teach core about a host shape it has no business defining.
  */
 
+import type { JobProgress, ProgressKind } from './progress.js';
+
+/**
+ * WHICH KIND OF JOB A RECORD DESCRIBES (long-task-jobs §4.2, D-1).
+ *
+ *  - `service` never exits on its own and owes the caller a readiness signal;
+ *  - `task` always exits and is `running` from the spawn.
+ *
+ * The distinction is not cosmetic. Before it existed, an explicitly backgrounded
+ * `python train.py` sat in `starting` for `readyTimeoutMs` (60s) and `bash` told
+ * the model "not ready yet - still coming up" about a job that was already
+ * working - which is what pushed it into starting a second copy or giving up.
+ */
+export type JobKind = 'service' | 'task';
+
+/**
+ * The progress subset a SNAPSHOT carries: the rendered line and its shape.
+ *
+ * `source` and `rowIndex` stay on the record. They exist for tests and debugging
+ * (which row won, and did it come from a `\r` carry), and a card or a tool result
+ * that started depending on them would be depending on an implementation detail
+ * of the extraction table.
+ */
+export interface ServiceSnapshotProgress {
+  text: string;
+  kind: ProgressKind;
+}
+
 export type ServiceStatus =
   /** Spawned, not yet ready, still alive. */
   | 'starting'
@@ -37,8 +65,18 @@ export function isTerminalStatus(status: ServiceStatus): boolean {
 }
 
 export interface ServiceRecord {
-  /** `s1`, `s2`, ... Short because the model has to quote it back. */
+  /** `s1` (a service), `t3` (a task). Short because the model has to quote it back. */
   id: string;
+  /**
+   * WHICH KIND OF JOB THIS IS (long-task-jobs §4.2, D-1).
+   *
+   * A `service` never exits on its own and owes the caller a readiness signal; a
+   * `task` always exits and is `running` from the spawn. The distinction is not
+   * cosmetic: before it existed, an explicitly backgrounded `python train.py` sat
+   * in `starting` for `readyTimeoutMs` (60s) and `bash` told the model "not ready
+   * yet - still coming up" about a job that was already working.
+   */
+  kind: JobKind;
   /** The `bash` call that started it. */
   toolCallId: string;
   command: string;
@@ -72,6 +110,20 @@ export interface ServiceRecord {
   truncated: boolean;
   /** A stop reported the pid still alive afterwards (R-2 / P2-6). */
   killIncomplete?: boolean;
+  /**
+   * When output last arrived, updated on EVERY CHUNK rather than per completed
+   * row (long-task-jobs §4.5).
+   *
+   * THE DISTINCTION IS LOAD-BEARING: a `\r`-rewritten progress bar (every
+   * download tool there is) moves continuously while completing no row at all,
+   * so a "last completed row" clock would declare a healthy download stalled
+   * after `jobs.stallSeconds`.
+   */
+  lastOutputAt: number;
+  /** Latest extracted progress line, recomputed on the coalesced output tick. */
+  progress?: JobProgress;
+  /** Where the optional on-disk mirror is writing this job's full log. */
+  logPath?: string;
 }
 
 /**
@@ -79,9 +131,15 @@ export interface ServiceRecord {
  *
  * LISTENERS GET SNAPSHOTS, NEVER THE RECORD, so a render-side bug cannot mutate
  * supervisor state. `rows` carries only the last `PROC_LIMITS.cardTailRows`.
+ *
+ * `kind` AND `lastOutputAt` ARE REQUIRED ON PURPOSE (long-task-jobs RV-P1-8).
+ * `snapshot()` is a hand-copied object literal, so a new optional field that is
+ * forgotten there fails silently in five consumers at once. Required fields turn
+ * that omission into a compile error instead.
  */
 export interface ServiceSnapshot {
   id: string;
+  kind: JobKind;
   toolCallId: string;
   command: string;
   cwd: string;
@@ -100,6 +158,17 @@ export interface ServiceSnapshot {
   rowsSeen: number;
   truncated: boolean;
   killIncomplete?: boolean;
+  lastOutputAt: number;
+  progress?: ServiceSnapshotProgress;
+  /**
+   * DERIVED, NOT STORED: `now - lastOutputAt > jobs.stallSeconds * 1000` on a
+   * job that has not ended.
+   *
+   * A stored flag would need a timer to flip it, and the whole point is that any
+   * render refreshes the judgement for free.
+   */
+  stalled?: boolean;
+  logPath?: string;
 }
 
 export type ProcEvent =
@@ -116,6 +185,11 @@ export interface ServiceStartRequest {
   command: string;
   cwd: string;
   toolCallId: string;
+  /**
+   * Absent means `'service'`, which is what every pre-existing caller means and
+   * what keeps `start()` backward compatible without a second method.
+   */
+  kind?: JobKind;
 }
 
 export interface ServiceStartResult {
@@ -133,6 +207,24 @@ export interface ServiceLogPage {
   cursor: number;
   /** Rows were evicted between `since` and what is returned. */
   truncated: boolean;
+  /**
+   * The not-yet-terminated line among `rows` (empty when the last chunk ended
+   * with a newline).
+   *
+   * THE ONLY WAY TO TELL A REDRAWING PROGRESS BAR FROM A FINISHED ROW: `rows`
+   * always ends with the carry line when one exists, so `job_wait` uses this to
+   * keep an unchanged carriage-return-rewritten bar out of its incremental row
+   * budget (RV-P1-5). Optional so a test double - and `bash_output`, which does
+   * not care - can leave it out.
+   */
+  carryRow?: string;
+}
+
+/** What `job_wait` and the supervisor need from a log mirror; no filesystem here. */
+export interface JobLogMirrorPort {
+  open(jobId: string): void;
+  write(jobId: string, chunk: string): void;
+  pathOf(jobId: string): string | undefined;
 }
 
 /**

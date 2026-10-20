@@ -5,6 +5,7 @@ import type { Theme } from '../theme.js';
 import type { TermCapabilities } from '../capabilities.js';
 import { pickGlyphs } from '../glyphs.js';
 import { sliceWindow } from './overlay-window.js';
+import { pageSize } from './scroll.js';
 
 /** Below this width the round border costs more than it conveys (§5.2). */
 const BORDERLESS_COLS = 48;
@@ -155,6 +156,24 @@ export function OverlayFrame(props: OverlayFrameProps): React.ReactElement {
       {inner}
     </Box>
   );
+}
+
+/**
+ * Rows one PgUp/PgDn - and one Shift+wheel notch - turns inside a controlled
+ * overlay (defect 11).
+ *
+ * THIS IS THE OVERLAY'S `scroll.pageSize`, deliberately the same rule: one window
+ * minus `PAGE_CONTEXT_LINES` of overlap, so a reader keeps two rows of context
+ * across a page turn exactly as `PgDn` in the transcript does. It replaces a
+ * constant 8, which was 42% of `/help`'s 19-row window on a 100x24 terminal and
+ * made reading a 93-row shortcut list a twelve-keystroke exercise.
+ *
+ * THE WINDOW HEIGHT COMES FROM `overlayBodyRows`, which is the same expression
+ * `OverlayFrame` renders with - computed twice here would be the two-authorities
+ * defect B1 is fixing one component over.
+ */
+export function overlayPageSize(maxRows: number, cols: number): number {
+  return pageSize(overlayBodyRows(maxRows, cols));
 }
 
 /** Body rows shared by controlled overlays and self-managed focused lists. */

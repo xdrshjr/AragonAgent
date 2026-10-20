@@ -18,6 +18,20 @@ process.env.ARAGON_HOME = directory;
 const { AgentController } = await import('../agent/controller.js');
 const { loadConfig, makeGetApiKey } = await import('../config/load.js');
 const { getConfigPath, writeConfigFile } = await import('../config/store.js');
+/**
+ * THE APP GRAPH IS PULLED HERE, NOT INSIDE THE TEST THAT RENDERS IT.
+ *
+ * `await import('../ui/App.js')` drags the whole terminal application (App, commands,
+ * tools, overlays, ui) through the module pipeline. Paid inside the test body it lands on
+ * that test's own budget: measured at ~1.4s of 1.9s on an idle machine, and the same test
+ * timed out at 5000ms during the full 339-file run of the 2026-10-20 release while
+ * passing alone. Imported here, the cost is paid once in the file's import phase, which
+ * vitest does not time per test; the ordering still holds because top-level awaits run in
+ * source order, after `ARAGON_HOME` is redirected above.
+ */
+const React = await import('react');
+const { render } = await import('ink-testing-library');
+const { App } = await import('../ui/App.js');
 const controllers: InstanceType<typeof AgentController>[] = [];
 beforeEach(() => { rmSync(getConfigPath(), { force: true }); });
 afterAll(() => {
@@ -114,10 +128,10 @@ describe('设置事务真实 controller 接线', () => {
     expect(makeGetApiKey(instance.getConfig())('openai')).not.toBe('startup-key');
   });
 
+  // 15s is LOAD TOLERANCE, not a mask: alone this case measures ~0.5s, and the peers that
+  // mount the real App carry the same budget (screen.test.ts, team-retry.test.ts). It timed
+  // out here at 5000ms with the suite at 339 files on 2026-10-20.
   it('真实 App 设置选择保存后关闭弹层，下一次解析使用新角色凭据', async () => {
-    const React = await import('react');
-    const { render } = await import('ink-testing-library');
-    const { App } = await import('../ui/App.js');
     writeConfigFile({ ...DEFAULT_CONFIG, modelProfiles: config().modelProfiles });
     const instance = controller();
     const view = render(React.createElement(App, {
@@ -128,7 +142,10 @@ describe('设置事务真实 controller 接线', () => {
       await new Promise((done) => setTimeout(done, 80));
     };
     try {
-      await vi.waitFor(() => expect(view.lastFrame()).toContain('Main profile'));
+      // A LOADED full-suite run is the normal case for this file: it shares the machine
+      // with 338 other files, and the first frame has to wait for App's mount effects.
+      await vi.waitFor(() => expect(view.lastFrame()).toContain('Main profile'),
+        { timeout: 5_000, interval: 50 });
       await key('\r');
       await key('\u001b[B');
       await key('\u001b[B');
@@ -139,7 +156,7 @@ describe('设置事务真实 controller 接线', () => {
       expect(view.lastFrame()).not.toContain('Manage profiles');
       expect(view.lastFrame()).not.toContain('fast-secret');
     } finally { view.unmount(); }
-  });
+  }, 15_000);
 
   it('写入并激活主快方案，同时保持消息与旧式候选', () => {
     const instance = controller();
@@ -158,6 +175,27 @@ describe('设置事务真实 controller 接线', () => {
     const saved = JSON.parse(readFileSync(getConfigPath(), 'utf8'));
     expect(saved.provider).toBe(DEFAULT_CONFIG.provider);
     expect(saved.modelProfiles.entries).toHaveLength(2);
+  });
+
+  it('team 段随保存往返：live config 与磁盘一致（subagent-model 矩阵 17）', () => {
+    // A real library on disk, so the bound entry exists after the round trip
+    // and the resolution can hit it rather than degrading to profile_missing.
+    writeConfigFile({ ...DEFAULT_CONFIG, modelProfiles: config().modelProfiles });
+    const instance = controller();
+    const draft = instance.createModelSettingsDraft();
+    draft.patch.team = { model: 'profile', modelProfileId: 'a' };
+    expect(instance.saveModelSettings(draft)).toMatchObject({ ok: true, persisted: true });
+    // LIVE: the subagent picker's choice reaches the running session's team
+    // section through the same per-key merge every other section uses.
+    expect(instance.getConfig().team.model).toBe('profile');
+    expect(instance.getConfig().team.modelProfileId).toBe('a');
+    // DISK: one transaction, clamped, with the rest of the section intact.
+    const saved = JSON.parse(readFileSync(getConfigPath(), 'utf8'));
+    expect(saved.team.model).toBe('profile');
+    expect(saved.team.modelProfileId).toBe('a');
+    expect(saved.team.enabled).toBe(DEFAULT_CONFIG.team.enabled);
+    // And the runtime resolution follows it through the one authority.
+    expect(instance.subagentModelResolution().effective).toBe('profile');
   });
 
   it('后台 review 未结束、磁盘冲突或普通 setter 修改时拒绝覆盖', () => {
@@ -577,5 +615,109 @@ describe('设置事务故障与归一化回归', () => {
     expect(saved.modelProfiles.entries[1]).toMatchObject({ name: 'same-model', baseUrl: null });
     expect(instance.getConfig().modelProfiles).toEqual(saved.modelProfiles);
     expect(makeGetApiKey(instance.getConfig())('openai')).toBe('main-secret');
+  });
+});
+
+/**
+ * profile-context-window AC-14 (the P0-1 regression lock) and the AC-9 child
+ * gate: a profile-window save must move the LIVE config and the meter's
+ * denominator in the same batch - no restart - and must never displace an env
+ * override. These live in THIS harness because it is the only one with a real
+ * AgentController over an isolated on-disk config (placement recorded in
+ * spec.md's implementation-findings section).
+ */
+describe('AC-14 profile window saves take effect without a restart', () => {
+  const entry = (id: string, contextWindow: number | null) => ({ id, name: id,
+    provider: 'openai', model: 'same-model', baseUrl: 'https://main.example/v1',
+    apiKey: 'main-secret', contextWindow });
+
+  it('(a) editing the bound profile window moves live config and gauge in one save', () => {
+    writeConfigFile({ ...DEFAULT_CONFIG, modelProfiles: { version: 1, mainId: 'a',
+      fastId: null, entries: [entry('a', null)] } });
+    const instance = controller();
+    expect(instance.getConfig().contextWindow).toBeNull();
+    const draft = instance.createModelSettingsDraft();
+    draft.profiles!.entries[0]!.contextWindow = 120_000;
+    expect(instance.saveModelSettings(draft)).toMatchObject({ ok: true, persisted: true });
+    const live = instance.getConfig();
+    expect(live.contextWindow).toBe(120_000);
+    expect(live.contextWindowOrigin).toBe('profile');
+    // The meter reads the NEW denominator immediately (onWindowChanged, no
+    // restart), and /context can name the surface that supplied it.
+    expect(instance.getContextUsage()).toMatchObject({ window: 120_000,
+      windowOverridden: true, windowKnown: true, windowOverrideOrigin: 'profile' });
+    expect(JSON.parse(readFileSync(getConfigPath(), 'utf8'))
+      .modelProfiles.entries[0].contextWindow).toBe(120_000);
+  });
+
+  it('(b) rebinding Main to an AUTO profile returns the denominator to the AUTO chain', () => {
+    writeConfigFile({ ...DEFAULT_CONFIG, modelProfiles: { version: 1, mainId: 'a',
+      fastId: null, entries: [entry('a', 120_000), entry('b', null)] } });
+    const instance = controller();
+    expect(instance.getConfig().contextWindow).toBe(120_000);
+    const draft = instance.createModelSettingsDraft();
+    draft.profiles!.mainId = 'b';
+    draft.activateRoles = ['main'];
+    expect(instance.saveModelSettings(draft)).toMatchObject({ ok: true, persisted: true });
+    const live = instance.getConfig();
+    expect(live.contextWindow).toBeNull();
+    expect(live.contextWindowOrigin).toBeUndefined();
+    const usage = instance.getContextUsage();
+    expect(usage.windowOverridden).toBe(false);
+    expect(usage).not.toHaveProperty('windowOverrideOrigin');
+  });
+
+  it('(c) a profile save never displaces the ARAGON_CONTEXT_WINDOW override', () => {
+    vi.stubEnv('ARAGON_CONTEXT_WINDOW', '50000');
+    try {
+      writeConfigFile({ ...DEFAULT_CONFIG, modelProfiles: { version: 1, mainId: 'a',
+        fastId: null, entries: [entry('a', null)] } });
+      const instance = controller();
+      expect(instance.getConfig()).toMatchObject({ contextWindow: 50_000,
+        contextWindowOrigin: 'env' });
+      const draft = instance.createModelSettingsDraft();
+      draft.profiles!.entries[0]!.contextWindow = 120_000;
+      expect(instance.saveModelSettings(draft)).toMatchObject({ ok: true, persisted: true });
+      // The disk now carries the profile window; the LIVE session keeps env's
+      // value and origin until the next launch re-resolves the layers.
+      expect(JSON.parse(readFileSync(getConfigPath(), 'utf8'))
+        .modelProfiles.entries[0].contextWindow).toBe(120_000);
+      expect(instance.getConfig()).toMatchObject({ contextWindow: 50_000,
+        contextWindowOrigin: 'env' });
+      expect(instance.getContextUsage()).toMatchObject({ window: 50_000,
+        windowOverrideOrigin: 'env' });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('AC-9 child gate: the override window follows the connection, never the lead', () => {
+    // The child's denominator must come from the model it ACTUALLY runs on:
+    // a same-connection child inherits the override (and its origin with it),
+    // a different connection inherits neither - both drop together.
+    const cfg = config();
+    cfg.contextWindow = 15_000;
+    cfg.contextWindowOrigin = 'profile';
+    const messages = compactionHistory(); // ~18k estimated tokens
+    const build = (model: ModelRef) => createChildContextManager({
+      label: 'worker', model, getMessages: () => messages, getSystemPrompt: () => '',
+      onCompacted: () => {} }, {
+      getConfig: () => cfg, getApiKey: roleKey(cfg),
+      hasKey: (id, role) => Boolean(roleKey(cfg)(id, role)),
+      getModelInfoFor: (ref) => ({ id: ref.modelId, provider: ref.providerId, name: 'Model',
+        contextWindow: 200_000, maxOutputTokens: 16_000, supportsTools: true,
+        supportsThinking: false, supportsImages: false, cost: { input: 0, output: 0 } }),
+      isPricedModel: () => false, onUsage: () => {},
+      complete: async () => { throw new Error('not reached'); },
+    });
+    const probe = { messageCount: messages.length, turnIndex: 1,
+      trigger: 'pressure' as const };
+    // Same connection: denominator 15000 -> ~18k occupancy trips the 90% gate.
+    const same = build({ providerId: 'openai', modelId: 'same-model',
+      baseUrl: 'https://main.example/v1' });
+    expect(same.shouldCompact(probe)).toBe(true);
+    // Different connection: override dropped, table window 200000 -> no trip.
+    const other = build({ providerId: 'openai', modelId: 'child-model' });
+    expect(other.shouldCompact(probe)).toBe(false);
   });
 });

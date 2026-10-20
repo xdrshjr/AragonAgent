@@ -14,10 +14,11 @@
  * kind — without it the card renders a hint that does nothing and expands an
  * older tool card instead (C-15 / P1-8 / AC-21).
  *
- * EVERY STRING DESCRIBES THE HISTORY, NEVER THE SCREEN (§6.4 / P2-9). `/clear`
- * empties the transcript view but not `messages`, so this card can legitimately
- * report "112 -> 9 messages" with nine visible rows above it. Nothing here says
- * "above" or "earlier in this transcript".
+ * EVERY STRING DESCRIBES THE HISTORY, NEVER THE SCREEN (§6.4 / P2-9).
+ * `/clear screen` empties the transcript view but not `messages`, so this card
+ * can legitimately report a message count the visible rows do not add up to.
+ * Nothing here says "above" or "earlier in this transcript". `/clear` itself is
+ * the conversation boundary now: it drops the history and this card with it.
  */
 
 import React from 'react';

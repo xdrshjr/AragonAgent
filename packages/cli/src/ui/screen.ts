@@ -12,6 +12,8 @@
  * into `aragon -p "…" > out.txt`, `aragon config set`, and `aragon --version`.
  */
 
+import { fillBytes } from './scrollback/writer-shapes.js';
+
 export interface ScreenHandle {
   /** Leave the alternate screen. Idempotent — safe from every exit path. */
   restore(): void;
@@ -252,6 +254,61 @@ export function enterAltScreen(
       safeWrite(stdout, tail + SHOW_CURSOR + LEAVE_ALT);
     },
     setMouseCapture,
+  };
+}
+
+export interface NativeScreenOptions {
+  /** Same discipline as `AltScreenOptions.bracketedPaste`: a filter that consumes it exists. */
+  readonly bracketedPaste?: boolean;
+  /**
+   * Line feeds to write BEFORE anything else, so the first batch starts from the
+   * bottom row of the screen (tui-bottom-anchored-live-region D4 rung 2).
+   *
+   * `cli.tsx` passes `rows - 1` when the cursor probe could not measure the
+   * position, and `0` when it did. Filling on a measured terminal would undo the
+   * measurement — and cost the page-flip this feature exists to avoid.
+   */
+  readonly anchorFillRows?: number;
+}
+
+/**
+ * Native-scroll mode's counterpart of `enterAltScreen` (tui-native-terminal-scroll
+ * §4.8 / D6): it deliberately does almost nothing. The main buffer stays in use so
+ * the conversation lands in the terminal's own scrollback; there is no alternate
+ * screen, no mouse reporting and no DEC 1007 save/restore.
+ *
+ * The only modes it touches are DEC 2004 (bracketed paste), which changes how input
+ * is encoded and has nothing to do with scrolling, and — when the bottom anchor could
+ * not be measured — the one-off fill that puts the cursor on the last row. Returns the
+ * SAME `ScreenHandle` shape, so the four idempotent restore paths in `cli.tsx` need not
+ * know which mode is running. A non-TTY stdout is a hard no-op, like `enterAltScreen`.
+ *
+ * ORDER IS LOAD-BEARING: the fill goes FIRST. Written after `?2004h` it would be the
+ * same bytes, but written after any content it would scroll that content away.
+ */
+export function enterNativeScreen(
+  stdout: NodeJS.WriteStream | undefined,
+  options: NativeScreenOptions = {},
+): ScreenHandle {
+  if (!stdout || !stdout.isTTY || typeof stdout.write !== 'function') return NOOP_HANDLE;
+  const bracketedPaste = options.bracketedPaste === true;
+  const fillRows = Math.max(0, Math.floor(options.anchorFillRows ?? 0));
+  const head =
+    (fillRows > 0 ? fillBytes(fillRows) : '') +
+    (bracketedPaste ? ENABLE_BRACKETED_PASTE : '');
+  if (head.length > 0) safeWrite(stdout, head);
+  let restored = false;
+  return {
+    restore(): void {
+      if (restored) return;
+      restored = true;
+      // 2004 is FORCED off rather than saved/restored, for the reason recorded at
+      // `DISABLE_BRACKETED_PASTE`. The cursor is shown again because Ink's
+      // log-update hides it and a signal kill never gives it back.
+      safeWrite(stdout, (bracketedPaste ? DISABLE_BRACKETED_PASTE : '') + SHOW_CURSOR);
+    },
+    // No mouse reporting in this mode: nothing to hand back or take again.
+    setMouseCapture() {},
   };
 }
 

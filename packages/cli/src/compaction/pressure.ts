@@ -123,6 +123,13 @@ export interface PressureInput {
    * construction site is unchanged and the arithmetic below is untouched.
    */
   windowOverridden?: boolean;
+  /**
+   * Which override surface supplied `contextWindow` (profile-context-window).
+   * PURE PASS-THROUGH like `windowOverridden` - the arithmetic below never
+   * reads it; it only travels with the number so `/context` can name the
+   * source honestly.
+   */
+  windowOverrideOrigin?: Pressure['windowOverrideOrigin'];
   /** Carried from the last `turn_end`; applied to every ESTIMATED figure. */
   estimateOffset?: number;
   /**
@@ -226,6 +233,11 @@ export function computePressure(input: PressureInput): Pressure {
     // context-usage-gauge-accuracy; the flag only travels with the number so
     // `/context` can name the denominator's source (I-6).
     windowOverridden: input.windowOverridden ?? false,
+    // CONDITIONAL SPREAD: with no origin there is no KEY, keeping a
+    // feature-off Pressure byte-identical to the pre-feature one (I-6).
+    ...(input.windowOverrideOrigin !== undefined
+      ? { windowOverrideOrigin: input.windowOverrideOrigin }
+      : {}),
     ...(input.estimateOffset !== undefined ? { estimateOffset: input.estimateOffset } : {}),
     deltaTokens,
   };

@@ -33,12 +33,15 @@
  * through the mounted set and the measured heights back to the offset.
  */
 
+import stringWidth from 'string-width';
 import type { Entry } from '../../agent/reducer.js';
 import type { DensityMode } from '../density.js';
 import { FAST_LIMITS } from '../../fast/limits.js';
 import { COMPACTION_LIMITS } from '../../compaction/limits.js';
 import { GUTTER_WIDTH } from './Gutter.js';
+import { expandTabs } from '../display-tab.js';
 import { USER_ENTRY_MAX_ROWS } from '../composer-limits.js';
+import { isLiveTeamCard } from '../team-status.js';
 
 export const VIRTUAL_LIMITS = {
   /**
@@ -184,20 +187,52 @@ export function heightKey(
   return `${entry.id}|${entryRevision(entry)}|${cols}|${expanded ? 1 : 0}|${density}|${flags}`;
 }
 
-/** Rows a string occupies at `usable` columns, wrapping included. At least 1. */
+/**
+ * Rows a string occupies at `usable` columns, wrapping included. At least 1.
+ *
+ * COUNTED IN DISPLAY COLUMNS, NOT UTF-16 CODE UNITS, and the difference is a
+ * correctness bug rather than a nicety: a CJK glyph is one code unit and two
+ * cells, and a TAB is one code unit and up to `TAB_WIDTH` cells. Counting code
+ * units therefore UNDER-estimates, which this file's own note names as the
+ * unsafe direction ("an over-estimate makes the scroll position slightly
+ * conservative and self-corrects ... an under-estimate can put the newest
+ * output off the bottom of a viewport the user believes is pinned"). It also
+ * had to change together with the renderers: a stored `\t` is now expanded at
+ * paint time, so measuring the unexpanded string would keep the estimate short
+ * while the painted row got taller.
+ */
 function wrappedRows(text: string, usable: number): number {
   const width = Math.max(1, usable);
   let rows = 0;
-  let lineLen = 0;
-  for (let i = 0; i < text.length; i += 1) {
-    if (text.charCodeAt(i) === 10) {
-      rows += Math.max(1, Math.ceil(lineLen / width));
-      lineLen = 0;
-    } else {
-      lineLen += 1;
-    }
+  let start = 0;
+  for (;;) {
+    const end = text.indexOf('\n', start);
+    const line = end === -1 ? text.slice(start) : text.slice(start, end);
+    rows += Math.max(1, Math.ceil(displayColumns(line) / width));
+    if (end === -1) return rows;
+    start = end + 1;
   }
-  return rows + Math.max(1, Math.ceil(lineLen / width));
+}
+
+/**
+ * Printable ASCII with no TAB: one code unit is one cell, so the width table is
+ * not consulted at all.
+ *
+ * THE FAST PATH IS LOAD-BEARING, not a micro-optimisation. `stringWidth`
+ * strips ANSI and walks the East-Asian width table for every code point, and
+ * this function runs over EVERY unmeasured entry of a 10 000-entry document
+ * (`render-budget.test.tsx` mounts exactly that); measuring them all with the
+ * table turned that test into a timeout. Transcript text is overwhelmingly
+ * ASCII, so the branch is taken almost always.
+ */
+const PLAIN_ASCII = /^[\x20-\x7e]*$/;
+
+/** Display columns of one logical line: TABs expanded, CJK counted twice. */
+function displayColumns(line: string): number {
+  if (line.indexOf('\t') === -1 && PLAIN_ASCII.test(line)) return line.length;
+  // `expandTabs` mirrors what `entries/*` paints; `stringWidth` is the width
+  // table the composer already wraps with, so the two agree on CJK and emoji.
+  return stringWidth(expandTabs(line));
 }
 
 /** Collapsed preview rows in `ToolCard`; duplicated as a NUMBER, not imported. */
@@ -210,6 +245,13 @@ const TOOL_LIVE_TAIL_ROWS = 8;
 const SERVICE_COLLAPSED_TAIL_ROWS = 2;
 /** Tail rows an EXPANDED `ServiceCard` draws; the snapshot cap (8). */
 const SERVICE_EXPANDED_TAIL_ROWS = 8;
+/**
+ * The progress row the live `ServiceCard` draws when `progress` or `stalled` is
+ * set (long-task-jobs §4.9), duplicated as the number `1` for the same reason as
+ * the two constants above: `virtual-window.ts` counts lines, `ServiceCard.tsx`
+ * draws them, and the pairing is kept by a test (AC-27) rather than by an import.
+ */
+const SERVICE_PROGRESS_ROWS = 1;
 
 /**
  * Pure UPPER-BOUND estimate of an entry's height, used until a real measurement
@@ -309,6 +351,13 @@ export function estimateEntryRows(
       return separation + 1 + shown + 1;
     }
     case 'team':
+      // A LIVE DISPATCH CARD IS NOT DRAWN AT ALL (tui-subagent-double-roster A-2):
+      // the roster is the only live subagent surface, so this entry owes the window
+      // ZERO rows. Estimating it at its real height while `EntryView` renders nothing
+      // would make `selectWindow` reserve four rows for a card that is not on screen -
+      // blank space at the bottom of every dispatch frame, and a window boundary that
+      // disagrees with what the printer measures.
+      if (isLiveTeamCard(entry)) return 0;
       return separation + 1 + entry.runs.length + (expanded ? entry.runs.length * 3 + 1 : 1);
     case 'todo':
       return separation + 1 + entry.items.length;
@@ -359,7 +408,13 @@ export function estimateEntryRows(
       const tail = expanded
         ? Math.min(entry.rows.length, SERVICE_EXPANDED_TAIL_ROWS)
         : Math.min(entry.rows.length, SERVICE_COLLAPSED_TAIL_ROWS);
-      return separation + 1 + url + tail;
+      // THE PROGRESS ROW IS ONE MORE LINE (long-task-jobs AC-27), and it is only
+      // ever one because `ServiceCard` draws it with `wrap="truncate"` and the
+      // supervisor clips it to `PROC_LIMITS.waitProgressChars`. A `stalled` badge
+      // REPLACES it rather than adding to it - the two can never both be drawn,
+      // so this stays a single term.
+      const progress = entry.progress || entry.stalled ? SERVICE_PROGRESS_ROWS : 0;
+      return separation + 1 + progress + url + tail;
     }
     default:
       return separation + 1;

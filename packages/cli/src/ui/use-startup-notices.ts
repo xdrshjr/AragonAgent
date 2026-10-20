@@ -16,7 +16,11 @@ import { useEffect, useRef } from 'react';
 import { MODE_TOGGLE_KEYS } from '../agent/agent-mode.js';
 import type { ViewAction } from '../agent/reducer.js';
 import { readConfigFile } from '../config/store.js';
-import { getMouseNoticeVersion, getVtInputNoticeVersion } from '../config/ui-state.js';
+import {
+  getMouseNoticeVersion,
+  getScrollModeNoticeVersion,
+  getVtInputNoticeVersion,
+} from '../config/ui-state.js';
 import { getLogger } from '../logging/logger.js';
 
 /**
@@ -120,6 +124,25 @@ export interface RetainNoticeOptions {
   resolved: number;
 }
 
+/**
+ * The revision of the native-scroll notice a user must have seen for it to stay
+ * quiet (`state.json::scrollModeNoticeVersion`). BUMP IT WHENEVER THE ADVICE
+ * CHANGES, never for a rewording (tui-native-terminal-scroll D12).
+ */
+export const SCROLL_MODE_NOTICE_VERSION = 1;
+
+export function scrollModeNoticeText(): string {
+  return (
+    'Scrolling now uses your terminal: wheel, scrollbar, selection and search all work as ' +
+    'usual. Prefer the old full-screen view? Run: aragon config set scrollMode app'
+  );
+}
+
+export interface ScrollModeNoticeOptions {
+  /** Record that `SCROLL_MODE_NOTICE_VERSION` was shown (`state.json`). */
+  onSeen: () => void;
+}
+
 export interface MouseNoticeOptions {
   /**
    * Whether reporting is ACTUALLY in effect: a filter was installed AND the
@@ -173,6 +196,7 @@ export function useStartupNotices(
   mouseNotice?: MouseNoticeOptions,
   retainNotice?: RetainNoticeOptions,
   vtInputNotice?: VtInputNoticeOptions,
+  scrollModeNotice?: ScrollModeNoticeOptions,
 ): void {
   // The sink gives up after repeated write failures (a read-only log directory,
   // a full disk). Silently logging nothing is exactly the state a user must not
@@ -247,6 +271,21 @@ export function useStartupNotices(
     });
     vtNoticeRef.current?.onSeen();
   }, [vtNodeVersion, dispatch]);
+
+  // The one-shot native-scroll notice (D12): a default-behaviour change has to be
+  // discoverable and reversible. `>=`, like the notices above: a state file written
+  // by a newer build has already told this user.
+  const scrollNoticeRef = useRef(scrollModeNotice);
+  scrollNoticeRef.current = scrollModeNotice;
+  const scrollNoticeWanted = scrollModeNotice !== undefined;
+  const scrollNoticeShown = useRef(false);
+  useEffect(() => {
+    if (!scrollNoticeWanted || scrollNoticeShown.current) return;
+    if (getScrollModeNoticeVersion() >= SCROLL_MODE_NOTICE_VERSION) return;
+    scrollNoticeShown.current = true;
+    dispatch({ type: 'notice', level: 'info', text: scrollModeNoticeText() });
+    scrollNoticeRef.current?.onSeen();
+  }, [scrollNoticeWanted, dispatch]);
 
   // A `warn` notice rather than a toast: it is about a value the user typed, so
   // it belongs in the transcript where it can be scrolled back to, not in a row

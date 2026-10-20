@@ -13,6 +13,15 @@ export interface StatusLayoutInput {
   context: ContextUsageSnapshot; usageTotal: UsageTotal;
   thinkingLevel: string; elapsedMs: number; tokPerSec: number;
   activeTool?: { name: string; toolCallId: string } | null;
+  /**
+   * A bounded wait in flight (long-task-jobs §4.9).
+   *
+   * PRESENT ONLY WHILE `job_wait` IS THE ACTIVE TOOL, and it REPLACES the
+   * `Running job_wait` label rather than joining it: "Waiting on t3 (up to 30s)"
+   * is the state the user asked about (what, and how long at most), while the
+   * tool name is an implementation detail of how the runtime is waiting.
+   */
+  wait?: { jobId: string; upToSeconds: number };
   runOutcome?: 'none' | 'ended' | 'interrupted' | 'failed';
   spinner?: string; waitingForConfirmation?: boolean; stopping?: boolean;
   compacting?: boolean; retryActive?: { attempt: number; max: number; secondsLeft: number };
@@ -20,6 +29,16 @@ export interface StatusLayoutInput {
   mode?: string; pendingMode?: string | null; servicesActive?: { live: number };
   teamActive?: { running: number; total: number }; todoActive?: { done: number; total: number };
   ecoRung?: number; fastActive?: { inFlight: boolean }; scrolledLines?: number;
+  /**
+   * Cells already spent at the RIGHT end of this same row
+   * (tui-session-id-resume 3.10 / I-6).
+   *
+   * The session-id chip is not a layer above this row: it takes its cells out of
+   * the SAME budget, because the row is measured rather than laid out and
+   * anything overlapping it eats `phase` first. ABSENT MEANS 0, which is what
+   * keeps every existing caller's plan byte-identical (I-6).
+   */
+  reserveRight?: number;
 }
 export interface StatusPrimaryInput extends StatusLayoutInput {
   feedback?: StatusFeedback; escapeAction?: EscapeAction; speedKnown: boolean;
@@ -47,11 +66,21 @@ export function statusLinePlan(fields: readonly StatusField[], separator = ' | '
     cells: fields.reduce((sum, item) => sum + item.cells, 0) + Math.max(0, fields.length - 1) * separatorCells };
 }
 export function phaseLabels(input: Pick<StatusLayoutInput, 'phase' | 'activeTool' | 'runOutcome' |
-  'waitingForConfirmation' | 'stopping' | 'compacting' | 'retryActive'>): readonly [string, string] {
+  'waitingForConfirmation' | 'stopping' | 'compacting' | 'retryActive' | 'wait'>): readonly [string, string] {
   if (input.waitingForConfirmation) return copy.confirming;
   if (input.stopping) return copy.stopping;
   if (input.compacting) return copy.compacting;
   if (input.retryActive) return copy.retrying;
+  // A WAIT OUTRANKS THE TOOL NAME (long-task-jobs AC-28): `Running job_wait`
+  // answers "which tool", `Waiting on t3 (up to 30s)` answers "what am I waiting
+  // for and how long may it take", which is the question a user staring at a
+  // quiet terminal actually has. Both forms carry it - the short rung is
+  // truncated by width, not reworded.
+  if (input.wait) {
+    const label = `Waiting on ${cleanStatusText(input.wait.jobId)} ` +
+      `(up to ${Math.max(0, Math.round(input.wait.upToSeconds))}s)`;
+    return [label, label];
+  }
   if (input.activeTool) return [copy.tool[0], copy.tool[1] + ' ' + cleanStatusText(input.activeTool.name)];
   if (input.phase === 'idle' && input.runOutcome && input.runOutcome !== 'none') return copy[input.runOutcome];
   if (input.phase === 'preparing-tool') return copy.preparingTool;
@@ -104,6 +133,48 @@ function feedbackLabel(input: StatusPrimaryInput, form: 'full' | 'short' | 'tiny
   };
   return labels[feedback.kind][form === 'full' ? 0 : form === 'short' ? 1 : 2];
 }
+
+/**
+ * Kinds that are NOTIFICATIONS, not a phase word (defect 8 / 9).
+ *
+ * A notification says "something happened". An ACTION kind (`confirm`,
+ * `stopping`, `force-stop`, `exit`, `clear-input`, `copy-error`,
+ * `copy-cleanup`) says what the NEXT key does - that IS the phase slot's job, so
+ * those keep replacing it. Everything in this set gets its own field instead and
+ * `phase` is never displaced: `Idle` / `Running` is the one thing this row must
+ * always answer, and a notice that lands as a turn ends is exactly when a wrong
+ * answer misleads the user about whether the agent is still working.
+ */
+const NOTIFICATION_KINDS: ReadonlySet<StatusFeedback['kind']> = new Set([
+  'notice', 'copied', 'copy-sent', 'copying',
+]);
+
+/**
+ * The most cells a notification body may take on the primary row.
+ *
+ * The row is exactly one row high and measured, so the body is CLIPPED rather
+ * than wrapped. 32 cells carries `Theme set to light.` or `Todo panel off.`
+ * whole while leaving the phase word, the mode and the context gauge intact; a
+ * longer message still has the details row, where it is rendered in full.
+ */
+const FEEDBACK_TEXT_CELLS = 32;
+
+/**
+ * Clip `text` to at most `cells` display columns, never splitting a wide glyph.
+ *
+ * Local rather than `interaction-hints.clipStatusText`: that module already
+ * imports THIS one, and a cycle for a five-line guard is not worth it.
+ */
+function clipFeedbackText(text: string, cells: number): string {
+  const clean = cleanStatusText(text);
+  if (stringWidth(clean) <= cells) return clean;
+  let clipped = '';
+  for (const char of clean) {
+    if (stringWidth(clipped + char) > cells) break;
+    clipped += char;
+  }
+  return clipped;
+}
 const thinkingCodes: Record<string, string> = { off: 'O', minimal: 'N', low: 'L', medium: 'M', high: 'H', xhigh: 'X' };
 
 /**
@@ -131,22 +202,50 @@ function modeFieldText(
 
 /** Every field survives each width rung; only the redraw carrier is outside this plan. */
 export function planPrimaryStatusFields(input: StatusPrimaryInput): StatusLinePlan {
-  const budget = Math.max(0, (Number.isFinite(input.columns) ? Math.floor(input.columns) : 80) - 1);
+  const columns = Number.isFinite(input.columns) ? Math.floor(input.columns) : 80;
+  // GUARDED LIKE `columns` ABOVE, and for the same reason: `Math.max(0, NaN)`
+  // is `NaN`, which would make every `cells > budget` comparison false and
+  // silently pin this row at its widest rung - the opposite of reserving space.
+  const reserved =
+    typeof input.reserveRight === 'number' && Number.isFinite(input.reserveRight)
+      ? Math.max(0, Math.floor(input.reserveRight))
+      : 0;
+  const budget = Math.max(0, columns - 1 - reserved);
   const labels = phaseLabels(input);
   const glyphText = cleanStatusText(input.spinner ?? '-');
   const glyph = stringWidth(glyphText) === 1 ? glyphText : '-';
   const code = thinkingCodes[input.thinkingLevel] ?? '?';
   const pct = contextPercent(input.context);
   const speed = speedNumber(input);
+  // THE RUN'S OWN URGENCY, and the notification's, are two different things
+  // (defect 9). `tone` keeps today's meaning for an ACTION kind (it colours the
+  // phase word); a notification is painted with its own level and leaves the
+  // phase word to describe the run - a copy error must not make `Idle` red.
   const tone: StatusField['tone'] = input.feedback?.level === 'error' || input.runOutcome === 'failed'
     ? 'error' : input.feedback?.level === 'warn' || input.waitingForConfirmation || input.stopping ? 'warning' : 'normal';
+  const notification = !!input.feedback && NOTIFICATION_KINDS.has(input.feedback.kind);
+  const phaseTone: StatusField['tone'] = notification
+    ? input.runOutcome === 'failed' ? 'error'
+      : input.waitingForConfirmation || input.stopping ? 'warning' : 'normal'
+    : tone;
+  const feedbackTone: StatusField['tone'] = input.feedback?.level === 'error' ? 'error'
+    : input.feedback?.level === 'warn' ? 'warning' : 'normal';
   const build = (rung: number): StatusLinePlan => {
     const full = rung === 0;
-    const label = feedbackLabel(input, full ? 'full' : rung >= 4 ? 'tiny' : 'short')
+    const form = full ? 'full' : rung >= 4 ? 'tiny' : 'short';
+    // THE BODY IS A FIELD OF ITS OWN (defect 8). The text has been in
+    // `feedback.text` all along; it only ever reached the screen on the SECOND
+    // status row, which is behind Ctrl+G and off by default. Rung 3 and tighter
+    // drop it: the ladder exists to keep the phase word, and a body that only fits
+    // by hiding `Running` would be the original defect back with extra steps.
+    const notice = notification && rung <= 2 && input.feedback
+      ? clipFeedbackText(input.feedback.text, FEEDBACK_TEXT_CELLS) : '';
+    const label = (notification ? undefined : feedbackLabel(input, form))
       ?? (full ? labels[1] : rung >= 4 ? labels[0].slice(0, 4) : labels[0]);
-      const modeText = modeFieldText(input.mode, input.pendingMode, full);
+    const modeText = modeFieldText(input.mode, input.pendingMode, full);
     return statusLinePlan([
-      statusField('phase', glyph + (rung >= 5 ? '' : ' ') + label, tone),
+      statusField('phase', glyph + (rung >= 5 ? '' : ' ') + label, phaseTone),
+      ...(notice ? [statusField('feedback', notice, feedbackTone)] : []),
       ...(modeText ? [statusField('mode', modeText, 'accent')] : []),
       statusField('context', (full ? 'Context ' : 'C') + pct),
       statusField('thinking', full ? 'Think ' + (thinkingCodes[input.thinkingLevel] ? input.thinkingLevel : '?')

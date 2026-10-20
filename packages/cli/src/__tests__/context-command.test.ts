@@ -88,6 +88,32 @@ describe('T18 - the Window line names its source', () => {
       .toContain('1000000   from contextWindow configuration (overrides API, model table, and model-windows.json)');
   });
 
+  /**
+   * profile-context-window §6.2 / AC-4: the override branch names WHICH
+   * surface supplied the denominator. `undefined` origin keeps the string
+   * above BYTE-IDENTICAL (invariant 6) - that is the previous test, unchanged.
+   */
+  it('names the model profile and the environment as override surfaces', () => {
+    expect(formatContextReport(ctx({ usage: { window: 120_000, windowOverridden: true,
+      windowOverrideOrigin: 'profile' } })))
+      .toContain('120000   from your model profile (overrides API, model table, and model-windows.json)');
+    expect(formatContextReport(ctx({ usage: { window: 50_000, windowOverridden: true,
+      windowOverrideOrigin: 'env' } })))
+      .toContain('50000   from ARAGON_CONTEXT_WINDOW (overrides API, model table, and model-windows.json)');
+    expect(formatContextReport(ctx({ usage: { window: 300_000, windowOverridden: true,
+      windowOverrideOrigin: 'config' } })))
+      .toContain('300000   from contextWindow configuration (overrides API, model table, and model-windows.json)');
+  });
+
+  it('a non-overridden window never names an override surface, whatever the origin says', () => {
+    // ORIGIN ONLY RIDES THE OVERRIDE BRANCH: the AUTO chain keeps reporting its
+    // own source ('catalog' here), and a stray origin must not leak into it.
+    const text = formatContextReport(ctx({ usage: { windowSource: 'catalog',
+      windowOverridden: false, windowOverrideOrigin: 'profile' } }));
+    expect(text).toContain('200000   from the model table');
+    expect(text).not.toContain('model profile');
+  });
+
   it('the invented placeholder, admitted as invented', () => {
     const text = formatContextReport(ctx({ usage: { window: 128_000, windowKnown: false } }));
     expect(text).toContain('UNKNOWN - no verified model limit');

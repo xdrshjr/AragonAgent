@@ -161,6 +161,36 @@ describe('K-2: the height store converges', () => {
   });
 });
 
+describe('defect 5: the render-layer backstop', () => {
+  // The reducer prunes a settled empty bubble (that is the source of truth); this
+  // asserts the second line of defence, so an empty bubble reaching `EntryView`
+  // from ANY path still costs zero rows - no glyph row, no separation row.
+  it('renders zero rows for a settled, entirely empty assistant entry', () => {
+    const empty: Entry = {
+      id: 'a1',
+      kind: 'assistant',
+      text: '',
+      thinkingOpen: false,
+      streaming: false,
+    };
+    const { frame, mounted } = mount([empty], { viewportRows: 40 });
+    expect(mounted).toBe(1);
+    expect(frame.trim()).toBe('');
+  });
+
+  it('still renders an assistant entry that has text', () => {
+    const filled: Entry = {
+      id: 'a1',
+      kind: 'assistant',
+      text: 'ANSWERMARK',
+      thinkingOpen: false,
+      streaming: false,
+    };
+    const { frame } = mount([filled], { viewportRows: 40 });
+    expect(frame).toContain('ANSWERMARK');
+  });
+});
+
 it('projects a long footer without mounting the entire transcript', () => {
   const view = mount(notices(10000), { viewportRows: 20, trailingContentRows: 50 });
   expect(view.mounted).toBeLessThanOrEqual(3);

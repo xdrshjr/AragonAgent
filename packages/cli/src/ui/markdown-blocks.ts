@@ -1,11 +1,14 @@
 /**
  * Markdown parsing layer (spec §4.7). Pure and React-free so the grammar can be
- * unit-tested without rendering anything.
+ * unit-tested without rendering anything. `string-width` is the only import and
+ * it is a pure function of its argument, so the module stays side-effect free.
  *
  * Scope is deliberately small — this is not CommonMark. It covers what a coding
  * agent's answers actually contain: fenced code, headings, lists, quotes, rules,
  * tables, and inline emphasis / code / strikethrough.
  */
+
+import stringWidth from 'string-width';
 
 /** Heading levels are rendered with three distinct weights, not one (§4.7). */
 export interface HeadingBlock {
@@ -69,33 +72,89 @@ export function tableAlignments(dividerLine: string): TableBlock['align'] {
   });
 }
 
+/** Default column separator: pure ASCII, so this module holds no glyph literal. */
+const DEFAULT_TABLE_SEPARATOR = '|';
+/** Default header rule: pure ASCII for the same reason. */
+const DEFAULT_TABLE_RULE = '-';
+/** One space either side of the separator, so a boundary is unmistakable. */
+const TABLE_CELL_GAP = ' ';
+
 /**
- * Pad a parsed table into fixed-width columns. Returns one string per row —
- * no borders, because a bordered table inside an already-indented gutter wraps
- * on any realistic terminal.
+ * How the table is drawn. Both characters are injected by the renderer from
+ * `pickGlyphs(caps)` because this file is inside the ASCII-only scan
+ * (`glyphs.test.ts::inScope`): a Unicode box-drawing literal here would fail
+ * that guard.
  */
-export function formatTable(rows: string[][], align: TableBlock['align']): string[] {
+export interface TableFormatOptions {
+  /** Drawn between cells; `Markdown.tsx` passes `glyphs.railVertical`. */
+  separator?: string;
+  /** Repeated to a column's padded width; `Markdown.tsx` passes `glyphs.hrule`. */
+  rule?: string;
+}
+
+/**
+ * Pad a parsed table into fixed-width columns and draw the header rule.
+ *
+ * Returns `[header, divider, ...bodyRows]`, one string per rendered row, so
+ * index 0 is always the header and index 1 always the divider. The divider is
+ * rendered rather than swallowed because the parser consumes the source
+ * `|---|` row to read alignment: without it, a `--no-color` terminal showed a
+ * table as unseparated prose (bold is dropped at colour level 0, and the old
+ * two-space join gave no column boundary either).
+ *
+ * Padding is by DISPLAY columns, not `String.length`: a CJK cell is one code
+ * unit but two terminal columns, so `.length` misaligned every such table.
+ */
+export function formatTable(
+  rows: string[][],
+  align: TableBlock['align'],
+  options: TableFormatOptions = {},
+): string[] {
+  const separator = options.separator ?? DEFAULT_TABLE_SEPARATOR;
+  const rule = options.rule ?? DEFAULT_TABLE_RULE;
   const colCount = Math.max(...rows.map((r) => r.length), 0);
   const widths: number[] = [];
   for (let c = 0; c < colCount; c += 1) {
-    widths[c] = Math.max(...rows.map((r) => (r[c] ?? '').length), 0);
+    widths[c] = Math.max(...rows.map((r) => displayColumns(r[c] ?? '')), 0);
   }
-  return rows.map((row) =>
-    row
-      .map((cell, c) => {
-        const w = widths[c] ?? 0;
-        const a = align[c] ?? 'left';
-        if (a === 'right') return cell.padStart(w);
-        if (a === 'center') {
-          const total = w - cell.length;
-          const left = Math.floor(total / 2);
-          return ' '.repeat(left) + cell + ' '.repeat(total - left);
-        }
-        return cell.padEnd(w);
-      })
-      .join('  ')
-      .trimEnd(),
-  );
+  const gap = `${TABLE_CELL_GAP}${separator}${TABLE_CELL_GAP}`;
+  const body = rows.map((row) => padRow(row, widths, align).join(gap).trimEnd());
+  if (body.length === 0) return [];
+  const divider = widths.map((w) => rule.repeat(w)).join(gap).trimEnd();
+  return [body[0]!, divider, ...body.slice(1)];
+}
+
+function padRow(row: string[], widths: number[], align: TableBlock['align']): string[] {
+  return row.map((cell, c) => padCell(cell, widths[c] ?? 0, align[c] ?? 'left'));
+}
+
+function padCell(cell: string, width: number, align: Align): string {
+  const pad = width - displayColumns(cell);
+  if (pad <= 0) return cell;
+  const filler = ' '.repeat(pad);
+  if (align === 'right') return filler + cell;
+  if (align === 'center') {
+    const left = Math.floor(pad / 2);
+    return `${' '.repeat(left)}${cell}${' '.repeat(pad - left)}`;
+  }
+  return cell + filler;
+}
+
+/**
+ * Printable ASCII with no TAB: one code unit is one cell, so the width table is
+ * not consulted at all.
+ *
+ * The same load-bearing fast path `virtual-window.displayColumns` carries, and for
+ * the same reason: `stringWidth` strips ANSI and walks the East-Asian width table
+ * per code point, while this runs once per CELL of every table row on every frame.
+ * Table cells are overwhelmingly ASCII, so the branch is taken almost always -
+ * and when it is not, the table is CJK and the table is exactly what must be used.
+ */
+const PLAIN_ASCII = /^[\x20-\x7e]*$/;
+
+/** Terminal columns occupied by `text` (wide glyphs count two). */
+function displayColumns(text: string): number {
+  return PLAIN_ASCII.test(text) ? text.length : stringWidth(text);
 }
 
 // ---------------------------------------------------------------------------
@@ -121,28 +180,77 @@ export type MdBlock =
   | { kind: 'table'; rows: string[][]; align: Align[] }
   | { kind: 'line'; text: string };
 
-/** A fence line: ```` ```lang ```` or a bare ```` ``` ````. */
-const FENCE_RE = /^```(\w*)\s*$/;
+/** One opening fence: how many backticks it carries and its language token. */
+interface FenceOpen {
+  count: number;
+  lang: string;
+}
+
+/**
+ * An opening fence is three or more backticks plus an optional info string.
+ *
+ * The old `(\w*)` info group was too narrow for real answers: ```c++ and
+ * ```objective-c did not open a block at all, so the body degraded to prose and
+ * the closing fence was then swallowed as a new empty code block. A backtick is
+ * the one character CommonMark forbids in an info string; everything else is
+ * accepted here and the language is simply the FIRST token.
+ */
+const FENCE_OPEN_RE = /^(`{3,})[ \t]*([^`]*)$/;
+/** A closing fence carries backticks only — no info string. */
+const FENCE_CLOSE_RE = /^(`{3,})[ \t]*$/;
+
+function parseFenceOpen(line: string): FenceOpen | null {
+  const m = FENCE_OPEN_RE.exec(line);
+  if (!m) return null;
+  const info = (m[2] ?? '').trim();
+  return { count: m[1]!.length, lang: info.split(/\s+/)[0] ?? '' };
+}
+
+/** Backtick count of a line that could close a fence; 0 when it could not. */
+function closingFenceLength(line: string): number {
+  const m = FENCE_CLOSE_RE.exec(line);
+  return m ? m[1]!.length : 0;
+}
+
+/**
+ * Collect a fence body starting after the opening fence.
+ *
+ * A closer must carry AT LEAST as many backticks as its opener, so a
+ * four-backtick block may contain ``` lines — that is how a nested markdown
+ * example survives. A shorter run is content, not the end of the block.
+ */
+function readFenceBody(
+  lines: string[],
+  openIndex: number,
+  openCount: number,
+): { code: string; next: number } {
+  const body: string[] = [];
+  let i = openIndex + 1;
+  while (i < lines.length) {
+    if (closingFenceLength((lines[i] ?? '').trim()) >= openCount) {
+      return { code: body.join('\n'), next: i + 1 };
+    }
+    body.push(lines[i] ?? '');
+    i += 1;
+  }
+  return { code: body.join('\n'), next: i };
+}
 
 /** Split a document into fenced code, pipe tables, and everything else. */
 export function parseMarkdownBlocks(text: string): MdBlock[] {
-  const lines = text.split('\n');
+  // CRLF-safe: a bare `split('\n')` left a '\r' on every code line, which then
+  // reached the highlighter and the display-width maths.
+  const lines = text.split(/\r?\n/);
   const blocks: MdBlock[] = [];
   let i = 0;
 
   while (i < lines.length) {
     const line = lines[i] ?? '';
-    const fence = FENCE_RE.exec(line.trim());
+    const fence = parseFenceOpen(line.trim());
     if (fence) {
-      const lang = fence[1] || '';
-      const codeLines: string[] = [];
-      i += 1;
-      while (i < lines.length && !FENCE_RE.test((lines[i] ?? '').trim())) {
-        codeLines.push(lines[i] ?? '');
-        i += 1;
-      }
-      i += 1; // skip the closing fence
-      blocks.push({ kind: 'code', code: codeLines.join('\n'), lang });
+      const { code, next } = readFenceBody(lines, i, fence.count);
+      blocks.push({ kind: 'code', code, lang: fence.lang });
+      i = next;
       continue;
     }
 

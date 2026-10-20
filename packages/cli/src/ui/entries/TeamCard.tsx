@@ -21,6 +21,15 @@ import { pickGlyphs } from '../glyphs.js';
 import { railBorderProps } from '../layout/Gutter.js';
 import { formatDuration } from '../../agent/usage.js';
 import type { SubagentRun } from '../../team/types.js';
+import {
+  childElapsedMs,
+  childStatus,
+  outcomePhrase,
+  rosterCounts,
+  statusColor,
+  statusMarkerCell,
+  type RosterCounts,
+} from '../team-status.js';
 
 export interface TeamCardProps {
   requested: number;
@@ -32,31 +41,72 @@ export interface TeamCardProps {
   reducedMotion?: boolean;
   theme: Theme;
   caps: TermCapabilities;
+  /**
+   * Wall-clock seconds, set only while the dispatch is live (`nowSecFor`). WITHOUT
+   * IT a running child's elapsed time came from `(endedAt ?? 0) - startedAt` - a
+   * negative number clamped to `0ms`, the readout that contradicted the roster
+   * beside it (A-1 / E4).
+   */
+  nowSec?: number;
 }
 
-function isOk(run: SubagentRun): boolean {
-  return run.phase === 'done' && !run.error;
-}
-
-/** The card's aggregate colour: any failure dominates. */
+/**
+ * The card's aggregate colour.
+ *
+ * FAILURES DOMINATE, THEN A CANCELLATION, THEN A DISPATCH THAT NEVER SETTLED.
+ * The old version asked `runs.some((r) => !isOk(r))`, so an entry whose children
+ * were still working - and one the user had cancelled - was painted `toolError`
+ * (A-1 / E8). `RosterCounts` is passed IN rather than recomputed, so this colour
+ * and the headline cannot disagree inside one card.
+ */
 export function teamCardColor(
-  runs: SubagentRun[],
+  counts: RosterCounts,
   active: boolean,
   aborted: boolean,
   theme: Theme,
 ): string | undefined {
   if (active) return theme.toolRunning;
-  if (aborted || runs.some((r) => !isOk(r))) return theme.toolError;
+  if (counts.failed > 0) return theme.toolError;
+  if (aborted || counts.aborted > 0 || counts.queued > 0 || counts.running > 0) {
+    return theme.noticeWarn;
+  }
   return theme.toolDone;
+}
+
+/** `nowSec` is seconds (`App`'s 1 Hz clock); a card measures in milliseconds. */
+function liveClockMs(nowSec: number | undefined): number {
+  return nowSec === undefined ? Date.now() : nowSec * 1000;
+}
+
+/**
+ * The elapsed column for one child: a MEASUREMENT, or an empty cell.
+ *
+ * `liveNow` is defined only while the dispatch is live, and that distinction is the
+ * whole point. A child restored by `/resume` keeps its `startedAt` and has no
+ * `endedAt` - `session/persist.ts` settles the ENTRY, it does not invent an end time
+ * for the run - so a figure computed against `Date.now()` would claim hours of work
+ * that never happened, next to an `interrupted (session resumed)` headline that says
+ * the opposite. An unmeasurable duration is left blank instead.
+ */
+function elapsedCell(run: SubagentRun, liveNow: number | undefined): string {
+  const end = run.endedAt ?? liveNow;
+  if (run.startedAt === undefined || end === undefined) return '';
+  return formatDuration(childElapsedMs(run, end));
 }
 
 function TeamCardImpl(props: TeamCardProps): React.ReactElement {
   const { requested, runs, aborted, durationMs, active, expanded, reducedMotion, theme, caps } =
     props;
   const glyphs = pickGlyphs(caps);
-  const color = teamCardColor(runs, active, aborted, theme);
-  const ok = runs.filter(isOk).length;
-  const failed = runs.length - ok;
+  // ONE COUNTING AUTHORITY (A-1): `ok`/`failed` used to be `isOk(...)` and
+  // `runs.length - ok`, which counted a cancelled child - and a still-working one -
+  // as a failed one (E3 / E8).
+  const counts = rosterCounts(runs);
+  const color = teamCardColor(counts, active, aborted, theme);
+  // A CLOCK ONLY WHILE THE DISPATCH IS LIVE: a settled card has nothing left to time,
+  // and a clock in the settled path is how a resumed dispatch came to read like a run
+  // that is still going (`elapsedCell`).
+  const liveNow = active ? liveClockMs(props.nowSec) : undefined;
 
   // A dispatch entry restored from `/resume` is settled and aborted but has no
   // duration: nothing measured it, because the process it belonged to is gone.
@@ -64,14 +114,11 @@ function TeamCardImpl(props: TeamCardProps): React.ReactElement {
   // a dispatch that ran and lost (§5.3 / P1-5).
   const interrupted = !active && aborted && durationMs === undefined;
 
-  const settled = runs.filter(
-    (r) => r.phase === 'done' || r.phase === 'failed' || r.phase === 'aborted',
-  ).length;
   const headline = interrupted
     ? 'interrupted (session resumed)'
     : active
-    ? `${runs.length - settled} running`
-    : `${formatDuration(durationMs ?? 0)}  (${ok} ok, ${failed} failed)`;
+    ? `${counts.queued + counts.running} running`
+    : `${formatDuration(durationMs ?? 0)}  (${outcomePhrase(counts)})`;
 
   const count = `${runs.length} ${runs.length === 1 ? 'subagent' : 'subagents'}`;
   const dropped = requested > runs.length ? `  (${runs.length} of ${requested} requested)` : '';
@@ -108,8 +155,14 @@ function TeamCardImpl(props: TeamCardProps): React.ReactElement {
       >
         {runs.map((run) => (
           <Text key={run.label} wrap="truncate">
-            <Text color={isOk(run) ? theme.toolDone : theme.toolError}>
-              {isOk(run) ? glyphs.toolDone : glyphs.toolError}
+            {/*
+              ONE STATUS AUTHORITY (A-1): this used to be the binary `isOk` fallback
+              (`phase === 'done' && !error`), which painted six of the eight phases -
+              every child that was still working - with the FAILURE cross, and left a
+              cancelled child indistinguishable from a broken one (E3 / E8).
+            */}
+            <Text color={statusColor(childStatus(run), theme)}>
+              {statusMarkerCell(childStatus(run), glyphs)}
             </Text>
             {/*
               A TRAILING `~` MARKS A FAST-TIER CHILD, inside the existing
@@ -127,7 +180,7 @@ function TeamCardImpl(props: TeamCardProps): React.ReactElement {
               {' '}
               {run.description}
               {'  '}
-              {run.startedAt ? formatDuration(Math.max(0, (run.endedAt ?? 0) - run.startedAt)) : ''}
+              {elapsedCell(run, liveNow)}
               {`  ${run.turns} turns`}
               {run.filesTouched.length > 0 ? `  ${run.filesTouched.length} files` : ''}
               {run.error ? `  ${run.error}` : ''}

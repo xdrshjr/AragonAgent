@@ -23,10 +23,14 @@ describe('shared grapheme rows for paint and navigation', () => {
   const buffer = `a${emoji}\tb\n12\u4e2d45`;
 
   it('wraps mixed emoji, tab and CJK without splitting graphemes or changing the buffer', () => {
+    // EIGHT-COLUMN TAB STOPS (fix A'-2): the tab no longer fits after `a` plus
+    // the emoji in a four-column row, so it takes a row of its own, exactly as
+    // the terminal would paint it. See `editor-navigation.test.ts` for why the
+    // stop is the terminal's and not an editor-sized four.
     const out = layout(buffer, { cols: 4, cursor: 7 });
-    expect(out.rows.map(rowText)).toEqual([`a${emoji} `, 'b', '12\u4e2d', '45']);
+    expect(out.rows.map(rowText)).toEqual([`a${emoji}`, '    ', 'b', '12\u4e2d', '45']);
     expect(out.rows.every((row) => displayWidth(rowText(row)) <= 4)).toBe(true);
-    expect(out.cursorRow).toBe(1);
+    expect(out.cursorRow).toBe(2);
     expect(out.cursorCol).toBe(0);
     expect(splitRowAtColumn(out.rows[0]!, 1).at?.text).toBe(emoji);
     expect(buffer).toContain('\t');
@@ -34,10 +38,12 @@ describe('shared grapheme rows for paint and navigation', () => {
 
   it('paints the same target cell selected by visual navigation across a tab', () => {
     const moved = moveVisualCursor({ buffer, cursor: 12, cols: 6, direction: 'up' })!;
-    expect(moved).toEqual({ cursor: 7, preferredVisualColumn: 4 });
+    expect(moved).toEqual({ cursor: 8, preferredVisualColumn: 4 });
     const out = layout(buffer, { cols: 6, cursor: moved.cursor });
-    expect(out.cursorCol).toBe(4);
-    expect(splitRowAtColumn(out.rows[out.cursorRow]!, out.cursorCol).at?.text).toBe('b');
+    expect(out.cursorCol).toBe(1);
+    // The caret lands on the row that holds `b`, which is what "one visual row
+    // up" means once the tab occupies a full stop.
+    expect(rowText(out.rows[out.cursorRow]!)).toBe('b');
     expect(moveVisualCursor({ buffer, cols: 6, direction: 'down', ...moved })?.cursor).toBe(12);
   });
 });
@@ -71,7 +77,9 @@ describe('layoutComposer — hard wrap by display column (D-15)', () => {
     const out = layout('    indented\n\t\ttabbed', { maxRows: 10 });
     expect(rowText(out.rows[0]!)).toBe('    indented');
     // Tabs are expanded to spaces FOR DISPLAY ONLY; the buffer keeps the tab.
-    expect(rowText(out.rows[1]!)).toBe('        tabbed');
+    // Two tabs at column 0 are two EIGHT-column stops, matching the terminal --
+    // and `entries/UserEntry`, which paints the same line after send.
+    expect(rowText(out.rows[1]!)).toBe('                tabbed');
   });
 
   it('gives an empty buffer exactly one row', () => {

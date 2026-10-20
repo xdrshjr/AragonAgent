@@ -25,6 +25,7 @@ import {
   initialViewState,
   reduceEvent,
   viewReducer,
+  type Entry,
   type Overlay,
   type PatchSource,
   type ToastLevel,
@@ -44,6 +45,7 @@ import { appendPrompt, loadPromptHistory } from '../config/prompt-history.js';
 import {
   bumpSubmitCount,
   setMouseNoticeVersion,
+  setScrollModeNoticeVersion,
   setVtInputNoticeVersion,
 } from '../config/ui-state.js';
 import { getLogger } from '../logging/logger.js';
@@ -55,6 +57,7 @@ import { resolveTuiCapabilities, type TermCapabilities } from './capabilities.js
 import {
   useStartupNotices,
   MOUSE_NOTICE_VERSION,
+  SCROLL_MODE_NOTICE_VERSION,
   VT_INPUT_NOTICE_VERSION,
 } from './use-startup-notices.js';
 import { getTheme } from './theme.js';
@@ -75,9 +78,17 @@ import { BottomStatusRow } from './BottomStatusRow.js';
 import { shouldRenderUpdateLine } from '../update/types.js';
 import type { UpdateBridge, UpdateSnapshot } from '../update/types.js';
 import { AppShell } from './layout/AppShell.js';
+import { ScrollbackShell } from './ScrollbackShell.js';
+import { useScrollbackView, type ScrollbackBridge } from './scrollback/use-scrollback-view.js';
+import { buildExitSummary } from './scrollback/exit-summary.js';
+import { LiveTail } from './scrollback/LiveTail.js';
+import { SCROLLBACK_LIMITS } from './scrollback/limits.js';
+import { TODO_LIMITS } from '../todo/limits.js';
+import type { ScrollMode } from '../config/schema.js';
 import { ScrollViewport } from './layout/ScrollViewport.js';
 import { buildTodoRailLayout } from './layout/todo-layout.js';
 import { buildTeamPanelLayout } from './layout/team-panel.js';
+import { isLiveTeamCard, rosterCounts } from './team-status.js';
 import {
   advanceBudget,
   decideFollowThrough,
@@ -91,9 +102,9 @@ import {
   readScrollbarPerf, setPerfResetHook, setPerfSnapshotProvider, type PerfSnapshot,
 } from '../commands/perf.js';
 import { frameHeight } from './layout/frame.js';
-import { buildFrameBudget } from './layout/budget.js';
+import { buildFrameBudget, POPUP_CAPACITY_SHARE } from './layout/budget.js';
 import type { ScrollIntent } from './layout/scroll.js';
-import { OVERLAY_PAGE, useWheelRouting } from './use-wheel-routing.js';
+import { useWheelRouting } from './use-wheel-routing.js';
 import type { MouseSource } from '../input/stdin-filter.js';
 import { INDEX_KEY_FRAME, type PasteBridge } from '../input/limits.js';
 import {
@@ -104,9 +115,19 @@ import {
 } from '../commands/index-build.js';
 import { installConsoleBridge } from './console-bridge.js';
 import { publishExitSnapshot } from './exit-snapshot.js';
-import { OverlayFrame } from './layout/OverlayFrame.js';
+import { publishSessionView } from './session-bridge.js';
+import type { CheckpointResult } from '../session/checkpoint.js';
+// TYPE-ONLY, like the two session imports around it: the App passes the port
+// through, it never constructs one (`cli.tsx` does).
+import type { BranchCommandPort } from '../commands/branch-command.js';
+import type { SessionIdentity } from '../session/startup-session.js';
+import { OverlayFrame, overlayPageSize } from './layout/OverlayFrame.js';
 import { helpRows } from './overlays/HelpOverlay.js';
 import { ModelPicker } from './overlays/ModelPicker.js';
+import { KitPicker } from './overlays/KitPicker.js';
+import { INACTIVE_KIT, type ActiveKit } from '../config/kit-resolution.js';
+import { kitApplyMessage, kitNoteMessages } from '../agent/kit-apply.js';
+import { createModelProbe } from '../agent/model-probe.js';
 import {
   SettingsScreen,
   compactionSettingsFrom,
@@ -244,6 +265,63 @@ export interface AppProps {
   pasteBridge?: PasteBridge;
 
   terminal?: TerminalBridge;
+
+  /**
+   * `'native'` prints settled conversation into the terminal's own scrollback and
+   * renders only a bounded live region (tui-native-terminal-scroll). DEFAULTS TO
+   * `'app'` so every existing render test and call site is untouched (I-S9).
+   */
+  scrollMode?: ScrollMode;
+  /** The writer / feed channel `cli.tsx` shares with the tree; required for `'native'`. */
+  scrollback?: ScrollbackBridge;
+
+  /**
+   * The transcript to seed the first frame with, from a resumed session
+   * (tui-session-id-resume 3.12).
+   *
+   * ABSENT IN EVERY ORDINARY LAUNCH, and absent is what keeps the first frame
+   * byte-identical to the pre-feature build (I-6).
+   */
+  initialEntries?: Entry[];
+  /** This process's session identity. `undefined` means "no chip, no checkpoint". */
+  session?: SessionIdentity;
+  /** The two actions `cli.tsx` owns: checkpoint now, and rotate after `/resume`. */
+  sessionBridge?: SessionBridge;
+  /**
+   * One line to show when the identity is NOT the obvious one (D-13): a branch,
+   * or a `--save` name. An ordinary new session says nothing - the chip is the
+   * affordance, and a notice on every launch trains users to ignore notices.
+   */
+  sessionNotice?: string;
+}
+
+/**
+ * `App`'s and `cli.tsx`'s small two-way surface for the session, shaped exactly
+ * like `confirmBridge` / `pasteBridge`.
+ *
+ * `checkpoint` and `rotate` are INSTALLED BY `cli.tsx` because the writer lives
+ * outside React (two of its callers are process-level); `onIdentity` is
+ * installed by the App so a rotation can move the chip, which is the only piece
+ * of the identity the view owns.
+ */
+export interface SessionBridge {
+  /**
+   * Write a checkpoint now; `pin` also marks the file as never-prunable, and
+   * `force` skips the fingerprint short circuit so `/branch` can guarantee that
+   * the file the new process is about to read is current (D-15).
+   */
+  checkpoint?: (opts?: { pin?: boolean; force?: boolean }) => CheckpointResult;
+  /** Adopt another conversation's identity (D-15); `undefined` if it cannot. */
+  rotate?: (loadedPath: string) => SessionIdentity | undefined;
+  /**
+   * Ctrl+L / `/branch`: branch this session into a NEW terminal. Installed by
+   * `cli.tsx`, because opening a window is a process-level act the App only asks
+   * for (tui-branch-terminal-shortcut 3.11). Absent in a build with no session,
+   * which is what lets `/branch` say so instead of throwing.
+   */
+  branch?: BranchCommandPort;
+  /** Installed by `App`; called by `rotate` after the new id is claimed. */
+  onIdentity?: (identity: SessionIdentity) => void;
 }
 
 export interface TerminalBridge {
@@ -270,8 +348,18 @@ interface PendingHumanRequest {
  * The lazy `useReducer` initializer. Module scope, so the reference is stable
  * across renders and React never re-runs it.
  */
-function seedViewState(thinkingVisible: boolean): ReturnType<typeof initialViewState> {
-  return initialViewState({ thinkingVisible });
+function seedViewState(seed: {
+  thinkingVisible: boolean;
+  entries?: Entry[];
+}): ReturnType<typeof initialViewState> {
+  const base = initialViewState({ thinkingVisible: seed.thinkingVisible });
+  // THE REDUCER'S OWN ADOPTION LOGIC, NOT A COPY OF IT (3.12): `restoreEntries`
+  // already lifts `seq` past the restored ids, trims to the retain ring and
+  // clears the live-target pointers, and a second implementation of those thirty
+  // lines is how the two would drift.
+  return seed.entries && seed.entries.length > 0
+    ? viewReducer(base, { type: 'restoreEntries', entries: seed.entries })
+    : base;
 }
 
 export function App({
@@ -286,7 +374,17 @@ export function App({
   updateBridge,
   pasteBridge,
   terminal,
+  scrollMode = 'app',
+  scrollback,
+  initialEntries,
+  session,
+  sessionBridge,
+  sessionNotice,
 }: AppProps): React.ReactElement {
+  const native = scrollMode === 'native' && scrollback !== undefined;
+  /** Set when the native writer swallowed repeated tall frames; cleared by a resize. */
+  const [guardTripped, setGuardTripped] = useState(false);
+  const scrollbackViewRef = useRef<ReturnType<typeof useScrollbackView> | null>(null);
   const { exit } = useApp();
   const { stdout } = useStdout();
   const size = useTerminalSize();
@@ -302,7 +400,24 @@ export function App({
   const [statusExpanded, setStatusExpanded] = useState(false);
   const dimensions = buildFrameBudget({ ...size, draftRows, popupRows, statusExpanded });
   const { rows, cols } = dimensions;
-  const tooSmall = dimensions.inactive;
+  /**
+   * Rows one PgUp/PgDn - and one Shift+wheel notch - turns inside a controlled
+   * overlay (defect 11).
+   *
+   * ONE VALUE FOR BOTH BRANCHES, derived from the overlay's real window: a
+   * constant 8 was 42% of `/help`'s 19-row window, so a shortcut list needed
+   * twelve keystrokes and overlapped itself by eleven rows on every turn. The
+   * wheel branch gets it through `getOverlayPage`, so the two can never disagree.
+   *
+   * MEASURED FROM THIS BUDGET, NOT `frameBudget` BELOW. The two agree on every
+   * frame except the one that opens an overlay with the completion menu still
+   * reported (`frameBudget` zeroes `popupRows` there), and that exception only
+   * makes the real window LARGER - so this page can under-turn for one frame but
+   * can never step past the window and skip content. The unsafe direction is the
+   * one that matters, and it is unreachable.
+   */
+  const overlayPage = overlayPageSize(dimensions.viewportRows + (native ? 1 : 0), cols);
+  const tooSmall = dimensions.inactive || (native && guardTripped);
   // --- Render governor (tui-render-performance L4). ------------------------
   //
   // FIRST, BEFORE ANY OTHER WORK IN THIS BODY. The hook stamps
@@ -320,7 +435,18 @@ export function App({
   // `toggleThinking` would let `/resume` flash a restored thinking block on
   // frame 1. `seedViewState` is module-scope so the lazy initializer is a stable
   // function reference.
-  const [state, dispatch] = useReducer(viewReducer, cfg.showThinking, seedViewState);
+  const [state, dispatch] = useReducer(
+    viewReducer,
+    { thinkingVisible: cfg.showThinking, ...(initialEntries ? { entries: initialEntries } : {}) },
+    seedViewState,
+  );
+  // THE IDENTITY, SEEDED FROM THE PROP AND REPLACED ON ROTATION (D-15). A ref
+  // travels beside it because both readers -- the publish effect and the
+  // `/session` port -- must see the CURRENT id, and a rotation can land between
+  // two renders.
+  const [identity, setIdentity] = useState<SessionIdentity | undefined>(session);
+  const identityRef = useRef<SessionIdentity | undefined>(session);
+  const sessionId = identity?.id;
   const metrics = useRef(createRunMetrics());
   const manualMetrics = useRef(createRunMetrics());
   const [, setMetricsClock] = useState(0);
@@ -1219,12 +1345,16 @@ export function App({
           onSeen: () => setVtInputNoticeVersion(VT_INPUT_NOTICE_VERSION),
         }
       : undefined,
+    native
+      ? { onSeen: () => setScrollModeNoticeVersion(SCROLL_MODE_NOTICE_VERSION) }
+      : undefined,
   );
 
   // --- Exit snapshot: the only way state reaches cli.tsx (§4.4). ----------
   useEffect(() => {
+    const merged = mergePendingEntries(state.entries, state.pendingSteering);
     publishExitSnapshot({
-      entries: mergePendingEntries(state.entries, state.pendingSteering),
+      entries: merged,
       usageTotal: state.usageTotal,
       provider: cfg.provider,
       model: cfg.model,
@@ -1234,7 +1364,18 @@ export function App({
       // count (K-6).
       droppedEntries: state.droppedEntries,
     });
-  }, [state.entries, state.pendingSteering, state.usageTotal, state.droppedEntries, cfg.provider, cfg.model]);
+    // THE SAME `merged`, THE SAME RENDER (D-2 / 3.12). The checkpoint describes
+    // exactly what the exit summary would, because it is built from the same
+    // array in the same pass - and no second effect or subscription is added.
+    //
+    // `sessionId` IN THE DEPENDENCY ARRAY IS LOAD-BEARING (R-16): a rotation
+    // that leaves the `entries` reference untouched would otherwise never
+    // re-publish, and the writer would keep aiming at the OLD id's file - the
+    // "A's conversation written into B's file" failure I-5 rules out.
+    if (sessionId) {
+      publishSessionView({ id: sessionId, entries: merged, usageTotal: state.usageTotal });
+    }
+  }, [state.entries, state.pendingSteering, state.usageTotal, state.droppedEntries, cfg.provider, cfg.model, sessionId]);
 
   // --- `/perf` snapshot channel (tui-render-performance §5.4). ------------
   //
@@ -1355,6 +1496,33 @@ export function App({
 
   const toast = (level: ToastLevel, text: string) =>
     dispatch({ type: 'pushToast', level, text });
+
+  // THE BRANCH / `--save` NOTICE (D-13). Once, on mount, and only when the
+  // caller supplied one: "the session you branched from is unchanged" is the
+  // sentence that makes `--resume` safe to reach for, and it belongs in the
+  // transcript where it can be read again rather than in a toast that expires.
+  useEffect(() => {
+    if (sessionNotice) notify('info', sessionNotice);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // --- Session bridge: identity write-back (D-15 / 3.12). -------------------
+  //
+  // INSTALLED AND CLEARED EXACTLY LIKE `confirmBridge.handler`: the rotation is
+  // performed by `cli.tsx` (which owns the writer's target file), and the only
+  // thing the view owns is the id it draws. Clearing on unmount keeps a late
+  // rotation from dispatching into a dead reducer.
+  useEffect(() => {
+    if (!sessionBridge) return undefined;
+    const bridge = sessionBridge;
+    bridge.onIdentity = (next: SessionIdentity) => {
+      identityRef.current = next;
+      setIdentity(next);
+    };
+    return () => {
+      bridge.onIdentity = undefined;
+    };
+  }, [sessionBridge]);
 
   // --- Paste bridge (tui-paste-handling section 5.1.2 / I-15). -------------
   //
@@ -1600,8 +1768,39 @@ export function App({
     requestCopy: copyCoordinator.requestCopy,
     controller,
     state: stateRef.current,
+    // THE ARCHIVE'S ONLY WAY TO SEE THE SCREEN (P0-1 / §3.7), and a thunk for a
+    // reason `state` above illustrates: `state` is a snapshot of this render,
+    // while `/clear` interrupts a run and then waits for it to unwind, so the last
+    // tool cards of the abandoned run are appended AFTER the command starts. A
+    // value here would archive the screen minus the part the user was watching.
+    transcriptEntries: () => stateRef.current.entries,
+    // THE SESSION PORT (D-14 / D-15). `identity()` reads the ref at command time
+    // and never a captured value: `/resume` rotates the id under a live tree, and
+    // a captured one would report the previous id for the rest of the session.
+    // `checkpoint` / `rotate` are the writer's, installed by `cli.tsx`; the port
+    // is absent when this build has no session at all, which is what lets
+    // `/session` say so honestly instead of throwing.
+    ...(sessionBridge
+      ? {
+          session: {
+            identity: () => identityRef.current,
+            checkpoint: (opts?: { pin?: boolean }): CheckpointResult =>
+              sessionBridge.checkpoint?.(opts) ?? {
+                ok: false as const,
+                reason: 'no-identity' as const,
+                message: 'This session has no id.',
+              },
+            rotate: (loadedPath: string) => sessionBridge.rotate?.(loadedPath),
+          },
+        }
+      : {}),
+    // The branch port is projected from the bridge here rather than captured, so
+    // this object stays a view of the current bridge, exactly like `session`
+    // above. Absent means `/branch` reports that the build has none.
+    ...(sessionBridge?.branch ? { branch: sessionBridge.branch } : {}),
     dispatch: (action) => {
       if (action.type === 'resetConversation' || action.type === 'restoreEntries') {
+        scrollbackViewRef.current?.notifyReset(action.type === 'resetConversation' ? 'clear' : 'restore');
         metrics.current = createRunMetrics();
         manualMetrics.current = createRunMetrics();
         setScrollResetKey((n) => n + 1);
@@ -1651,6 +1850,7 @@ export function App({
         }
       : {}),
     ...(terminal?.writeForeign ? { writeForeign: terminal.writeForeign } : {}),
+    ...(native ? { nativeScroll: true } : {}),
   });
 
   /**
@@ -1750,12 +1950,23 @@ export function App({
   submitRef.current = submitMessage;
 
   const executeSlashInput = async (raw: string): Promise<void> => {
-    const switchWhileBusy = controller.isCompactionBusy?.()
-      && /^\s*\/(clear|reset|resume)(?:\s|$)/.test(raw);
-    if (switchWhileBusy) {
-      switchingConversation.current = true;
-      await controller.cancelCompaction();
-    }
+    // A CONVERSATION SWITCH OWNS THE QUEUE FOR THE WHOLE COMMAND (B-6 / §3.7).
+    //
+    // The guard used to be raised only when a compaction happened to be busy,
+    // which left the one window this feature is about unwatched: `/clear` on an
+    // IDLE session took the flag nowhere, and `drainCompactionQueue` was still
+    // free to `continue()` a message queued in the previous conversation into
+    // the one the user had just started. Whether there is work to cancel is a
+    // separate question, so the two are now separate values: `switching` decides
+    // the lock, `switchWhileBusy` decides the cancellation.
+    //
+    // `/resume` is still refused mid-run by `handleSubmit` below, so for it the
+    // lock only ever matters while idle - that is the minimum this invariant
+    // asks for, not a contradiction.
+    const switching = /^\s*\/(clear|reset|resume)(?:\s|$)/.test(raw);
+    const switchWhileBusy = switching && Boolean(controller.isCompactionBusy?.());
+    if (switching) switchingConversation.current = true;
+    if (switchWhileBusy) await controller.cancelCompaction();
     // Retain a recoverable command before any asynchronous handler can fail.
     const safe = redactText(raw, getSecrets());
     recordPrompt(safe);
@@ -1766,7 +1977,7 @@ export function App({
       const reason = error instanceof Error ? error.message : String(error);
       notify('error', `Command failed: ${redactText(reason, getSecrets())}\nInput: ${safe}`);
     } finally {
-      if (switchWhileBusy) {
+      if (switching) {
         switchingConversation.current = false;
         drainCompactionQueue.current();
       }
@@ -1777,7 +1988,7 @@ export function App({
     const trimmed = raw.trimStart();
     const slash = trimmed.startsWith('/') && !trimmed.startsWith('//');
     if (slash && (interactionPhase.current === 'running' || controller.isRunning()) &&
-      /^\/(reset|resume)(?:\s|$)/.test(trimmed)) {
+      /^\/resume(?:\s|$)/.test(trimmed)) {
       return { accepted: false,
         reason: 'Interrupt the current run before switching conversations.' };
     }
@@ -1810,6 +2021,41 @@ export function App({
     }
     dispatch({ type: 'setOverlay', overlay: null });
     toast('info', `Model set to ${provider}:${model}.`);
+  };
+
+  /**
+   * `ctrl+K` chose a row (agent-model-kits §4.7 / AC-25).
+   *
+   * `null` is `Current setup`, which is the RELEASE action, not a no-op: it runs
+   * `clearSessionKit` so the live connections go back to the file's bindings.
+   * Both paths close the overlay, and both report through the same toast funnel -
+   * including every `KitNote`, because a kit that turns the fast tier on spends
+   * money and must never do it silently (§4.2 / F-23).
+   */
+  const handleKitChoose = (kitId: string | null) => {
+    // NO KIT PORT, NO CRASH: a legacy host can still press the key, and the only
+    // honest answer is a sentence rather than a stack trace.
+    const port = controller as { applySessionKit?: unknown; clearSessionKit?: unknown };
+    if (typeof port.applySessionKit !== 'function' || typeof port.clearSessionKit !== 'function') {
+      dispatch({ type: 'setOverlay', overlay: null });
+      toast('error', 'This build cannot switch kits.');
+      return;
+    }
+    const result = kitId === null
+      ? controller.clearSessionKit() : controller.applySessionKit(kitId);
+    dispatch({ type: 'setOverlay', overlay: null });
+    // The config is already updated synchronously, so this reads the kit that is
+    // in effect RIGHT NOW rather than the id the user asked for - if the apply
+    // fell back to anything, the toast says so.
+    const applied = controller.getActiveKit().name;
+    const text = !result.ok ? kitApplyMessage(result)
+      : kitId === null ? "Kit released; using the config file's settings."
+        : `Kit ${applied} applied for this session.`;
+    const notes = kitNoteMessages(result.notes);
+    // A NOTE IS A WARNING, NOT A SUCCESS (F-23): the toast colour is the only
+    // signal a user gets that applying a kit can start spending money.
+    toast(result.ok ? (notes.length ? 'warn' : 'success') : 'error',
+      [text, ...notes].join(' '));
   };
 
   const closeConfirm = () => {
@@ -1884,6 +2130,7 @@ export function App({
     isPointerCaptured: () => terminal?.scrollbar?.controller?.isCaptured() ?? false,
     isActive: () => !tooSmall,
     getOverlay: () => stateRef.current.overlay,
+    getOverlayPage: () => overlayPage,
     onScroll: scrollBy,
     onOverlayScroll: (delta) => setOverlayScroll((n) => Math.max(0, n + delta)),
   });
@@ -2056,6 +2303,23 @@ export function App({
       setStatusExpanded(value => !value);
       return;
     }
+    // Ctrl+K: the Agent-kit picker (agent-model-kits D-15 / §4.7).
+    //
+    // NOT AN INPUT FRAME, unlike Ctrl+I below. Ctrl+I collides with the Tab byte,
+    // so a stdin translator has to disambiguate it; 0x0B is unambiguous in every
+    // encoding this app supports (utf8 byte, win32-input-mode's pass-through of
+    // control chars, and CSI-u's `ctrlByte` fold), so the raw byte IS the key.
+    //
+    // `killToEnd` HAS MOVED TO Alt+K FIRST (keymap.ts): `PromptInput`'s
+    // recognizer runs before its `key.ctrl` early-return, so leaving the old
+    // binding would delete the draft in one listener while this one opened the
+    // overlay. Two listeners both see the event; `return` only leaves one.
+    const isCtrlK = (key.ctrl && (input === 'k' || input === 'K')) || input === '\x0b';
+    if (isCtrlK) {
+      if (tooSmall || stateRef.current.overlay) return;
+      dispatch({ type: 'setOverlay', overlay: 'kit' });
+      return;
+    }
     // Ctrl+I arrives as INDEX_KEY_FRAME, never as key.ctrl + 'i': legacy
     // terminals encode it as the Tab byte and the stdin filter's translators
     // are the only layer that can tell them apart (see input/limits.ts).
@@ -2063,6 +2327,22 @@ export function App({
     if (input.includes(INDEX_KEY_FRAME)) {
       if (tooSmall || stateRef.current.overlay) return;
       requestIndexBuild();
+      return;
+    }
+    // Ctrl+L: branch this session into a NEW terminal (tui-branch-terminal-
+    // shortcut D-1 / D-2). Guarded exactly like Ctrl+G and Ctrl+I above it: an
+    // overlay owns the keyboard, and on a too-small terminal the feedback has
+    // nowhere to go. It has to sit BEFORE the `tooSmall` return below, because
+    // after that line the transcript and overlay paging own every key - and
+    // "the key did nothing" must stay distinguishable from "the key never
+    // arrived".
+    //
+    // NO `isRunning()` GUARD, unlike Ctrl+I: branching mid-run is the most likely
+    // moment to want it (D-22), and the command body is where running decides
+    // that the success needs a second, durable channel.
+    if (key.ctrl && (input === 'l' || input === 'L')) {
+      if (tooSmall || stateRef.current.overlay) return;
+      void executeSlashInput('/branch');
       return;
     }
     if (tooSmall) return;
@@ -2075,13 +2355,14 @@ export function App({
       const overlay = stateRef.current.overlay;
       // Modes A only. `model` / `confirm` manage their own keys; registering an
       // arrow handler for them would double every keypress (R-12).
-      const controlled = overlay === 'help' || overlay === 'settings' || overlay === 'plan' || overlay === 'queue';
+      const controlled = overlay === 'help' || overlay === 'settings' || overlay === 'plan'
+        || overlay === 'queue' || overlay === 'kit';
       if (key.pageUp) {
-        if (controlled) setOverlayScroll((n) => Math.max(0, n - OVERLAY_PAGE));
+        if (controlled) setOverlayScroll((n) => Math.max(0, n - overlayPage));
         return;
       }
       if (key.pageDown) {
-        if (controlled) setOverlayScroll((n) => n + OVERLAY_PAGE);
+        if (controlled) setOverlayScroll((n) => n + overlayPage);
         return;
       }
       // `settings` keeps Up/Down for field movement — a high-frequency action
@@ -2109,24 +2390,26 @@ export function App({
       return;
     }
 
-    if (key.ctrl && (input === 'l' || input === 'L')) {
-      {
-        // Writing \x1B[2J here would erase the screen and then leave it blank:
-        // Ink sees no output change and skips the repaint (ink.js:132 +
-        // log-update.js:13), possibly forever on an idle empty session. Bump
-        // the nonce instead and let Ink redraw the frame normally (§4.13).
-        setRedrawNonce((n) => n + 1);
-        return;
-      }
-      try {
-        stdout.write('\x1B[2J\x1B[3J\x1B[H');
-      } catch {
-        /* ignore */
-      }
+    // Moved off Ctrl+L by D-1, because Ctrl+L is the branch key now.
+    //
+    // Ctrl+R, NOT Ctrl+Shift+L: legacy encodings deliver 0x0c for both, so a
+    // Shift binding would exist only behind keyboard enhancement - exactly the
+    // terminals least likely to need a recovery key. The overlay guard keeps the
+    // settings screen's own Ctrl+R (Test connection) unambiguous.
+    //
+    // Writing \x1B[2J here would erase the screen and then leave it blank: Ink
+    // sees no output change and skips the repaint (ink.js:132 +
+    // log-update.js:13), possibly forever on an idle empty session. Bump the
+    // nonce instead and let Ink redraw the frame normally (§4.13).
+    if (key.ctrl && (input === 'r' || input === 'R')) {
+      if (stateRef.current.overlay) return;
+      setRedrawNonce((n) => n + 1);
       return;
     }
 
-    {
+    // Native mode has no scrollable viewport: the terminal owns scrolling, so these
+    // keys are left alone. An open overlay is application content and keeps them.
+    if (!native || stateRef.current.overlay) {
       if (key.pageUp) {
         scrollBy('pageUp');
         return;
@@ -2148,8 +2431,10 @@ export function App({
     if (key.ctrl && (input === 't' || input === 'T')) {
       const revealing = !stateRef.current.thinkingVisible;
       dispatch({ type: 'toggleThinking' });
-      if (!revealing) toast('info', 'Thinking hidden.');
-      else toast('info', 'Thinking shown.');
+      // Printed history never changes, so say what the toggle actually reaches.
+      const scope = native ? ' Applies to new messages.' : '';
+      if (!revealing) toast('info', `Thinking hidden.${scope}`);
+      else toast('info', `Thinking shown.${scope}`);
       return;
     }
 
@@ -2168,16 +2453,43 @@ export function App({
       // `ctrl+o log` hint, the keystroke would silently expand AN OLDER TOOL
       // CARD, and nothing would error. The terminal one-row record is skipped -
       // it has nothing to reveal, and expanding it would consume the press.
-      const last = [...stateRef.current.entries]
+      //
+      // TWO TIERS, AND THE ORDER IS THE WHOLE FIX (tui-final-reply-truncated-
+      // unscrollable B1). The closed list above answers "which card is this key for",
+      // and it must keep answering it EXACTLY as before: a settled answer is almost
+      // always the newest entry, so adding `assistant` to THIS filter would take the
+      // press away from the tool card the user just watched finish. Only when no card
+      // is asking for the key does it fall through to the Agent's last answer - which
+      // is the escape hatch `docs/plans/tui-full-height-live-region/spec.md` §13
+      // (known limitation 2) already promised and never wired up.
+      const entries = stateRef.current.entries;
+      const card = [...entries]
         .reverse()
         .find(
           (e) =>
-            e.kind === 'tool' ||
-            e.kind === 'team' ||
-            e.kind === 'compaction' ||
-            (e.kind === 'service' && !e.terminal),
+            // THE LIVE DISPATCH CARD IS NOT EXPANDABLE (tui-subagent-double-roster
+            // A-2'): it is suppressed on screen, so expanding it would print a frozen
+            // copy of a card that is still being rewritten. Once it settles it becomes
+            // an ordinary history card and this key reaches it again.
+            !isLiveTeamCard(e) &&
+            (e.kind === 'tool' ||
+              e.kind === 'team' ||
+              e.kind === 'compaction' ||
+              (e.kind === 'service' && !e.terminal)),
         );
-      if (last) dispatch({ type: 'toggleExpand', id: last.id });
+      // NATIVE MODE ONLY. The fallback exists because native mode cannot scroll inside the
+      // frame - the answer's head is reachable only if it is printed. Full-screen mode has a
+      // viewport that already reaches it, and it has no `expanded` rendering for an answer,
+      // so falling through there would consume the press and show nothing.
+      const answer = card === undefined && native
+        ? [...entries].reverse().find((e) => e.kind === 'assistant' && !e.streaming)
+        : undefined;
+      const last = card ?? answer;
+      // Native mode cannot rewrite what is already printed, so it PRINTS an expanded
+      // copy as a new block instead of toggling the old one (spec 4.7).
+      if (last && native) {
+        if (!scrollbackViewRef.current?.reprintExpanded(last.id)) toast('info', 'Nothing to expand.');
+      } else if (last) dispatch({ type: 'toggleExpand', id: last.id });
       // WIDENED FROM `No tool output to expand.`: with three expandable kinds the
       // old wording would be wrong in two of the three empty cases.
       else toast('info', 'Nothing to expand.');
@@ -2265,7 +2577,39 @@ export function App({
   const overlay = state.overlay;
   const settingsDraft = useMemo(() => overlay === 'settings'
     ? controller.createModelSettingsDraft() : undefined, [controller, overlay]);
+  // THE FILE'S BINDINGS, FOR THE KIT PICKER'S FIRST ROW (§4.6 / D-13). While a
+  // session kit is held the live config mirrors the KIT (I-6), so `Current setup`
+  // can only describe what choosing it restores by reading the file - one read per
+  // opening, the same price `settingsDraft` one line up already pays.
+  const kitDiskConfig = useMemo(() => overlay === 'kit'
+    ? controller.createModelSettingsDraft().baseline : undefined, [controller, overlay]);
+  // ONE PROBE PER APP (model-profile-connection-test 5 row 9): the port needs the
+  // controller's provider registry, which the overlay has no business owning.
+  // Built only while the settings overlay is open, so no other screen pays for it.
+  const probe = useMemo(() => {
+    if (overlay !== 'settings') return undefined;
+    // A test double or an embedded host may predate this port; absent means the
+    // two probe rows read `(unavailable)` rather than the screen crashing.
+    if (typeof controller.getProviderRegistry !== 'function') return undefined;
+    return createModelProbe({ registry: controller.getProviderRegistry() });
+  }, [controller, overlay]);
   const hasKey = controller.hasApiKey();
+  // THE ACTIVE KIT, DERIVED PER FRAME (D-5 / F-22): `controller.getActiveKit()` is
+  // pure, so it cannot go stale the way a cached copy would after `ctrl+K`,
+  // `/model` or a saved default. Absent when no kit is in effect, which is what
+  // keeps the status row byte-identical for users who own none (I-9).
+  //
+  // A TEST DOUBLE OR AN EMBEDDED HOST MAY PREDATE THIS PORT: the same tolerance
+  // the probe port gets one screen over ("absent means the rows read
+  // unresolved") applies here - no kit, no crash.
+  const activeKit: ActiveKit = typeof controller.getActiveKit === 'function'
+    ? controller.getActiveKit() : INACTIVE_KIT;
+  const kitChip = activeKit.source === 'none' ? undefined : {
+    name: activeKit.name,
+    modified: activeKit.modified,
+    otherNames: (cfg.modelProfiles?.kits ?? [])
+      .filter((kit) => kit.id !== activeKit.id).map((kit) => kit.name),
+  };
   const empty = state.entries.length === 0;
   // RENDER SCOPE, so the chip and the composer hint agree with what the Ctrl+C
   // handler will do on the very next keystroke.
@@ -2298,11 +2642,27 @@ export function App({
   // there is the exact cost `tui-render-performance` exists to remove. The
   // running tool, when there is one, is within a few entries of the end.
   let runningTool: string | undefined;
+  // THE WAIT PROJECTION (long-task-jobs §4.9 / AC-28). Derived here, in the same
+  // reverse loop, because both answers come from the same place: which tool is in
+  // flight, and — when that tool is `job_wait` — which job it is waiting for and
+  // for how long. The timeout is read from the CALL'S OWN ARGUMENTS rather than
+  // from the config, so a `timeoutSeconds` the model chose is what the row says.
+  let wait: { jobId: string; upToSeconds: number } | undefined;
   if (running) {
     for (let i = state.entries.length - 1; i >= 0; i -= 1) {
       const e = state.entries[i]!;
       if (e.kind === 'tool' && e.status === 'running') {
         runningTool = e.name;
+        if (e.name === 'job_wait' && e.args) {
+          const args = e.args as { job?: unknown; timeoutSeconds?: unknown };
+          const requested = typeof args.timeoutSeconds === 'number'
+            ? args.timeoutSeconds
+            : cfg.jobs.waitSeconds;
+          wait = {
+            jobId: typeof args.job === 'string' ? args.job : 'job',
+            upToSeconds: Math.max(0, Math.round(requested)),
+          };
+        }
         break;
       }
     }
@@ -2317,7 +2677,6 @@ export function App({
   const frameBudget = buildFrameBudget({ rows, cols, draftRows,
     popupRows: overlay ? 0 : popupRows, statusExpanded });
   const viewportBudget = frameBudget.viewportRows;
-  const overlayMaxRows = viewportBudget;
 
   const composerBaseRows = 0;
   const baseRail = buildTodoRailLayout({
@@ -2329,30 +2688,128 @@ export function App({
     pending: state.pendingSteering, columns: baseRail.contentCols, terminalRows: rows,
     availableRows: Math.max(0, viewportBudget - composerBaseRows - 1), paused: !running,
   }), [state.pendingSteering, baseRail.contentCols, rows, viewportBudget, composerBaseRows, running]);
+  // THE POOL, NOT THE VIEWPORT MINUS A QUEUE THAT IS NOT DRAWN
+  // (tui-full-height-live-region RV-P1-3). `QueuePanel` only mounts in the full-screen
+  // layout, so native mode used to reserve rows for a card nobody paints. And it MUST be
+  // `viewportBudget` rather than `nativeBudget.band.*`: `viewportRows === remaining` by
+  // construction, and reading the band back here would close a loop with `teamRows`
+  // (AC-34, asserted textually by `live-band.test.ts`).
   const teamLayout = buildTeamPanelLayout({
     snapshot: state.team, terminalRows: rows,
-    availableRows: Math.max(0, viewportBudget - composerBaseRows - queueLayout.rows - 1),
+    availableRows: native
+      ? Math.max(0, viewportBudget - 1)
+      : Math.max(0, viewportBudget - composerBaseRows - queueLayout.rows - 1),
   });
   const railLayout = buildTodoRailLayout({
     cols: cols - 1, panelEnabled: cfg.todo.panel, overlayOpen: false,
     itemCount: state.todos?.items.length ?? 0, viewportBudget,
     teamRows: teamLayout.rowCount, queueRows: queueLayout.rows, popupRows: 0, composerBaseRows,
   });
-  const { visible: showRail, width: railWidth, rows: railRows, contentCols } = railLayout;
+  const { visible: railVisible, width: railWidth, rows: railRows, contentCols } = railLayout;
+  // The FULL-SCREEN rail only: native mode draws its rail inside the live region's
+  // panel band (`nativeRail` below), because there is no fixed frame to hang a column
+  // on. This name says which of the two it is; the old `showRail` read like a global
+  // switch and that is how native mode ended up with no rail at all.
+  const fullscreenRailVisible = railVisible && !native;
   const transcriptEntries = useMemo(() => selectTranscriptEntries(state.entries,
     state.pendingSteering), [state.entries, state.pendingSteering]);
 
+  // --- Native scroll (tui-native-terminal-scroll). -----------------------------
+  //
+  // ALWAYS CALLED, INERT WHEN `enabled` IS FALSE: hooks cannot be conditional, and
+  // an inert hook is what keeps `scrollMode: 'app'` byte-identical (I-S9).
+  const viewCols = native ? Math.max(1, cols - 1) : cols;
+  const header = (
+    <Header
+      columns={viewCols}
+      statusExpanded={statusExpanded}
+      scrolledLines={scrolledLines}
+      overlayOpen={overlay !== null}
+      cwd={controller.getCwd()}
+      provider={cfg.provider}
+      model={cfg.model}
+      hasKey={hasKey}
+      variant={pickHeaderVariant(cols)}
+      theme={theme}
+      caps={caps}
+      // ALWAYS TRUE (agent-model-kits §4.7 / RV-P1-2): the requirement is that
+      // `ctrl+G` reveals `ctrl+K`, and the user with an empty library needs that
+      // hint most - the picker itself carries the "create one in /settings" row.
+      kitHint
+    />
+  );
+
+  // The header and the opener are SLOTS OF THE SHELL, not printed bytes (D3/D4): at
+  // `H = rows - 1` a printed row is pushed off the screen by the very next frame, so
+  // `printBanner()` was a way of making the banner invisible. Neither is passed here.
+  // The opener node is built below, because its height now comes from the native band.
+  const scrollbackView = useScrollbackView({
+    enabled: native, bridge: scrollback, entries: state.entries, runActive: running,
+    theme, caps, density: cfg.density, thinkingVisible: state.thinkingVisible,
+    reducedMotion, rows, cols,
+    overlayOpen: overlay !== null, draftRows, popupRows: overlay ? 0 : popupRows,
+    statusExpanded, forceInactive: native && guardTripped,
+    // The band's inputs. `teamRowsNatural` is the roster layout computed above, so the
+    // band clamps a number this frame already trusts instead of measuring the roster a
+    // second time (`buildTeamPanelLayout` stays the single authority).
+    itemCount: state.todos?.items.length ?? 0,
+    panelEnabled: cfg.todo.panel,
+    teamRowsNatural: teamLayout.rowCount,
+    // The top give-way measures a window entry's height, and an expanded tool card is a
+    // different height from a collapsed one - a forgotten value would print rows the region
+    // is not drawing.
+    expandedToolIds: state.expandedToolIds,
+  });
+  scrollbackViewRef.current = scrollbackView;
+  // The two hooks `cli.tsx` calls from OUTSIDE React: the exit summary (every exit
+  // path, some of which run after this tree is gone, so it reads refs, never state)
+  // and the writer's tall-frame guard. A resize clears the degraded state.
+  useLayoutEffect(() => {
+    if (!native || !scrollback) return undefined;
+    scrollback.getSummaryRows = () => {
+      const live = controller.getConfig();
+      return buildExitSummary({
+        entries: stateRef.current.entries, usageTotal: stateRef.current.usageTotal,
+        provider: live.provider, model: live.model, elapsedMs: Date.now() - startedAt.current,
+        ...(identityRef.current ? { sessionId: identityRef.current.id } : {}), glyphs,
+      });
+    };
+    scrollback.onGuardTrip = () => setGuardTripped(true);
+    return () => { scrollback.onGuardTrip = null; };
+  }, [native, scrollback, controller, glyphs]);
+  useEffect(() => { setGuardTripped(false); }, [rows, cols]);
+  const nativeBudget = native ? scrollbackView.budget : null;
+  // THE EMPTY-SESSION CARD, ONE NODE FOR BOTH MODES (D4 / RV-P0-1). The wordmark and the
+  // getting-started card are the first block of content in `app` mode (they scroll away
+  // with the transcript) and the shell's `opener` slot in native mode. Its height used to
+  // be a `rows - 8` guess in native mode; the honest input is the band's own pool, which
+  // is why this node is built after `nativeBudget`.
+  const openerRows = nativeBudget ? nativeBudget.band.bandRows : viewportBudget;
+  const openerCols = nativeBudget ? nativeBudget.previewCols : contentCols;
+  const opener = empty ? (
+    <SessionOpener
+      variant={pickOpenerVariant(openerRows, openerCols)}
+      version={version}
+      cwd={controller.getCwd()}
+      hasKey={hasKey}
+      viewportRows={openerRows}
+      theme={theme}
+      caps={caps}
+    />
+  ) : null;
+  const overlayMaxRows = nativeBudget ? nativeBudget.overlayRows : viewportBudget;
+
   const overlayNode =
     overlay === 'queue' ? (
-      <QueueOverlay pending={state.pendingSteering} cols={cols} maxRows={overlayMaxRows}
+      <QueueOverlay pending={state.pendingSteering} cols={viewCols} maxRows={overlayMaxRows}
         scrollOffset={overlayScroll} onScrollClamp={setOverlayScroll} theme={theme} caps={caps} />
     ) : overlay === 'help' ? (
       <OverlayFrame
         title="Help"
         hint={`Esc close ${glyphs.midDot} PgUp/PgDn scroll`}
         maxRows={overlayMaxRows}
-        cols={cols}
-        rows={helpRows(theme, caps)}
+        cols={viewCols}
+        rows={helpRows(theme, caps, native)}
         scrollOffset={overlayScroll}
         onScrollClamp={setOverlayScroll}
         theme={theme}
@@ -2365,10 +2822,29 @@ export function App({
         currentProvider={cfg.provider}
         currentModel={cfg.model}
         maxRows={overlayMaxRows}
-        cols={cols}
+        cols={viewCols}
         theme={theme}
         caps={caps}
         onSelect={handleModelSelect}
+      />
+    ) : overlay === 'kit' ? (
+      <KitPicker
+        isActive={!tooSmall}
+        library={cfg.modelProfiles}
+        config={cfg}
+        {...(kitDiskConfig ? { diskConfig: kitDiskConfig } : {})}
+        active={activeKit}
+        // ONLY THE APPLY IS BLOCKED while work is in flight (§4.7): a list a
+        // user cannot even OPEN reads as a broken key.
+        busy={controller.isModelSettingsBusy()}
+        maxRows={overlayMaxRows}
+        cols={viewCols}
+        scrollOffset={overlayScroll}
+        onScrollClamp={setOverlayScroll}
+        theme={theme}
+        caps={caps}
+        onChoose={handleKitChoose}
+        onClose={() => dispatch({ type: 'setOverlay', overlay: null })}
       />
     ) : overlay === 'settings' ? (
       <SettingsScreen
@@ -2396,6 +2872,11 @@ export function App({
           // `auto`, not an empty string: an empty field reads as "unset", which
           // is indistinguishable from AUTO and is not a state this can be in.
           maxTokens: cfg.maxTokens ? String(cfg.maxTokens) : 'auto',
+          // BOTH HALVES, seeded AND read back (§6.3): the sibling comment above
+          // records what omitting either one costs. `auto` mirrors the row's
+          // empty-field reading; a bound Main profile hides the row entirely
+          // and the profile editor seeds from the entry instead.
+          contextWindow: cfg.contextWindow === null ? 'auto' : String(cfg.contextWindow),
           apiKey: '',
           logLevel: cfg.log.level,
           // The four fast rows, seeded through the pure mapper so the screen and
@@ -2405,12 +2886,13 @@ export function App({
         }}
         apiKeys={cfg.apiKeys}
         maxRows={overlayMaxRows}
-        cols={cols}
+        cols={viewCols}
         scrollOffset={overlayScroll}
         onScrollClamp={setOverlayScroll}
         theme={theme}
         caps={caps}
         draft={settingsDraft}
+        probe={probe}
         onProfileSave={handleProfileSave}
         onReload={() => controller.createModelSettingsDraft()}
         onClose={() => dispatch({ type: 'setOverlay', overlay: null })}
@@ -2425,7 +2907,7 @@ export function App({
         isActive={!tooSmall}
         state={confirmState}
         maxRows={overlayMaxRows}
-        cols={cols}
+        cols={viewCols}
         theme={theme}
         caps={caps}
         onClose={closeConfirm}
@@ -2435,7 +2917,7 @@ export function App({
         isActive={!tooSmall}
         questions={humanRequest.questions}
         maxRows={overlayMaxRows}
-        cols={cols}
+        cols={viewCols}
         theme={theme}
         caps={caps}
         onSubmit={(answers) => resolveHuman({ kind: 'answers', answers, cancelled: false })}
@@ -2445,7 +2927,7 @@ export function App({
         isActive={!tooSmall}
         plan={humanRequest.plan}
         maxRows={overlayMaxRows}
-        cols={cols}
+        cols={viewCols}
         scrollOffset={overlayScroll}
         onScrollClamp={setOverlayScroll}
         theme={theme}
@@ -2453,37 +2935,6 @@ export function App({
         onVerdict={handlePlanVerdict}
       />
     ) : null;
-
-  const header = (
-    <Header
-      columns={cols}
-      statusExpanded={statusExpanded}
-      scrolledLines={scrolledLines}
-      overlayOpen={overlay !== null}
-      cwd={controller.getCwd()}
-      provider={cfg.provider}
-      model={cfg.model}
-      hasKey={hasKey}
-      variant={pickHeaderVariant(cols)}
-      theme={theme}
-      caps={caps}
-    />
-  );
-
-  // The wordmark + getting-started card now live INSIDE the viewport, as its
-  // first block of content, so they scroll away instead of being yanked out of
-  // the header the moment the first message lands.
-  const opener = empty ? (
-    <SessionOpener
-      variant={pickOpenerVariant(viewportBudget, contentCols)}
-      version={version}
-      cwd={controller.getCwd()}
-      hasKey={hasKey}
-      viewportRows={viewportBudget}
-      theme={theme}
-      caps={caps}
-    />
-  ) : null;
 
   const density = cfg.density;
   const transcriptWindow = cfg.transcriptWindow ?? DEFAULT_TRANSCRIPT_WINDOW;
@@ -2505,9 +2956,24 @@ export function App({
     heightsMeasured: heights.stats().measured,
     heightsEstimated: heights.stats().estimated,
     cols: contentCols,
-    mode: 'fullscreen',
-    viewportRows: viewportBudget,
+    mode: native ? 'native' : 'fullscreen',
+    viewportRows: nativeBudget ? nativeBudget.liveRows : viewportBudget,
     offset: scrolledLines,
+    // `null` outside native mode, and `/perf` prints `n/a` for it: a band row of
+    // zeroes in full-screen mode would read like a panel that failed to show.
+    band: nativeBudget
+      ? {
+          ...nativeBudget.band,
+          contentCols: nativeBudget.contentCols,
+          // The tail window, joined here because it belongs to the VIEW pipeline rather
+          // than to the band: `window=<start>/<n>` is what makes the visible-vs-printed
+          // gap observable (known limitation 5), and `head=` counts the rows the top
+          // give-way printed for it, so the mechanism is never invisible.
+          windowStart: scrollbackView.windowStart,
+          windowEntries: scrollbackView.tailEntries.length,
+          headRows: scrollbackView.headRows,
+        }
+      : null,
     // A getter: the bridge's `frameReady` and geometry change outside React renders.
     get scrollbar() {
       return readScrollbarPerf({
@@ -2517,7 +2983,17 @@ export function App({
   };
 
   // Completion shares the fixed editor slot and its frame budget.
-  const popupMaxRows = 6;
+  //
+  // THE FRAME BUDGET, NOT A LITERAL 6 (defect 10), BUT NOT ALL OF IT EITHER.
+  // `popupMaxHeight` is the capacity `buildFrameBudget` already computed, and a
+  // second, smaller constant here is what made 57 commands browsable six at a time
+  // on a 30-row terminal. Handing over the WHOLE capacity is wrong in the other
+  // direction: `popupCapacity` reserves exactly one message row, so at 20 rows it
+  // grants 13, the transcript collapses to a single row and the TODO rail
+  // disappears - measured, `todo-app-layout.test.tsx` catches it. Half the granted
+  // capacity keeps the menu growing with the terminal (6 rows at 20, 11 at 30, 16
+  // at 40) while the conversation and the rail keep theirs.
+  const popupMaxRows = Math.floor(frameBudget.popupMaxHeight / POPUP_CAPACITY_SHARE);
 
   // WHICH KEY THE HINT ROW NAMES (shift-tab-mode-toggle-still-dead-on-windows,
   // C3-1). Derived from `vtInputWarning` rather than from a probe of its own,
@@ -2548,24 +3024,30 @@ export function App({
       level: latestToast.level === 'success' ? 'info' : latestToast.level } : undefined,
   });
   const statusInput: StatusPrimaryInput = {
-    columns: cols, phase: state.runPhase, pendingCount: state.pendingSteering.length,
+    columns: viewCols, phase: state.runPhase, pendingCount: state.pendingSteering.length,
     context: state.context, usageTotal: state.usageTotal, thinkingLevel: cfg.thinkingLevel,
     elapsedMs, tokPerSec, speedKnown, activeTool: state.activeTool, runOutcome: state.runOutcome,
+    // The bounded-wait label, when `job_wait` is what is holding the run. Absent
+    // for every other tool, which keeps every existing plan byte-identical.
+    ...(wait ? { wait } : {}),
     waitingForConfirmation: !!humanRequest || !!confirmState,
     stopping: interruptGesture.current.phase === 'stopping',
     interruptPhase: interruptGesture.current.phase,
     compacting: compactionLive || !!state.compaction?.inFlight,
     mode: state.agentMode, pendingMode: state.pendingAgentMode,
     servicesActive: { live: liveServices }, ecoRung: governor.rung,
-    teamActive: state.team ? { running: state.team.runs.filter(item =>
-      !['queued', 'done', 'failed', 'aborted'].includes(item.phase)).length,
-      total: state.team.runs.length } : undefined,
+    // THE STATUS-DETAIL ROW COUNTS LIKE THE ROSTER AND THE CHIP (A-1): this was the
+    // last inline phase filter, left behind when the StatusBar chip converged, and it
+    // feeds the `Team n/m` on the second status row.
+    teamActive: state.team
+      ? { running: rosterCounts(state.team.runs).running, total: state.team.runs.length }
+      : undefined,
     todoActive: state.todos ? { done: state.todos.doneCount, total: state.todos.total } : undefined,
     fastActive: state.fast?.live ? { inFlight: state.fast.inFlight } : undefined,
     ...feedbackProjection,
   };
   const details = planStatusDetail({ status: statusInput, model: cfg.model, provider: cfg.provider,
-    hints: { interactionPhase: interactionPhase.current, cols, completion, overlay,
+    hints: { interactionPhase: interactionPhase.current, cols: viewCols, completion, overlay,
       selectionPending: selectionController?.hasPendingSelection() ?? false,
       copyInFlight: copyState.busy, copyCleanupPending: copyState.cleanupPending,
       hasDraft: hasDraftRef.current, services: liveServices,
@@ -2620,7 +3102,43 @@ export function App({
             caps={caps}
           />
         ) : null;
-  const rail = showRail && state.todos ? (
+
+  // --- Native panel band (release-gate-and-native-panels §6.3/§6.4) -------------
+  //
+  // SEPARATE NODES, NOT THE TWO ABOVE (RV-P1-7). Those carry `cols={contentCols}` for
+  // the full-screen layout, which has to stay byte-identical (I-3); reusing them here
+  // would silently narrow it. Every number below comes from `budget.band`, and the
+  // number that decides whether a panel mounts IS the number it lays out against - a
+  // panel that mounts on one value and lays out against another renders nothing and
+  // reports nothing (TodoPanel's own I-10 / P1-3 note).
+  const nativeBand = nativeBudget ? nativeBudget.band : null;
+  const nativeRail = state.todos && nativeBand && nativeBand.railRows >= TODO_LIMITS.panelMinRows
+    ? (
+      <TodoPanel
+        snapshot={state.todos}
+        width={nativeBand.railCols}
+        rows={nativeBand.railRows}
+        running={running}
+        reducedMotion={viewReducedMotion}
+        theme={theme}
+        caps={caps}
+      />
+    ) : null;
+  // `cols` is the band's left column, not `contentCols`: `TeamPanel.activityBudget` is
+  // continuous in `cols`, so a roster laid out against a column it is not in is exactly
+  // the bug that pushes the elapsed column off an 80-column terminal.
+  const nativeTeam = state.team && nativeBand ? (
+    <TeamPanel
+      snapshot={state.team}
+      layout={teamLayout}
+      rows={rows}
+      cols={nativeBand.previewCols}
+      reducedMotion={viewReducedMotion}
+      theme={theme}
+      caps={caps}
+    />
+  ) : null;
+  const rail = fullscreenRailVisible && state.todos ? (
           <TodoPanel
             snapshot={state.todos}
             width={railWidth}
@@ -2673,32 +3191,26 @@ export function App({
       </ScrollViewport>
   );
 
-  return (
-    <AppShell
-      inactive={tooSmall}
-      placeholder={<Text wrap="truncate" color={theme.noticeWarn}>
-        {glyphs.warn} Terminal too small - needs at least 40 columns and 12 rows.
-      </Text>}
-      rows={rows}
-      cols={cols}
-      header={header}
-      viewport={viewport}
-      viewportRows={frameBudget.viewportRows}
-      composer={composer}
-      composerSlotRows={frameBudget.composerSlotRows}
-      statusRows={frameBudget.statusRows}
-      details={<BottomStatusRow plan={details} columns={cols} theme={theme} />}
-      status={
-        <StatusBar
-          columns={cols}
+  const detailsNode = <BottomStatusRow plan={details} columns={viewCols} theme={theme} />;
+  const statusNode = (
+    <StatusBar
+          columns={viewCols}
           speedKnown={speedKnown}
           {...feedbackProjection}
           interruptPhase={interruptGesture.current.phase}
           pendingSteering={state.pendingSteering}
           runPhase={state.runPhase}
           activeTool={state.activeTool}
+          {...(wait ? { wait } : {})}
           runOutcome={state.runOutcome}
           reducedMotion={reducedMotion}
+          // AFTER the motion flag DELIBERATELY: `spinner-census.test.ts` pins
+          // the `<StatusBar`-then-motion-flag adjacency as a unique site, so this
+          // prop is inserted after it rather than before it.
+          {...(sessionId ? { sessionId } : {})}
+          // THE KIT CHIP (agent-model-kits D-12): present only while a kit is in
+          // effect, so a user who owns none renders the row they always did (I-9).
+          {...(kitChip ? { kit: kitChip } : {})}
           waitingForConfirmation={!!humanRequest || !!confirmState}
           stopping={interruptGesture.current.phase === 'stopping'}
           interruptHint={interruptGesture.current.phase === 'stopping'
@@ -2726,16 +3238,22 @@ export function App({
           ecoRung={governor.rung}
           {...(state.team
             ? {
+                // `rosterCounts`, NOT a fourth inline phase filter (A-1): the chip and
+                // the roster header above it must never disagree.
                 teamActive: {
-                  running: state.team.runs.filter(
-                    (r) => r.phase !== 'queued' && r.phase !== 'done' &&
-                      r.phase !== 'failed' && r.phase !== 'aborted',
-                  ).length,
+                  running: rosterCounts(state.team.runs).running,
                   total: state.team.runs.length,
                 },
               }
             : {})}
-          {...(state.todos && !showRail
+          // THE CHIP IS THE FALLBACK, NOT THE PANEL'S REPLACEMENT (RV-P2-4). In
+          // native mode `fullscreenRailVisible` is always false, so keying off it
+          // printed the same count twice the moment the band drew a rail; the question
+          // is whether a rail was actually DRAWN (`band.railRows > 0`), which is also
+          // the only reading under which "the status chip carries it" is true.
+          {...(state.todos && !(native
+            ? (nativeBudget?.band.railRows ?? 0) > 0
+            : fullscreenRailVisible)
             ? { todoActive: { done: state.todos.doneCount, total: state.todos.total } }
             : {})}
           // `svc N` after the todo chip. It DEGRADES rather than hides below
@@ -2795,7 +3313,69 @@ export function App({
               }
             : {})}
         />
-      }
+  );
+
+  if (nativeBudget) {
+    // THE OPENER IS MOUNTED ON THE SHELL'S TOP-ALIGNED SLOT (D4 / RV-P0-1): it is sized
+    // from the band's pool above, and bottom-aligning it would reproduce the reported
+    // "blank upper half" INSIDE the region, where the canvas `gap` assertion cannot see it.
+    return (
+      <ScrollbackShell
+        budget={nativeBudget}
+        header={header}
+        overlay={overlayNode}
+        liveTailLines={scrollbackView.liveTailLines}
+        {...(opener ? { opener } : {})}
+        // Real components for the tail window (I-7); the plain rows above stay as the
+        // fallback for a frame with no preview rows. The WHOLE list is passed: the window
+        // belongs to `tail-window.ts`, and `prev` must come from the same list.
+        tail={nativeBudget.band.previewRows > 0
+          ? (
+            <LiveTail
+              entries={state.entries}
+              maxEntries={SCROLLBACK_LIMITS.liveTailMaxEntries}
+              rows={nativeBudget.band.previewRows}
+              cols={nativeBudget.previewCols}
+              expandedToolIds={state.expandedToolIds}
+              thinkingVisible={state.thinkingVisible}
+              reducedMotion={viewReducedMotion}
+              density={cfg.density}
+              nowSec={nowSec}
+              theme={theme}
+              caps={caps}
+              measuredRows={scrollbackView.measuredTailRows}
+            />
+          )
+          : undefined}
+        team={nativeTeam}
+        rail={nativeRail}
+        composer={composer}
+        status={statusNode}
+        details={detailsNode}
+        placeholder={<Text wrap="truncate" color={theme.noticeWarn}>
+          {glyphs.warn} Terminal too small - needs at least 40 columns and 12 rows.
+        </Text>}
+        theme={theme}
+      />
+    );
+  }
+
+  return (
+    <AppShell
+      inactive={tooSmall}
+      placeholder={<Text wrap="truncate" color={theme.noticeWarn}>
+        {glyphs.warn} Terminal too small - needs at least 40 columns and 12 rows.
+      </Text>}
+      rows={rows}
+      cols={cols}
+      header={header}
+      viewport={viewport}
+      viewportRows={frameBudget.viewportRows}
+      composer={composer}
+      composerSlotRows={frameBudget.composerSlotRows}
+      statusRows={frameBudget.statusRows}
+      details={detailsNode}
+      status={statusNode}
     />
   );
 }

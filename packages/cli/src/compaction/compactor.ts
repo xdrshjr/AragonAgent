@@ -536,6 +536,7 @@ export class Compactor implements ContextManager {
         return source === undefined ? this.deps.isPricedModel(this.mainRef()) : source !== 'fallback';
       },
       getWindowOverride: () => this.deps.getConfig().contextWindow,
+      getWindowOverrideOrigin: () => this.deps.getConfig().contextWindowOrigin,
     });
     return this.ownMeter;
   }

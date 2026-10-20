@@ -26,7 +26,15 @@ export interface KeyState {
   rightArrow?: boolean;
 }
 
-/** Map a Ctrl-modified key to an intent, if any. */
+/**
+ * Map a Ctrl-modified key to an intent, if any.
+ *
+ * `Ctrl+K` IS DELIBERATELY NOT HERE (agent-model-kits D-15). That byte belongs
+ * to the Agent-kit picker on the main screen, and this recognizer runs BEFORE
+ * `PromptInput`'s `if (key.ctrl) return` - so keeping the binding would delete
+ * the user's draft in one listener while the other opened the overlay. The
+ * capability moved to `Alt+K` (`fromMeta`) instead of being dropped.
+ */
 function fromCtrl(input: string, key: KeyState): EditIntent | null {
   if (key.leftArrow) return 'wordLeft';
   if (key.rightArrow) return 'wordRight';
@@ -39,8 +47,6 @@ function fromCtrl(input: string, key: KeyState): EditIntent | null {
       return 'deleteWordBack';
     case 'u':
       return 'killToStart';
-    case 'k':
-      return 'killToEnd';
     default:
       return null;
   }
@@ -50,6 +56,10 @@ function fromCtrl(input: string, key: KeyState): EditIntent | null {
 function fromMeta(input: string): EditIntent | null {
   if (input === 'b') return 'wordLeft';
   if (input === 'f') return 'wordRight';
+  // `killToEnd` LIVES HERE NOW (agent-model-kits D-15). `Alt+K` keeps the
+  // capability, and it keeps the kill family together: `M-k` is kill-sentence in
+  // the Emacs tradition this keymap already borrows `Ctrl+W` and `Alt+B/F` from.
+  if (input === 'k') return 'killToEnd';
   if (input === '\x7f' || input === '\b') return 'deleteWordBack';
   return null;
 }
@@ -79,7 +89,10 @@ function fromRaw(input: string): EditIntent | null {
       return 'deleteWordBack';
     case '\x15': // Ctrl+U (raw)
       return 'killToStart';
-    case '\x0b': // Ctrl+K (raw)
+    case '\x1bk':
+      // Alt+K (raw ESC + k). `\x0b` (Ctrl+K) is deliberately ABSENT: it belongs
+      // to the Agent-kit picker, and a case for it here would be a dead binding
+      // that still looks alive to every future reader.
       return 'killToEnd';
     default:
       return null;

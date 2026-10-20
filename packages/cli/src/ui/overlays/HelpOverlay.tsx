@@ -19,7 +19,27 @@ import { pickGlyphs } from '../glyphs.js';
 
 const KEY_PAD = 24;
 
-function keyRows(times: string): [string, string][] {
+/**
+ * Rows that only make sense when the APPLICATION scrolls and selects. In native
+ * scroll mode (tui-native-terminal-scroll §4.7) the terminal does both, so they are
+ * dropped and one honest row replaces them.
+ */
+const APP_SCROLL_ROWS: ReadonlySet<string> = new Set([
+  'Shift+Up / Shift+Down', 'Wheel', 'Shift+Wheel', 'Drag right edge', '^N',
+  'Drag text (left button)', 'Ctrl+C (with a selection)',
+]);
+
+function keyRows(times: string, native = false): [string, string][] {
+  const all = allKeyRows(times);
+  if (!native) return all;
+  return all
+    .filter(([key]) => !APP_SCROLL_ROWS.has(key))
+    .map(([key, description]): [string, string] =>
+      key === 'PgUp / PgDn' ? [key, 'Page through an open overlay'] : [key, description])
+    .concat([['Scroll', 'Use your terminal (wheel, Shift+PgUp, scrollbar, search)']]);
+}
+
+function allKeyRows(times: string): [string, string][] {
   return [
     ['Enter', 'Submit (idle) / queue steering (running); re-pins to the newest output'],
     ['Alt+Enter / Shift+Enter', 'Newline when supported; the host may intercept either binding'],
@@ -38,9 +58,19 @@ function keyRows(times: string): [string, string][] {
     // with a draft x2 clears the input and x3 exits; an empty input
     // keeps the previous x2 exit.
     ['Ctrl+C', `Draft: ${times}2 clear input, ${times}3 exit. Empty: ${times}2 exit`],
-    ['Ctrl+L', 'Redraw the frame'],
+    // Ctrl+L IS THE BRANCH KEY NOW (tui-branch-terminal-shortcut D-1) and the
+    // redraw moved to Ctrl+R. Both rows are listed, because the migration is the
+    // one thing an existing user will press by muscle memory and be surprised by.
+    ['Ctrl+L', 'Open a new terminal on this session (the branch gets its own id)'],
+    ['Ctrl+R', 'Redraw the frame'],
     ['Ctrl+T', 'Show/hide thinking (off by default)'],
     ['Ctrl+I', 'Build the project index (bundled skill; asks first; needs keyboard enhancement)'],
+    // THE KIT KEYS (agent-model-kits D-11 / D-15): `Ctrl+K` moved to the picker
+    // and `killToEnd` moved to `Alt+K`. BOTH rows are listed, because an existing
+    // user will press the old key by muscle memory and needs to find out where it
+    // went - and because `^K` is only advertised in the expanded header row.
+    ['Ctrl+K', 'Agent kits: pick a preset for this session (see /kit)'],
+    ['Alt+K', 'Delete from the cursor to the end of the line (was Ctrl+K)'],
     ['Ctrl+G', 'Expand/collapse status details; disabled while an overlay is open'],
     ['PgUp / PgDn', 'Scroll a page (transcript, or this overlay)'],
     ['Shift+Up / Shift+Down', 'Scroll the transcript a line (full-screen mode)'],
@@ -81,16 +111,25 @@ const COMMANDS: [string, string][] = [
   ['/max-tokens [n|auto]', 'Output token cap; no argument reports the effective one'],
   ['/team [on|off|max n]', 'Team subagents: status, switch, fan-out width'],
   ['/fast [on|off|model|review]', 'Fast model tier: status, switch, model, review cadence'],
+  ['/kit [list|use <name>]', 'Agent kits: what is in effect, list them, use one for this session'],
   [
     '/todo [on|off|panel|follow|clear|continue]',
     'Todo planning: status, switches, the rail, follow-through',
   ],
   ['/tools', 'List active tools'],
-  ['/clear', 'Clear the visible transcript and the todo panel'],
-  ['/reset', 'New conversation'],
+  // `/clear` IS NOT "CLEAR THE SCREEN" ANY MORE (clear-command-context-reset D-1).
+  // Two rows, not one, because the intentions differ: `/clear` starts a NEW
+  // CONVERSATION (interrupt the run, archive the old one, drop the history), while
+  // `/clear screen` only wipes what is on screen. A user who wants the second has
+  // to be able to see that it exists before reaching for the first.
+  ['/clear', 'Start a new conversation: archive, then clear context and transcript'],
+  ['/clear screen', 'Clear the visible transcript only; keeps the conversation'],
+  ['/reset', 'Alias of /clear'],
   ['/cwd [dir]', 'Show or change the tool working directory'],
-  ['/save [file]', 'Save the session to JSON'],
-  ['/resume [file]', 'Load a saved session'],
+  ['/save [file]', 'Export the session to JSON (a file you keep)'],
+  ['/resume [file]', 'Load a saved session; this session moves to a new id'],
+  ['/session [copy|pin]', 'Show this session id and file; copy the resume command; pin it'],
+  ['/branch', 'Same as Ctrl+L: branch into a new terminal'],
   ['/copy', 'Copy last answer; native completion confirmed, OSC 52 request unconfirmed'],
   ['/queue', 'Read every pending message in full; no replay or queue mutation'],
   ['/mouse [on|off]', 'Release the mouse to your terminal, or take it back'],
@@ -144,7 +183,11 @@ const FAST_ROWS: [string, string][] = [
 ];
 
 /** Build the overlay's rows. Exported so `app.test.tsx` can count them. */
-export function helpRows(theme: Theme, caps: TermCapabilities): React.ReactElement[] {
+export function helpRows(
+  theme: Theme,
+  caps: TermCapabilities,
+  native = false,
+): React.ReactElement[] {
   const glyphs = pickGlyphs(caps);
   const rows: React.ReactElement[] = [];
 
@@ -161,7 +204,7 @@ export function helpRows(theme: Theme, caps: TermCapabilities): React.ReactEleme
   );
 
   rows.push(section('Keybindings'));
-  for (const [k, d] of keyRows(glyphs.times)) rows.push(pair(k, d));
+  for (const [k, d] of keyRows(glyphs.times, native)) rows.push(pair(k, d));
   rows.push(section('Slash commands'));
   for (const [c, d] of COMMANDS) rows.push(pair(c, d));
   rows.push(section('Plan mode'));

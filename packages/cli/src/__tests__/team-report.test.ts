@@ -1,7 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import { buildDispatchReport, findFileConflicts, truncateBytes } from '../team/report.js';
 import { TEAM_LIMITS } from '../team/limits.js';
+import type { SubagentModelResolution } from '../team/model.js';
 import type { DispatchOutcome, SubagentRun } from '../team/types.js';
+
+/** A `team/model.ts` resolution fixture for the disclosure-line tests. */
+function resolution(over: Partial<SubagentModelResolution> = {}): SubagentModelResolution {
+  return {
+    mode: 'fast',
+    effective: 'fast',
+    ref: { providerId: 'openai', modelId: 'gpt-5-mini' },
+    thinkingLevel: 'off',
+    keyRole: 'fast',
+    profile: null,
+    ...over,
+  };
+}
 
 function run(over: Partial<SubagentRun> = {}): SubagentRun {
   return {
@@ -127,6 +141,45 @@ describe('buildDispatchReport', () => {
     expect(report).toContain('### Messages to you');
     expect(report).toContain('[a1 -> lead] "auth uses a second session store" (12s in)');
     expect(report).toContain('see session.ts');
+  });
+});
+
+describe('the subagent model disclosure line (subagent-model D-4 / I-2)', () => {
+  it('19. adds NO line under the default main mode (byte equivalence)', () => {
+    const text = buildDispatchReport(outcome(), { cost: { input: 3, output: 15 },
+      subagentModel: resolution({ mode: 'main', effective: 'main', keyRole: 'main' }) });
+    expect(text).not.toContain('Children ran on');
+    expect(text).not.toContain('Subagent model');
+    expect(text).toMatch(/Tokens: in 41\.2k, out 8\.9k\. Cost: /);
+  });
+
+  it('20. discloses the effective model when children ran fast or a profile', () => {
+    const text = buildDispatchReport(outcome(), {
+      subagentModel: resolution({ effective: 'fast' }),
+    });
+    expect(text).toContain('Children ran on openai:gpt-5-mini (subagent model: fast).');
+    // Immediately after the spend line it explains.
+    expect(text.indexOf('Children ran on')).toBeGreaterThan(text.indexOf('Tokens: in'));
+  });
+
+  it('21. a degraded request names the mode, the reason and the fallback', () => {
+    const text = buildDispatchReport(outcome(), {
+      subagentModel: resolution({ mode: 'profile', effective: 'main', keyRole: 'main',
+        fallbackReason: 'profile_missing' }),
+    });
+    expect(text).toContain(
+      'Subagent model profile unavailable (profile_missing); children ran on the main model.');
+    expect(text).not.toContain('Children ran on openai');
+  });
+
+  it('21b. pricing unknown rather than a fabricated table when the child model is unpriced', () => {
+    // The controller omits `cost` for an unpriced fast/profile model (C-11):
+    // the header then reports unknown pricing instead of $0.00.
+    const text = buildDispatchReport(outcome(), {
+      subagentModel: resolution({ effective: 'profile' }),
+    });
+    expect(text).toContain('Cost: pricing unknown.');
+    expect(text).not.toContain('$0.00');
   });
 });
 

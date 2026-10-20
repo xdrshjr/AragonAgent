@@ -35,7 +35,7 @@ import { emptyContextUsage } from '../compaction/meter.js';
 import type { TodoItem, TodoSnapshot } from '../todo/types.js';
 // TYPE-ONLY: `proc/types.ts` is a pure leaf and the erased import keeps this
 // module free of a runtime edge into the supervisor.
-import type { ServiceSnapshot, ServiceStatus } from '../proc/types.js';
+import type { JobKind, ServiceSnapshot, ServiceStatus } from '../proc/types.js';
 import type { RetryPhase } from './retry-view.js';
 // TYPE-ONLY, and deliberately so: `tools/patch.ts` is a pure leaf and the erased
 // import keeps this module free of a runtime edge into the tool layer.
@@ -57,7 +57,8 @@ export type Overlay =
   | 'queue'
   | 'confirm'
   | 'question'
-  | 'plan';
+  | 'plan'
+  | 'kit';
 export type ToolStatus = 'pending' | 'running' | 'done' | 'error';
 
 /** Ephemeral, auto-dismissed acknowledgement (spec §3.9). */
@@ -71,6 +72,13 @@ export interface Toast {
 /** Default auto-dismiss window for a toast. */
 export const DEFAULT_TOAST_TTL_MS = 2500;
 
+// NATIVE-SCROLL STABILITY TABLE (tui-native-terminal-scroll R6): a transcript entry is
+// PRINTED into the terminal's scrollback once the reducer will never write to it
+// again, and printed rows cannot be rewritten. `ui/scrollback/settled-boundary.ts`
+// lists, per kind below, when that is true. Adding a kind is a compile error there; but
+// WIDENING WHAT THE REDUCER WRITES TO AN EXISTING KIND (a new field mutated after
+// settle, a new status, a new in-place rewrite) is NOT, so update that table and its
+// tests in the same change.
 export type Entry =
   | { id: string; kind: 'user'; text: string }
   /**
@@ -284,6 +292,26 @@ export type Entry =
       terminal?: boolean;
       /** The stop reported the pid still alive afterwards (R-2 / P2-6). */
       killIncomplete?: boolean;
+      /**
+       * WHICH KIND OF JOB THIS CARD DRAWS (long-task-jobs §4.9 / I-2).
+       *
+       * It changes the NOUN and the status wording only. Renaming the entry kind
+       * from `service` to `job` would be a pure regression: ordinary assertions pin
+       * `[background] service s1 started` word for word, `bg-command.test.ts` pins
+       * `/bg stop`'s `Stopped N services` toast, and there are no snapshot files in
+       * this package to absorb the churn. The few strings that DID move to "job"
+       * are the model-facing unknown-id messages in `proc-tools.ts`, which name an
+       * id space that now holds both kinds.
+       */
+      jobKind: JobKind;
+      /** Latest extracted progress line; one extra row when present. */
+      progress?: string;
+      /** When output last arrived, so `stalled` can be evaluated at render time. */
+      lastOutputAt: number;
+      /** Derived at snapshot time by the supervisor, carried here so it survives a save. */
+      stalled?: boolean;
+      /** Where the on-disk mirror wrote this job's full log. */
+      logPath?: string;
     };
 
 export interface UsageTotal {
@@ -438,7 +466,7 @@ export interface ViewState {
  * used to spell the object out twice, which is how `cacheReadTokens` would have
  * been added to one of them and not the other.
  */
-const EMPTY_USAGE_TOTAL: UsageTotal = {
+export const EMPTY_USAGE_TOTAL: UsageTotal = {
   inputTokens: 0,
   outputTokens: 0,
   cacheReadTokens: 0,
@@ -549,6 +577,18 @@ export type ViewAction =
   | { type: 'abortMark' }
   | { type: 'clearTranscript' }
   | { type: 'resetConversation' }
+  /**
+   * Zero the session's spend WITHOUT touching the conversation
+   * (tui-session-id-resume D-10 / R-9 / T-45).
+   *
+   * A separate action rather than `resetConversation`, because the two mean
+   * different things: `/clear` ends the conversation and the spend together,
+   * while an in-TUI `/resume` adopts another conversation and starts a NEW id -
+   * so the counter must restart, but the entries that were just restored must
+   * not be thrown away with it. `context` is left untouched for the reason
+   * `resetConversation` records: the meter, not the reducer, owns occupancy.
+   */
+  | { type: 'resetUsage' }
   | { type: 'setOverlay'; overlay: Overlay }
   | { type: 'toggleThinking' }
   | { type: 'pushToast'; level: ToastLevel; text: string; ttlMs?: number }
@@ -759,18 +799,20 @@ export function reduceEvent(
 
 /**
  * Tools that render their own transcript entry, so the generic tool card would
- * be a duplicate. EXACTLY ONE MEMBER; read todo-plan-execution §3.8 before
- * adding a second.
+ * be a duplicate. `task` is the second member (F-8 A'3): every dispatch opens
+ * a TeamCard immediately after, so the pair read as TWO dispatches - the first
+ * failed, the second succeeded - when there was only ever one. `todo_write`'s
+ * reasons (todo-plan-execution §3.8 / D-10) carry over unchanged.
  *
  * SUPPRESSING ONLY `tool_call_start` IS SUFFICIENT, AND THAT IS THE WHOLE REASON
  * THIS IS SAFE (D-10). Every later handler — `toolCallDelta` / `toolCallEnd` /
  * `toolExecStart` / `toolExecEnd` — resolves its target through
  * `findToolEntryId`, which returns `undefined` when no entry was created, and
- * every one of them already early-returns on that. There is no fifth handler. A
- * second suppression rule would be four more places to get the id matching
- * wrong, for nothing.
+ * every one of them already early-returns on that. There is no fifth handler.
+ * Blast radius verified: headless and `exec` writers key on EVENTS, not tool
+ * names, and `transcript-text` renders `kind:'team'` on its own.
  */
-const SELF_RENDERING_TOOLS: ReadonlySet<string> = new Set(['todo_write']);
+const SELF_RENDERING_TOOLS: ReadonlySet<string> = new Set(['todo_write', 'task']);
 
 function reduceStreamEvent(se: StreamEvent): ViewAction[] {
   switch (se.type) {
@@ -995,6 +1037,40 @@ function releaseLiveTails(entries: Entry[]): Entry[] {
     return { ...e, live: undefined, lastOutputAt: undefined, liveSeq: (e.liveSeq ?? 0) + 1 };
   });
   return touched ? next : entries;
+}
+
+/**
+ * Drop settled assistant entries that render nothing at all (defect 5).
+ *
+ * `turnStart` ALWAYS creates an entry, so a turn that only called a tool leaves a
+ * bubble behind that `AssistantEntry` then refuses to draw. A rendered absence is
+ * not the same thing as an absent entry: `virtual-window.ts:305` still estimates a
+ * row for it (two when `aborted`, and nothing draws the second), and `/save`
+ * exports a blank bubble. Settle is the only safe moment to prune — before it the
+ * entry is still the target of every `textDelta` / `thinkingDelta`.
+ *
+ * I-L1-1 — `streamingId` COMES BACK WITH THE ARRAY. If the dropped entry is the
+ * one that id pointed at, the id is cleared: leaving it set would point the whole
+ * reducer at an entry no `mapEntry` can ever match again, silently, because a
+ * `mapEntry` on a missing id is a no-op. `turnEnd` and `runEnd` clear the id
+ * themselves; `abortMark` does not, which is why the caller writes this back.
+ *
+ * Returns the SAME array when nothing was dropped, so every settled entry keeps
+ * its identity and `EntryView`'s memo boundary stays intact.
+ */
+function pruneEmptyAssistant(
+  entries: Entry[],
+  streamingId: string | undefined,
+): { entries: Entry[]; streamingId: string | undefined } {
+  const isEmptySettledAssistant = (entry: Entry): boolean =>
+    entry.kind === 'assistant' &&
+    !entry.streaming &&
+    entry.text.trim() === '' &&
+    (entry.thinking ?? '').trim() === '';
+  const kept = entries.filter((entry) => !isEmptySettledAssistant(entry));
+  if (kept.length === entries.length) return { entries, streamingId };
+  const liveGone = streamingId !== undefined && !kept.some((entry) => entry.id === streamingId);
+  return { entries: kept, streamingId: liveGone ? undefined : streamingId };
 }
 
 function findToolEntryId(state: ViewState, toolCallId: string): string | undefined {
@@ -1291,7 +1367,14 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
         // branch ever had. Two branches writing one number is what P0-1 was.
         usageTotal: addUsage(state.usageTotal, action.usage, action.costDelta),
         // The turn produced an answer, so whatever it had to retry, it recovered.
-        ...settleRetryCard(state, entries, 'recovered'),
+        // Defect 5: prune AFTER the mapEntry above has settled the entry, so an
+        // assistant bubble this turn never filled in is gone before the retry card
+        // is settled and before the height table ever sees it.
+        ...settleRetryCard(
+          state,
+          pruneEmptyAssistant(entries, state.streamingId).entries,
+          'recovered',
+        ),
       };
     }
 
@@ -1302,6 +1385,12 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
             e.kind === 'assistant' ? { ...e, streaming: false, ...sealThinkingMs(e) } : e,
           )
         : state.entries;
+      /*
+       * Defect 5, and BEFORE the silent-failure guard below so the guard and the
+       * retry settle both see the pruned array. `streamingId: undefined` is set in
+       * the returned state either way, so the returned id is not needed here.
+       */
+      entries = pruneEmptyAssistant(entries, state.streamingId).entries;
       let seq = state.seq;
       let droppedEntries = state.droppedEntries;
 
@@ -1381,13 +1470,19 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
             e.kind === 'assistant' ? { ...e, streaming: false, aborted: true } : e,
           )
         : state.entries;
+      // Defect 5 / I-L1-1: prune AFTER the entry is settled, and write the
+      // returned id back below -- `abortMark` is the one settle path that does
+      // NOT clear `streamingId`, so a prune without that write-back would leave
+      // it naming an entry this branch has just removed.
+      const pruned = pruneEmptyAssistant(marked, state.streamingId);
       return {
         ...state,
         aborted: true,
+        streamingId: pruned.streamingId,
         // An abort during a tool call is the COMMON way a tail is stranded --
         // `Esc` while `npm test` runs -- so this is the clause manual row 9
         // exercises (D-35 / AC-40).
-        ...settleRetryCard(state, releaseLiveTails(marked), 'interrupted'),
+        ...settleRetryCard(state, releaseLiveTails(pruned.entries), 'interrupted'),
       };
     }
 
@@ -1399,24 +1494,31 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
         ...state,
         entries: [],
         // The count describes what the RETAIN RING removed from the visible
-        // transcript. `/clear` empties it by intent, so carrying the number
+        // transcript. `/clear screen` empties it by intent, so carrying the number
         // over would make the exported transcript claim a loss that did not
         // happen.
         droppedEntries: 0,
         streamingId: undefined,
         expandedToolIds: {},
         teamEntryId: undefined,
-        // The list goes with the screen it was on. `/clear` is an explicit user
-        // instruction, which is I-2's standing exception (`TodoClearReason`
-        // `'user'`, the same door `/todo clear` uses) — so the command clears the
+        // The list goes with the screen it was on. `/clear screen` is an explicit
+        // user instruction, which is I-2's standing exception (`TodoClearReason`
+        // `'user'`, the same door `/todo clear` uses) - so the command clears the
         // STORE via `controller.clearTodos()` and this clears the MIRROR, exactly
         // the pairing `resetConversation` below has always had.
         //
         // The mirror write is same-valued with the store's own `todoCleared`
         // dispatch rather than redundant with it: it is what makes this action
-        // stand on its own. `builtins.ts` is the only dispatcher of it TODAY, and
-        // a second one — a real clear-screen key, a session-restore path — would
+        // stand on its own. `commands/clear-command.ts` is its only dispatcher
+        // TODAY - `/clear` itself now goes through `resetConversation`, because
+        // clearing the SCREEN and clearing the SESSION are different intentions
+        // (clear-command-context-reset D-3) - and a hypothetical second one would
         // otherwise bring the bug back in identical form and in silence.
+        //
+        // KEPT RATHER THAN FOLDED INTO `resetConversation` for the same reason:
+        // a user who wants the screen back must not have to destroy their context
+        // to get it, and an action with no dispatcher is dead code by `CLAUDE.md`
+        // section 4 - which is what `/clear screen` prevents.
         //
         // The entry id is dropped because the entry it pointed at is gone.
         todos: null,
@@ -1431,9 +1533,13 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
         // id must go with it or `compactionEnd` would `mapEntry` an id that no
         // longer exists. `compaction` STAYS — unlike `retry` it is not a
         // projection of an entry, it is the live state of a subsystem that is
-        // still running, and `/clear` clears the screen rather than the session.
+        // still running. `/clear screen` clears the screen, not the session.
         compactionEntryId: undefined,
       };
+
+    case 'resetUsage':
+      // The one field, for the one reason: a new id bills from zero (D-10).
+      return { ...state, usageTotal: EMPTY_USAGE_TOTAL };
 
     case 'resetConversation':
       return {
@@ -1443,22 +1549,47 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
         droppedEntries: 0,
         streamingId: undefined,
         expandedToolIds: {},
-        // `context` IS DELIBERATELY UNTOUCHED (I-1). `builtins.ts` calls
-        // `controller.clearMessages()` BEFORE dispatching this, and that marks
-        // the meter dirty and schedules a publication; zeroing here would make
-        // the final state `0` rather than the meter's real answer - which for an
+        // `context` IS DELIBERATELY UNTOUCHED (I-1). `clear-command.ts` calls
+        // `controller.resetConversation()` BEFORE dispatching this, and that marks
+        // the meter dirty and schedules a publication; zeroing here would make the
+        // final state `0` rather than the meter's real answer - which for an
         // emptied conversation is the system prompt's own couple of percent, not
         // nothing. `usageTotal` DOES reset: that is session spend, not occupancy.
         usageTotal: EMPTY_USAGE_TOTAL,
         teamEntryId: undefined,
-        // `/reset` clears `messages`, so the belief is gone and the list goes
-        // with it — the other half of I-2. `controller.clearMessages()` clears
+        // `/clear` clears `messages`, so the belief is gone and the list goes
+        // with it - the other half of I-2. `controller.clearMessages()` clears
         // the STORE; this clears the mirror.
         todos: null,
         todoEntryId: undefined,
         retryEntryId: undefined,
         retry: null,
         compactionEntryId: undefined,
+        // THE SIX RUN FACTS THIS BRANCH USED TO KEEP (clear-command-context-reset
+        // §3.6 / P0-3). `reduceRunFacts` above already zeroes `runPhase`,
+        // `activeTool`, `runOutcome` and `seenSteeringIds`, so nothing here
+        // repeats those four - these six are the actual gap, and each one
+        // otherwise describes a run that no longer exists.
+        //
+        // `status` is the status bar: a late `runEnd` would correct it a moment
+        // later, and until then the user is told a conversation that is over is
+        // still running. `team` is a dispatch panel with nothing dispatching.
+        // `fastEntryId` points at a `kind: 'fast'` card that `entries: []` just
+        // deleted, the same dangling-id rule `retryEntryId` and
+        // `compactionEntryId` above already follow.
+        //
+        // `turnProduced` / `errorNoticed` / `aborted` are ALSO cleared by
+        // `submit`, which is not a reason to leave them out: clearing is an
+        // independent entry point, so a user who clears and then only reads the
+        // panel would carry the previous turn's three facts into a conversation
+        // they never submitted into - and `runEnd`'s settle rule reads exactly
+        // those three.
+        status: 'idle',
+        team: null,
+        fastEntryId: undefined,
+        turnProduced: false,
+        errorNoticed: false,
+        aborted: false,
       };
 
     case 'setOverlay':
@@ -2101,6 +2232,7 @@ function serviceFields(service: ServiceSnapshot): Omit<Extract<Entry, { kind: 's
   return {
     kind: 'service',
     serviceId: service.id,
+    jobKind: service.kind,
     command: service.command,
     status: service.status,
     ...(service.url !== undefined ? { url: service.url } : {}),
@@ -2112,6 +2244,12 @@ function serviceFields(service: ServiceSnapshot): Omit<Extract<Entry, { kind: 's
     rows: service.rows,
     rowsSeen: service.rowsSeen,
     ...(service.killIncomplete ? { killIncomplete: true } : {}),
+    // The four fields long-task-jobs adds, in the SAME projection for all three
+    // actions - which is the property this function exists to guarantee.
+    lastOutputAt: service.lastOutputAt,
+    ...(service.progress ? { progress: service.progress.text } : {}),
+    ...(service.stalled ? { stalled: true } : {}),
+    ...(service.logPath !== undefined ? { logPath: service.logPath } : {}),
   };
 }
 

@@ -67,6 +67,17 @@ export const SESSION_LOCK_TTL_MS = 600_000;
 /** The `--continue` pointer. A CACHE, with a documented scan fallback (R-9). */
 const POINTER_FILE = '.last.json';
 
+/**
+ * Who wrote a session file (tui-session-id-resume §3.7 / D-20).
+ *
+ * A SECOND, ORTHOGONAL AXIS from `managed`. `managed` answers "may a maintenance
+ * command see this row at all" (it means "the file carries `meta.id`"); `origin`
+ * answers "which writer produced it". TUI checkpoints are managed AND
+ * `origin: 'tui'`, which is exactly why `--all` must no longer be able to reach
+ * them: widening axis A must not widen axis B.
+ */
+export type SessionOrigin = 'exec' | 'tui';
+
 export interface SessionListEntry {
   id: string;
   path: string;
@@ -76,8 +87,14 @@ export interface SessionListEntry {
   turns: number;
   provider: string;
   model: string;
-  /** `true` when the file carries `meta.id`, i.e. `aragon exec` wrote it. */
+  /** `true` when the file carries `meta.id`, i.e. `aragon exec` or the TUI wrote it. */
   managed: boolean;
+  /** Who wrote it; absent/unknown metadata reads as `'exec'` (older files). */
+  origin?: SessionOrigin;
+  /** `--save <id>` or `/session pin`: `sessions prune` never deletes it. */
+  pinned?: boolean;
+  /** The writer considered itself live at its last write. */
+  live?: boolean;
 }
 
 export function sessionsDir(): string {
@@ -126,6 +143,19 @@ export function sessionPathFor(id: string): string {
  * prevent, arriving through the flag next to it. `meta.id` is no safer: it comes
  * out of a file, and files are inputs.
  *
+ * A TUI CHECKPOINT NEVER NAMES ITSELF (D-20 / R-1). This is the single line that
+ * keeps `aragon exec --resume <tui-id>` from OVERWRITING the parent checkpoint:
+ * before this check, a TUI file carrying `meta.id` made `exec` take that id,
+ * write its own result into `a4k2m9.json` and move the `--continue` pointer -
+ * silent, unrecoverable loss of the one conversation the user was still having,
+ * arriving through a directory the design had declared out of scope. The rule
+ * belongs HERE rather than in `exec/**` because every exec write-back path
+ * already funnels through this function, so one check covers all of them and
+ * `exec/**` stays untouched.
+ *
+ * The fallthrough is the "stranger file" branch that already existed below:
+ * mint a fresh id rather than build a path out of the leftovers.
+ *
  * The order is the one that keeps every legitimate resume landing where the user
  * expects: an exec-written session names itself, a TUI `/save` is named by its
  * file, and anything else gets a fresh id rather than a guess - reported back in
@@ -133,11 +163,26 @@ export function sessionPathFor(id: string): string {
  * wondering which session it just wrote.
  */
 export function resumedSessionId(path: string, saved: SavedSession): string {
+  if (saved.meta?.origin === 'tui') return randomUUID();
   const declared = saved.meta?.id;
   if (typeof declared === 'string' && isValidSessionId(declared)) return declared;
   const base = basenameId(path);
   if (isValidSessionId(base)) return base;
   return randomUUID();
+}
+
+/**
+ * Whether a `--resume` value is meant as a PATH rather than an id.
+ *
+ * EXPORTED SO THE FAILURE MESSAGE CANNOT DISAGREE WITH THE LOOKUP: the startup
+ * path prints one sentence for "no such id" and another for "no such file", and
+ * a second copy of this predicate is a copy that can drift (`isAbsolute` was
+ * missing from exactly such a copy).
+ */
+export function looksLikeSessionPath(value: string): boolean {
+  return (
+    isAbsolute(value) || value.includes('/') || value.includes('\\') || value.endsWith('.json')
+  );
 }
 
 function ensureDir(): string {
@@ -169,9 +214,7 @@ export function readSessionFile(path: string): SavedSession | null {
 export function resolveSessionRef(idOrPath: string, cwd: string): string | null {
   const value = idOrPath.trim();
   if (value.length === 0) return null;
-  const looksLikePath =
-    isAbsolute(value) || value.includes('/') || value.includes('\\') || value.endsWith('.json');
-  const path = looksLikePath
+  const path = looksLikeSessionPath(value)
     ? resolve(cwd, value)
     : isValidSessionId(value)
       ? sessionPathFor(value)
@@ -241,10 +284,25 @@ function describe(path: string, session: SavedSession): SessionListEntry {
     provider: meta?.provider ?? session.model?.providerId ?? '',
     model: meta?.model ?? session.model?.modelId ?? '',
     managed: typeof meta?.id === 'string' && meta.id.length > 0,
+    // UNTRUSTED INPUT, DEGRADED TO THE OLD BEHAVIOUR. `origin` is read out of a
+    // file, so an unknown or hostile value must not be able to make a TUI
+    // checkpoint look like an exec one (or the reverse); anything that is not
+    // exactly `'tui'` reads as `'exec'`, which is what every pre-feature file
+    // means.
+    origin: meta?.origin === 'tui' ? 'tui' : 'exec',
+    pinned: meta?.pinned === true,
+    live: meta?.live === true,
   };
 }
 
-function basenameId(path: string): string {
+/**
+ * The file name without its directory or `.json` suffix.
+ *
+ * Exported because session IDENTITY derives the parent of a branch from this
+ * value and NOT from `meta.id` (D-5): the contents of a file are input, so a
+ * hand-written `meta.id` must not be able to name where this process writes.
+ */
+export function basenameId(path: string): string {
   const name = path.replace(/\\/g, '/').split('/').pop() ?? path;
   return name.endsWith('.json') ? name.slice(0, -'.json'.length) : name;
 }
@@ -284,16 +342,34 @@ export interface PruneOptions {
   olderThanDays?: number;
   dryRun?: boolean;
   all?: boolean;
+  /**
+   * Which WRITER's files this sweep may touch: `'exec'` (default), `'tui'`, or
+   * `'all'` (tui-session-id-resume §3.7 / R-7).
+   *
+   * A SECOND AXIS, NOT A THIRD CHOICE. `all` above widens "which rows exist"
+   * (files with no metadata too); this narrows "which writers are in scope".
+   * Keeping them separate is what makes `--all` mean, forever, exactly what its
+   * help text says - and never "also delete every TUI checkpoint", which is what
+   * a single merged axis produced when TUI files started carrying `meta`.
+   */
+  origin?: SessionOrigin | 'all';
   now?: () => number;
+  /** Injected for tests; defaults to `process.kill(pid, 0)` liveness probing. */
+  isProcessAlive?: (pid: number) => boolean;
 }
 
 /** `--dry-run` reports and deletes nothing; nothing is ever pruned automatically. */
 export function pruneSessions(opts: PruneOptions = {}): SessionListEntry[] {
   const now = (opts.now ?? Date.now)();
+  const isAlive = opts.isProcessAlive ?? defaultIsProcessAlive;
   const cutoff =
     opts.olderThanDays === undefined ? now : now - opts.olderThanDays * 24 * 60 * 60 * 1000;
   const doomed = listSessions({ ...(opts.all ? { all: true } : {}) }).filter(
-    (entry) => entry.updatedAt <= cutoff,
+    (entry) =>
+      entry.updatedAt <= cutoff &&
+      isInPruneScope(entry, opts.origin ?? 'exec') &&
+      !entry.pinned &&
+      !isOwnedByALiveProcess(entry, isAlive),
   );
   if (opts.dryRun) return doomed;
   for (const entry of doomed) {
@@ -305,6 +381,42 @@ export function pruneSessions(opts: PruneOptions = {}): SessionListEntry[] {
     }
   }
   return doomed;
+}
+
+/**
+ * The origin half of the truth table. Files WITHOUT metadata are governed by
+ * `all` alone (they were already included or already excluded by the listing),
+ * so they pass here rather than being re-judged by a `meta` they do not have.
+ */
+function isInPruneScope(entry: SessionListEntry, origin: SessionOrigin | 'all'): boolean {
+  if (origin === 'all') return true;
+  if (!entry.managed) return true;
+  return (entry.origin ?? 'exec') === origin;
+}
+
+/**
+ * `live: true` PLUS A LIVE OWNER PID IS NEVER DELETED (§3.7 / T-33).
+ *
+ * The pid comes from the file's `.lock` payload, which is the only per-session
+ * process identity this directory carries and the same source
+ * `tryAcquireSessionLock` trusts. A `live: true` file with NO lock is deletable,
+ * and that is the honest answer rather than a gap: the flag says a writer
+ * believed itself live, not that one is alive now - a process killed in the
+ * night leaves the flag behind, and a protection that could never expire is a
+ * file nobody can ever clean up.
+ */
+function isOwnedByALiveProcess(
+  entry: SessionListEntry,
+  isAlive: (pid: number) => boolean,
+): boolean {
+  if (!entry.live) return false;
+  // THE FILE NAME, NOT `meta.id`: the lock is named after the file, and `meta.id`
+  // comes out of that file (I-12). Reading it here would probe the wrong lock for
+  // a file whose metadata disagrees with its name - and, since `join` normalises,
+  // a hostile id containing separators would read outside this directory.
+  const holder = readLock(join(getSessionsDir(), `${basenameId(entry.path)}.lock`));
+  if (!holder || holder.host !== hostname()) return false;
+  return isAlive(holder.pid);
 }
 
 // ---------------------------------------------------------------------------
@@ -353,13 +465,25 @@ export function latestSessionForCwd(cwd: string): SessionListEntry | null {
   if (hinted && isValidSessionId(hinted.id)) {
     const path = sessionPathFor(hinted.id);
     const session = existsSync(path) ? readSessionFile(path) : null;
-    if (session?.meta && sameCwd(session.meta.cwd, cwd)) return describe(path, session);
+    // BOTH BRANCHES EXCLUDE TUI CHECKPOINTS (tui-session-id-resume §3.7). The
+    // pointer branch is not defensive padding: `--continue` promises "the newest
+    // EXEC session", and TUI sessions are resumed by id. Today only
+    // `writeSession()` moves the pointer, so a TUI file cannot be named there -
+    // and that is precisely the kind of "nobody writes it today" assumption this
+    // repository has already paid for. One predicate, applied twice, is cheap.
+    if (session?.meta && originOf(session.meta) === 'exec' && sameCwd(session.meta.cwd, cwd)) {
+      return describe(path, session);
+    }
   }
   const target = resolve(cwd);
   for (const entry of listSessions()) {
-    if (sameCwd(entry.cwd, target)) return entry;
+    if (originOf(entry) === 'exec' && sameCwd(entry.cwd, target)) return entry;
   }
   return null;
+}
+
+function originOf(value: { origin?: SessionOrigin }): SessionOrigin {
+  return value.origin === 'tui' ? 'tui' : 'exec';
 }
 
 function sameCwd(a: string, b: string): boolean {

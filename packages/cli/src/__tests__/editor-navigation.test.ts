@@ -35,12 +35,15 @@ describe('grapheme editing and shared visual rows', () => {
       .toEqual({ cursor: 6, preferredVisualColumn: 3 });
   });
 
-  it('retains tabs in the buffer but uses four-cell tab stops for navigation', () => {
+  it('retains tabs in the buffer but navigates on the terminal eight-cell stop', () => {
+    // THE STOP IS THE TERMINAL'S, NOT FOUR. With four, the composer drew a
+    // pasted table one way while the transcript -- which handed the raw TAB to
+    // `<Text>` -- drew it at eight, so the same block moved when it was sent.
     const buffer = 'a\tb\n123456';
     const map = buildEditorVisualMap({ buffer, cursor: 2, cols: 20 });
-    expect(map.cursor.column).toBe(4);
+    expect(map.cursor.column).toBe(8);
     expect(moveVisualCursor({ buffer, cursor: 2, cols: 20, direction: 'down' }))
-      .toEqual({ cursor: 8, preferredVisualColumn: 4 });
+      .toEqual({ cursor: 10, preferredVisualColumn: 8 });
     expect(buffer).toContain('\t');
   });
 

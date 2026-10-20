@@ -19,7 +19,23 @@ describe('recognize (keymap)', () => {
     expect(recognize('e', { ctrl: true })).toBe('end');
     expect(recognize('w', { ctrl: true })).toBe('deleteWordBack');
     expect(recognize('u', { ctrl: true })).toBe('killToStart');
-    expect(recognize('k', { ctrl: true })).toBe('killToEnd');
+  });
+
+  /**
+   * agent-model-kits AC-35 / AC-36 / D-15: `killToEnd` MOVED from `Ctrl+K` to
+   * `Alt+K`. `Ctrl+K` now opens the Agent-kit picker in `App`, and this
+   * recognizer runs before `PromptInput` yields control-byte keys, so leaving
+   * the old binding in place would have deleted the draft in one listener while
+   * the other opened an overlay over it.
+   */
+  it('no longer claims Ctrl+K or its raw byte', () => {
+    expect(recognize('k', { ctrl: true })).toBeNull();
+    expect(recognize('\x0b', {})).toBeNull();
+  });
+
+  it('keeps killToEnd reachable through Alt+K, both encodings', () => {
+    expect(recognize('k', { meta: true })).toBe('killToEnd');
+    expect(recognize('\x1bk', {})).toBe('killToEnd');
   });
 
   it('maps raw Home/End and word escape sequences', () => {

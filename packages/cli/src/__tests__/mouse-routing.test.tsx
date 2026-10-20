@@ -115,6 +115,7 @@ import {
   DEFAULT_TODO_CONFIG,
   DEFAULT_BASH_CONFIG,
   type CliConfig,
+  DEFAULT_JOBS_CONFIG,
 } from '../config/schema.js';
 import type { SkillService } from '../skills/service.js';
 import { offFastStatus, type FastStatus } from '../fast/wiring.js';
@@ -478,6 +479,10 @@ const CONFIG: CliConfig = {
   // fixture without it crashes the first full-screen frame.
   todo: DEFAULT_TODO_CONFIG,
   bash: DEFAULT_BASH_CONFIG,
+  // The ELEVENTH nested section (long-task-jobs). `enabled: true` because a
+  // fixture that says nothing about jobs should behave like a default session;
+  // the subsystems each fixture is about are switched off individually above.
+  jobs: DEFAULT_JOBS_CONFIG,
   retry: DEFAULT_RETRY_CONFIG,
   // The NINTH nested section, and it is read at CONSTRUCTION by
   // `AgentController` — so a fixture without it crashes before the first
@@ -866,7 +871,12 @@ describe('App (wheel routing end to end)', () => {
     const mouse = fakeMouseSource();
     const { lastFrame, unmount } = mountApp(mouse.source, { initialOverlay: 'help' });
     await delay(60);
-    // The separate interruption instructions push Wheel below the first page.
+    // The separate interruption instructions push Wheel below the first page, and
+    // the key table grew by one row when Ctrl+L became the branch key and the
+    // redraw moved to Ctrl+R (tui-branch-terminal-shortcut 9.1) - so it now takes
+    // two wheel ticks to bring the row into view.
+    mouse.wheel('down', TRANSCRIPT_ROW);
+    await delay(60);
     mouse.wheel('down', TRANSCRIPT_ROW);
     await delay(60);
     expect(stripAnsi(lastFrame() ?? '')).toContain('Wheel');

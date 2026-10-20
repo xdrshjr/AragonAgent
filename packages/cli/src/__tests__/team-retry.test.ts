@@ -4,6 +4,7 @@ import { TeamRuntime } from '../team/runtime.js';
 import { isRetryableStreamError, shouldRetryColdStart } from '../team/retry.js';
 import { TEAM_LIMITS } from '../team/limits.js';
 import { runHeadless } from '../agent/headless.js';
+import type { OverseerProvider } from '../team/overseer.js';
 import type { SubagentAgentLike } from '../team/subagent.js';
 import type { SubagentRun, SubagentSpec, TeamEvent } from '../team/types.js';
 import {
@@ -19,6 +20,7 @@ import {
   DEFAULT_LOG_CONFIG,
   type CliConfig,
   type TeamConfig,
+  DEFAULT_JOBS_CONFIG,
 } from '../config/schema.js';
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -63,6 +65,10 @@ function config(team: Partial<TeamConfig> = {}): CliConfig {
     team: { ...DEFAULT_TEAM_CONFIG, ...team },
     todo: DEFAULT_TODO_CONFIG,
     bash: DEFAULT_BASH_CONFIG,
+    // The ELEVENTH nested section (long-task-jobs). `enabled: true` because a
+    // fixture that says nothing about jobs should behave like a default session;
+    // the subsystems each fixture is about are switched off individually above.
+    jobs: DEFAULT_JOBS_CONFIG,
     retry: DEFAULT_RETRY_CONFIG,
     // The NINTH nested section. `enabled: false` on purpose: these fixtures
     // are about other subsystems, and the same `enabled: false` appears above
@@ -181,6 +187,7 @@ function harness(
   attempts: Attempt[],
   specCount: number,
   team: Partial<TeamConfig> = {},
+  overseer?: OverseerProvider,
 ): Harness {
   const agents: ScriptedAgent[] = [];
   const runtime = new TeamRuntime({
@@ -189,6 +196,7 @@ function harness(
     getCwd: () => process.cwd(),
     getMode: () => 'build',
     getApiKey: () => 'k',
+    ...(overseer ? { overseer } : {}),
     agentFactory: () => {
       const agent = new ScriptedAgent(attempts[agents.length] ?? { summary: 'ok', turns: 1 });
       agents.push(agent);
@@ -354,12 +362,41 @@ describe('AC-12: an aborted child is NEVER retried', () => {
     expect(outcome.runs[0]!.phase).toBe('aborted');
   });
 
-  it('the dispatch timeout', async () => {
-    const { runtime, specs, agents } = harness([ABORTABLE], 1, { dispatchTimeoutMs: 60 });
+  it('the dispatch timeout (the LEGACY regime: team.overseer: false)', async () => {
+    // A'1 put the dispatch ceiling under the same D-4 gate as the per-child
+    // test below: the hard `abortAll()` arms ONLY under `team.overseer: false`.
+    const { runtime, specs, agents } = harness([ABORTABLE], 1, {
+      dispatchTimeoutMs: 60,
+      overseer: false,
+    });
     const outcome = await runtime.dispatch(specs, 1);
     expect(agents).toHaveLength(1);
     expect(outcome.runs[0]!.phase).toBe('aborted');
     expect(outcome.aborted).toBe(true);
+  });
+
+  it("the dispatch timeout under SUPERVISION never hard-kills (A'1)", async () => {
+    // The counter-example the old test silently pinned away: the same
+    // `dispatchTimeoutMs`, but an overseer provider is wired and team.overseer
+    // is on, so NO timer arms at all. The child deliberately outlasts the
+    // would-be ceiling (120 ms > 60 ms): under the removed behaviour it would
+    // have been aborted at 60 ms and the whole dispatch marked aborted.
+    const waitOverseer: OverseerProvider = {
+      active: () => true,
+      inspect: async () => ({ action: 'wait', reason: 'stub: keep waiting' }),
+      inspectBatch: async () => [],
+      usage: () => ({ inputTokens: 0, outputTokens: 0 }),
+    };
+    const { runtime, specs, agents } = harness(
+      [{ summary: 'slow but finished', turns: 1, ms: 120 }],
+      1,
+      { dispatchTimeoutMs: 60 },
+      waitOverseer,
+    );
+    const outcome = await runtime.dispatch(specs, 1);
+    expect(agents[0]!.aborted).toBe(false);
+    expect(outcome.runs[0]!.phase).toBe('done');
+    expect(outcome.aborted).toBe(false);
   });
 
   it('the per-child timeout', async () => {

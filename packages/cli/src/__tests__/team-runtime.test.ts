@@ -26,6 +26,7 @@ import {
   DEFAULT_LOG_CONFIG,
   type CliConfig,
   type TeamConfig,
+  DEFAULT_JOBS_CONFIG,
 } from '../config/schema.js';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -70,6 +71,10 @@ function config(team: Partial<TeamConfig> = {}): CliConfig {
     team: { ...DEFAULT_TEAM_CONFIG, ...team },
     todo: DEFAULT_TODO_CONFIG,
     bash: DEFAULT_BASH_CONFIG,
+    // The ELEVENTH nested section (long-task-jobs). `enabled: true` because a
+    // fixture that says nothing about jobs should behave like a default session;
+    // the subsystems each fixture is about are switched off individually above.
+    jobs: DEFAULT_JOBS_CONFIG,
     retry: DEFAULT_RETRY_CONFIG,
     // The NINTH nested section. `enabled: false` on purpose: these fixtures
     // are about other subsystems, and the same `enabled: false` appears above

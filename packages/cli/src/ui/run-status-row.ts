@@ -19,6 +19,15 @@ export interface RunActivity {
   runningTool?: string;
   /** A context compaction is in flight; outranks the tool name and the phrase. */
   compacting?: boolean;
+  /**
+   * A BOUNDED WAIT IS IN FLIGHT (long-task-jobs §4.9).
+   *
+   * `Running job_wait` is a TOOL NAME; `Waiting on t3 (up to 30s)` is a STATE, and
+   * the state is what answers the user's two questions - what is it waiting for,
+   * and how long may that take. No countdown: a ticking number would need its own
+   * re-render, and the sentence is already complete.
+   */
+  wait?: { jobId: string; upToSeconds: number };
 }
 
 export interface RunRowPlanInput {

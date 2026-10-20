@@ -27,7 +27,7 @@ import type { TermCapabilities } from '../capabilities.js';
 import { pickGlyphs } from '../glyphs.js';
 import { railBorderProps } from '../layout/Gutter.js';
 import { formatDuration } from '../../agent/usage.js';
-import type { ServiceStatus } from '../../proc/types.js';
+import type { JobKind, ServiceStatus } from '../../proc/types.js';
 
 /** Tail rows the collapsed card draws. Mirrored as a NUMBER in `virtual-window.ts`. */
 const COLLAPSED_TAIL_ROWS = 2;
@@ -36,6 +36,8 @@ const EXPANDED_TAIL_ROWS = 8;
 
 export interface ServiceCardProps {
   serviceId: string;
+  /** `service` or `task`: NOUN ONLY, never a rename of the entry kind (I-2). */
+  jobKind?: JobKind;
   command: string;
   status: ServiceStatus;
   url?: string;
@@ -49,6 +51,20 @@ export interface ServiceCardProps {
   terminal?: boolean;
   killIncomplete?: boolean;
   expanded?: boolean;
+  /** The extracted progress line, one row, already clipped by the supervisor. */
+  progress?: string;
+  /** Silence past `jobs.stallSeconds` - a muted badge, never an action. */
+  stalled?: boolean;
+  /** When output last arrived; with `nowSec` it renders `no output 6m02s`. */
+  lastOutputAt?: number;
+  /**
+   * The transcript's 1 Hz clock (D-8).
+   *
+   * ONE CLOCK FOR EVERYTHING. A per-card `setInterval` would be one timer per job,
+   * and the transcript's comparator already includes `nowSec`, so the live elapsed
+   * figure and the `no output` figure update for free.
+   */
+  nowSec?: number;
   /** Accepted for comparator consistency; this card never animates (D-14). */
   reducedMotion?: boolean;
   theme: Theme;
@@ -115,12 +131,43 @@ function statusClause(props: ServiceCardProps, dot: string): string {
     const took = readyAt === undefined ? '' : `${dot}${formatDuration(readyAt - startedAt)}`;
     return `ready${took}`;
   }
-  if (status === 'running') return 'running';
+  // A LIVE JOB SHOWS ITS ELAPSED TIME (D-8), because a task's whole story is
+  // "how long has this been going". The number comes from the transcript's 1 Hz
+  // `nowSec`; without it the card falls back to the spawn time and reads `0ms`,
+  // which is honest about never having been ticked rather than wrong about it.
+  if (status === 'running') {
+    // NO CLOCK, NO FIGURE. Falling back to `startedAt` would print `0ms` on every
+    // settled frame, which reads as "it just started" - a wrong number rather than
+    // an absent one.
+    if (props.nowSec === undefined) return 'running';
+    const elapsed = Math.max(0, props.nowSec * 1000 - startedAt);
+    return `running${dot}${formatDuration(elapsed)}`;
+  }
   if (status === 'starting') return 'starting';
   const lived = endedAt === undefined ? '' : `${dot}${formatDuration(endedAt - startedAt)}`;
   if (status === 'stopped') return `stopped${lived}`;
   if (status === 'failed') return `failed${lived}`;
   return `exited${exitCode === null ? '' : ` code ${exitCode}`}${lived}`;
+}
+
+/**
+ * The progress row, or `undefined` when there is nothing to draw.
+ *
+ * STALLED OUTRANKS PROGRESS: "no output for 6m" is the more urgent of the two
+ * facts, and drawing both would cost a second row the height estimator does not
+ * know about. The `no output` figure needs `nowSec`; without it the badge is
+ * omitted rather than printed with a wrong number.
+ */
+function progressRow(props: ServiceCardProps): { text: string; stalled: boolean } | undefined {
+  if (props.stalled === true) {
+    if (props.nowSec === undefined || props.lastOutputAt === undefined) {
+      return { text: 'no output', stalled: true };
+    }
+    const quiet = Math.max(0, props.nowSec * 1000 - props.lastOutputAt);
+    return { text: `no output ${formatDuration(quiet)}`, stalled: true };
+  }
+  if (props.progress) return { text: props.progress, stalled: false };
+  return undefined;
 }
 
 function ServiceCardImpl(props: ServiceCardProps): React.ReactElement {
@@ -129,6 +176,9 @@ function ServiceCardImpl(props: ServiceCardProps): React.ReactElement {
   const color = serviceCardColor(props, theme);
   const dot = `  ${glyphs.midDot}  `;
   const clause = statusClause(props, dot);
+  // THE NOUN, NOT THE KIND: `task t1` and `service s1` are the same component
+  // drawing two kinds of job, and every id keeps its existing prefix (I-2).
+  const noun = props.jobKind === 'task' ? 'task' : 'service';
 
   // THE TERMINAL RECORD IS ONE ROW, ALWAYS. It is a SECOND event at a SECOND
   // time — the only thing `<Static>` permits once the live card is printed — so
@@ -137,7 +187,7 @@ function ServiceCardImpl(props: ServiceCardProps): React.ReactElement {
     return (
       <Box flexDirection="row">
         <Text color={color} wrap="truncate">
-          service {serviceId} {clause}
+          {noun} {serviceId} {clause}
           {props.killIncomplete ? ' (may have left a detached child)' : ''}
         </Text>
       </Box>
@@ -145,12 +195,13 @@ function ServiceCardImpl(props: ServiceCardProps): React.ReactElement {
   }
 
   const shown = rows.slice(-(expanded ? EXPANDED_TAIL_ROWS : COLLAPSED_TAIL_ROWS));
+  const progress = progressRow(props);
 
   return (
     <Box flexDirection="column">
       <Box flexDirection="row">
         <Text color={theme.accent} bold>
-          service {serviceId}
+          {noun} {serviceId}
         </Text>
         <Text color={theme.muted} wrap="truncate">
           {'  '}
@@ -161,6 +212,16 @@ function ServiceCardImpl(props: ServiceCardProps): React.ReactElement {
           {clause}
         </Text>
       </Box>
+
+      {/* ONE ROW, `wrap="truncate"`, length <= `waitProgressChars`: that is what
+          lets `virtual-window.ts` count it as exactly one line (AC-27). */}
+      {progress !== undefined && (
+        <Box flexDirection="row" flexShrink={0} paddingLeft={1}>
+          <Text color={progress.stalled ? theme.noticeWarn : theme.muted} wrap="truncate">
+            {progress.stalled ? progress.text : `[progress] ${progress.text}`}
+          </Text>
+        </Box>
+      )}
 
       {url !== undefined && (
         <Box flexDirection="row" flexShrink={0} paddingLeft={1}>

@@ -283,6 +283,42 @@ export function readEnvConfig(): EnvConfig {
     if (Object.keys(section).length > 0) partial.bash = section as PersistedConfig['bash'];
   }
 
+  const jobsEnabled = process.env.ARAGON_JOBS_ENABLED?.trim().toLowerCase();
+  const jobsWait = process.env.ARAGON_JOBS_WAIT_SECONDS?.trim();
+  const jobsStall = process.env.ARAGON_JOBS_STALL_SECONDS?.trim();
+  const jobsPersist = process.env.ARAGON_JOBS_PERSIST_LOG?.trim().toLowerCase();
+  const jobsSteer = process.env.ARAGON_JOBS_NOTICE_STEER?.trim().toLowerCase();
+  if (
+    (jobsEnabled !== undefined && jobsEnabled.length > 0) ||
+    (jobsWait !== undefined && jobsWait.length > 0) ||
+    (jobsStall !== undefined && jobsStall.length > 0) ||
+    (jobsPersist !== undefined && jobsPersist.length > 0) ||
+    (jobsSteer !== undefined && jobsSteer.length > 0)
+  ) {
+    const section: Partial<Record<keyof PersistedConfig['jobs'], unknown>> = {};
+    // ONE TRUTHINESS LADDER FOR ALL THREE BOOLEANS, because three slightly
+    // different spellings of "is this true" is how `ARAGON_JOBS_ENABLED=off`
+    // ends up enabling the feature.
+    const flag = (value: string): boolean =>
+      value === '1' || value === 'true' || value === 'on' || value === 'yes';
+    if (jobsEnabled !== undefined && jobsEnabled.length > 0) section.enabled = flag(jobsEnabled);
+    if (jobsPersist !== undefined && jobsPersist.length > 0) section.persistLog = flag(jobsPersist);
+    if (jobsSteer !== undefined && jobsSteer.length > 0) section.noticeSteer = flag(jobsSteer);
+    if (jobsWait !== undefined && jobsWait.length > 0) {
+      const parsed = Number.parseInt(jobsWait, 10);
+      // LEFT ABSENT WHEN UNPARSEABLE, so `clampJobsConfig` supplies the default
+      // rather than an env var that silently means 0.
+      if (Number.isFinite(parsed)) section.waitSeconds = parsed;
+    }
+    if (jobsStall !== undefined && jobsStall.length > 0) {
+      const parsed = Number.parseInt(jobsStall, 10);
+      if (Number.isFinite(parsed)) section.stallSeconds = parsed;
+    }
+    // A PARTIAL section, safe only because every consumer deep-merges it - the
+    // same contract `partial.skills` / `partial.log` / `partial.team` rely on.
+    if (Object.keys(section).length > 0) partial.jobs = section as PersistedConfig['jobs'];
+  }
+
   const retry = process.env.ARAGON_RETRY?.trim().toLowerCase();
   const retryMax = process.env.ARAGON_RETRY_MAX?.trim();
   if ((retry !== undefined && retry.length > 0) || (retryMax !== undefined && retryMax.length > 0)) {
@@ -423,6 +459,10 @@ export function readEnvConfig(): EnvConfig {
     partial.diffRender =
       diffRender === '1' || diffRender === 'true' || diffRender === 'on' || diffRender === 'yes';
   }
+
+  // Invalid values are ignored, like every other ARAGON_* key.
+  const scrollMode = process.env.ARAGON_SCROLL_MODE?.trim().toLowerCase();
+  if (scrollMode === 'native' || scrollMode === 'app') partial.scrollMode = scrollMode;
 
   const syncOutput = process.env.ARAGON_SYNC_OUTPUT?.trim().toLowerCase();
   if (syncOutput !== undefined && syncOutput.length > 0) {

@@ -220,6 +220,7 @@ export class CompactionWiring {
           return source === undefined ? deps.isPricedModel(this.mainRef()) : source !== 'fallback';
         },
         getWindowOverride: () => deps.getConfig().contextWindow,
+        getWindowOverrideOrigin: () => deps.getConfig().contextWindowOrigin,
       });
     this.compactor = new Compactor({
       getConfig: deps.getConfig,

@@ -24,6 +24,7 @@
 import type { ModelCost } from '@aragon-agent/core';
 import { computeCost, formatCost, formatDuration, formatTokens } from '../agent/usage.js';
 import { TEAM_AGGREGATE_LABEL, TEAM_LIMITS } from './limits.js';
+import type { SubagentModelResolution } from './model.js';
 import type { DispatchOutcome, SubagentRun } from './types.js';
 
 export interface ReportOptions {
@@ -41,6 +42,16 @@ export interface ReportOptions {
    * rule the fast tier already follows everywhere else).
    */
   fastCost?: ModelCost;
+  /**
+   * The dispatch-time subagent model resolution (subagent-model §3.4).
+   *
+   * ABSENT under the default `team.model: 'main'` mode is what keeps the
+   * parity report byte-identical (I-2): the disclosure line exists only when
+   * children did NOT run the main model, and a resolution that degraded
+   * (fast tier off, profile deleted, profile key missing) says so instead of
+   * silently renaming the model the children fell back to (D-4).
+   */
+  subagentModel?: SubagentModelResolution;
 }
 
 /** The pseudo-label aggregate notices use; reserved at normalization. */
@@ -131,12 +142,37 @@ function buildHeader(outcome: DispatchOutcome, options: ReportOptions): string[]
         `(${counts}) in ${formatDuration(durationMs)}.`,
   );
 
+  // THE PRICE OF THE MODEL CHILDREN ACTUALLY RAN (subagent-model §3.4). The
+  // default main flow always supplies a table, so the ternary's last branch
+  // is the legacy byte-identical shape; an UNPRICED fast or profile child
+  // model says `pricing unknown` - unknown pricing is not zero pricing, and
+  // `$0.00` on a dispatch that is spending money is the C-11 / RV-4 lie.
+  const spend = options.cost
+    ? formatCost(computeCost(outcome.usage, options.cost))
+    : options.subagentModel && options.subagentModel.effective !== 'main'
+      ? 'pricing unknown'
+      : formatCost(computeCost(outcome.usage, options.cost));
   lines.push(
     `Tokens: in ${formatTokens(outcome.usage.inputTokens)}, out ` +
-      `${formatTokens(outcome.usage.outputTokens)}. Cost: ${formatCost(
-        computeCost(outcome.usage, options.cost),
-      )}.`,
+      `${formatTokens(outcome.usage.outputTokens)}. Cost: ${spend}.`,
   );
+
+  // THE MODEL DISCLOSURE LINE (D-4), immediately after the spend it explains.
+  // Rendered only when children did not run the main model, so the default
+  // report stays byte-identical (I-2) and a degraded request says WHICH mode
+  // was asked for and WHY it fell back rather than quietly renaming it.
+  const subagent = options.subagentModel;
+  if (subagent && subagent.effective !== 'main') {
+    lines.push(
+      `Children ran on ${subagent.ref.providerId}:${subagent.ref.modelId} ` +
+        `(subagent model: ${subagent.effective}).`,
+    );
+  } else if (subagent && subagent.fallbackReason) {
+    lines.push(
+      `Subagent model ${subagent.mode} unavailable (${subagent.fallbackReason}); ` +
+        `children ran on the main model.`,
+    );
+  }
 
   for (const conflict of findFileConflicts(outcome.runs)) {
     const who = conflict.labels.map((l) => `"${l}"`).join(' and ');

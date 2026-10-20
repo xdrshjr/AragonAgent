@@ -139,8 +139,12 @@ interface RunOneCtx {
   subagentTimeoutMs: number;
 }
 
-/** What one soft supervision timer was armed for. */
-type SupervisionTrigger = 'silence' | 'clock';
+/**
+ * What one soft supervision trigger was armed for. `turncap` is fired by the
+ * CHILD's turn cap (F-8 A'2), not by a timer: one look when a working child
+ * crosses `maxTurnsPerSubagent`, never a stop.
+ */
+type SupervisionTrigger = 'silence' | 'clock' | 'turncap';
 
 /**
  * The pseudo-label aggregate supervisor notices travel under (D-5 / R-P1-6):
@@ -671,6 +675,18 @@ export class TeamRuntime {
         // ONE KICK PER REAL AGENT EVENT, unthrottled (I-OV3): the silence
         // window resets on evidence, not on a coalesced UI frame.
         onActivity: () => this.supervision?.kick(spec.label),
+        // A'2: under supervision the turn cap is ONE inspection, fired from the
+        // child's own `turn_end` at the crossing turn. Async-and-forgotten
+        // exactly like the silence timer's `onFire`: nothing in the child's
+        // event path may block or throw. ABSENT in the legacy regime, which
+        // keeps the hard stop - the hook's presence IS the gate.
+        ...(this.overseer !== null
+          ? {
+              onTurnCapReached: (label: string) => {
+                void this.inspectAndApply(dispatchId, label, 'turncap');
+              },
+            }
+          : {}),
       });
     // ASSIGNMENT, not a declaration: a `const` here would shadow the `let` above
     // the bus, `canSend` would see the empty array forever, and every peer would
@@ -704,10 +720,15 @@ export class TeamRuntime {
     // its slowest child and only an Esc ends it early. The lead's idle
     // watchdog is paused for the whole dispatch either way, exactly as it is
     // for the lead's own long turns.
+    //
+    // D-4, NOW FOR THE WHOLE DISPATCH TOO: with the supervisor gate open the
+    // ceiling NEVER arms a hard abort - the cadence ladder is what looks at a
+    // long dispatch, exactly as it already looks at a long child. The legacy
+    // hard `abortAll()` exists ONLY under `team.overseer: false`, the same
+    // regime line `runCtx.subagentTimeoutMs` below draws.
+    const dispatchCeilingMs = team.overseer ? 0 : team.dispatchTimeoutMs;
     this.dispatchTimer =
-      team.dispatchTimeoutMs > 0
-        ? setTimeout(() => this.abortAll(), team.dispatchTimeoutMs)
-        : null;
+      dispatchCeilingMs > 0 ? setTimeout(() => this.abortAll(), dispatchCeilingMs) : null;
 
     const runCtx: RunOneCtx = {
       dispatchId,

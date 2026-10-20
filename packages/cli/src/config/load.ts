@@ -7,8 +7,10 @@
  */
 
 import process from 'node:process';
+import { JOB_WAIT_MARGIN_MS } from '../proc/limits.js';
 import {
   DEFAULT_CONFIG,
+  DEFAULT_SCROLL_MODE,
   IDLE_TIMEOUT_MARGIN_MS,
   clampAskRounds,
   clampDensity,
@@ -21,24 +23,29 @@ import {
   clampTeamConfig,
   clampTodoConfig,
   clampBashConfig,
+  clampJobsConfig,
   clampUpdateConfig,
   clampTheme,
   clampThinkingLevel,
   clampContextWindow,
   clampMaxTokens,
   clampMaxRenderInterval,
+  clampScrollMode,
   clampScrollResumeMs,
   clampTranscriptRetain,
   clampTranscriptWindow,
   coercePositiveInt,
   isAutoToken,
   isSkillsToolPolicyMode,
+  legacyTeamCeilingPatch,
   parseThresholdInput,
   type CliConfig,
   type CompactionConfig,
+  type ContextWindowOrigin,
   type DensityMode,
   type LogConfig,
   type PersistedConfig,
+  type ScrollMode,
   type FastConfig,
   type RetryConfig,
   type SkillsConfig,
@@ -46,12 +53,16 @@ import {
   type ThemeName,
   type TodoConfig,
   type BashConfig,
+  type JobsConfig,
   type UpdateConfig,
 } from './schema.js';
 import { loadDotenv, readEnvConfig, readEnvDisabledSkills } from './env.js';
-import { readConfigFile } from './store.js';
-import { projectModelProfiles, resolveModelProfileState, resolveModelRoleKey }
-  from './model-profile-resolution.js';
+import { readConfigFile, updatePersistedConfig } from './store.js';
+import {
+  projectModelProfiles,
+  resolveModelProfileState,
+  resolveModelRoleKey,
+} from './model-profile-resolution.js';
 import type { ModelRole } from './model-profiles.js';
 import { getConfigPath } from './app-paths.js';
 import { setHistoryEnabled } from './prompt-history.js';
@@ -214,6 +225,8 @@ export interface CliFlags {
    * all — i.e. the documented escape hatch would quietly un-set itself.
    */
   diffRender?: boolean;
+  /** `--scroll-mode <native|app>`; already validated by `cli.tsx` (exit 2 on junk). */
+  scrollMode?: ScrollMode;
   /** `--sync-output` ⇒ true, `--no-sync-output` ⇒ false, absent ⇒ undefined (§5.2). */
   syncOutput?: boolean;
   /**
@@ -293,6 +306,21 @@ export interface CliFlags {
   compaction?: boolean;
   /** `--compaction-threshold <0..1|N%>` — session override for `threshold`. */
   compactionThreshold?: string;
+  /**
+   * `--resume <id|path>` - continue a saved session under a NEW id
+   * (tui-session-id-resume 4).
+   *
+   * A FLAG FIELD AND NOT A CONFIG KEY (D-19). There is no persisted "always
+   * resume this session", and no switch that shows an id without writing it:
+   * that state - an id a user can copy and cannot use - is worse than having no
+   * id at all.
+   *
+   * Carried through `toFlags` like every other flag; a field that reaches only
+   * `CliFlags` is inert with no compile error and no runtime error.
+   */
+  resumeSession?: string;
+  /** `--save <id>` - name THIS run's persistent session and pin it. */
+  saveSessionAs?: string;
 }
 
 /**
@@ -482,6 +510,27 @@ function resolveBashConfig(
 }
 
 /**
+ * Merge the `jobs` section across the three layers that supply it
+ * (defaults > file > env), long-task-jobs §6.5.
+ *
+ * THREE LAYERS, NOT FOUR, and that is the same decision `resolveBashConfig`
+ * records: both switches this section carries are already reachable from
+ * `config.json` (a per-machine preference) and from the environment (the channel
+ * a container entrypoint has). A fourth spelling would be a fourth place for the
+ * answer to differ.
+ */
+function resolveJobsConfig(
+  env: Partial<PersistedConfig>,
+  file: Partial<PersistedConfig>,
+): JobsConfig {
+  return clampJobsConfig({
+    ...DEFAULT_CONFIG.jobs,
+    ...(file.jobs ?? {}),
+    ...(env.jobs ?? {}),
+  });
+}
+
+/**
  * Merge the `retry` section across all four layers (defaults › file › env ›
  * flags), llm-api-retry-backoff §6.2.
  *
@@ -656,6 +705,18 @@ function resolveDiffRender(
   return DEFAULT_CONFIG.diffRender;
 }
 
+/** flags > env > file > default, like `resolveDiffRender` (tui-native-terminal-scroll §6.1). */
+function resolveScrollMode(
+  flags: CliFlags,
+  env: Partial<PersistedConfig>,
+  file: Partial<PersistedConfig>,
+): ScrollMode {
+  if (flags.scrollMode !== undefined) return flags.scrollMode;
+  if (env.scrollMode !== undefined) return env.scrollMode;
+  if (file.scrollMode !== undefined) return clampScrollMode(file.scrollMode, DEFAULT_SCROLL_MODE);
+  return DEFAULT_SCROLL_MODE;
+}
+
 /** Same ladder for the DEC 2026 envelope (§5.1). */
 function resolveSyncOutput(
   flags: CliFlags,
@@ -746,35 +807,84 @@ function resolveMaxTokens(
  * `null`, and `null` is exactly the value being looked for. NO CLI FLAG feeds
  * this - it is a per-installation correction for a model table entry, not a
  * per-invocation choice, so `config set` and the environment variable are the
- * two surfaces the design names.
+ * two surfaces the design names. The model profile bound as Main is the third
+ * (profile-context-window): its window arrives already merged into the `file`
+ * layer by `projectModelProfiles`, and `profileOwned` names it.
+ *
+ * THE ORIGIN CONTRACT (profile-context-window §6.1, shared verbatim with the
+ * save transaction): `origin !== undefined` IF AND ONLY IF `value !== null`.
+ * An explicit AUTO - profile set to auto, `config set contextWindow auto`,
+ * `ARAGON_CONTEXT_WINDOW=auto` - returns `{ value: null }` and NO origin,
+ * because "the user asserted this denominator" and "the user declared AUTO"
+ * are different facts and the meter's override branch only sees the first.
  */
 function resolveContextWindow(
   env: Partial<PersistedConfig>,
   file: Partial<PersistedConfig>,
-): number | null {
-  const layers: Array<{ name: string; value: unknown }> = [
+  profileOwned: boolean,
+): { value: number | null; origin?: ContextWindowOrigin } {
+  const layers: Array<{ name: string; value: unknown; origin: ContextWindowOrigin }> = [
     {
       name: 'ARAGON_CONTEXT_WINDOW',
       value: hasOwn(env, 'contextWindow') ? env.contextWindow : undefined,
+      origin: 'env',
     },
     {
       name: 'config.json contextWindow',
       value: hasOwn(file, 'contextWindow') ? file.contextWindow : undefined,
+      origin: profileOwned ? 'profile' : 'config',
     },
   ];
 
   for (const layer of layers) {
     if (layer.value === undefined) continue; // this layer said nothing
-    if (layer.value === null || isAutoToken(layer.value)) return null; // AUTO
+    if (layer.value === null || isAutoToken(layer.value)) return { value: null }; // AUTO
     const n = clampContextWindow(layer.value, null);
-    if (n !== null) return n;
+    if (n !== null) return { value: n, origin: layer.origin };
     getLogger().warn('config', 'context_window_unusable', {
       source: layer.name,
       value: String(layer.value),
     });
   }
 
-  return DEFAULT_CONFIG.contextWindow;
+  return { value: DEFAULT_CONFIG.contextWindow };
+}
+
+/**
+ * Rewrite the cli<=0.6.16 persisted team ceiling defaults to 0 and persist the
+ * change (F-8 A'4). ONE-SHOT and IDEMPOTENT: after the first rewrite the file
+ * carries 0, which matches nothing, so nothing is written again.
+ *
+ * THE FILE LAYER ONLY, deliberately: env and flags are this-launch intent and
+ * survive untouched, and with the D-4 semantics a positive surviving value is
+ * a supervisor cadence hint, never a kill. The raw file object is patched IN
+ * PLACE (the same precedent `readConfigFile` sets with `fullscreen`) so the
+ * `file` layer this function's caller resolves from already reads 0; the
+ * write goes through `updatePersistedConfig`, the one atomic write path every
+ * other settings change uses.
+ *
+ * A FAILED WRITE MUST NOT BLOCK STARTUP: the values are already neutralized
+ * in memory, and the next launch retries — which is why the catch is empty
+ * and the migration is logged instead of surfaced.
+ */
+function migrateLegacyTeamCeilings(raw: Partial<PersistedConfig> | null): void {
+  const patch = legacyTeamCeilingPatch(raw?.team);
+  if (patch === null) return;
+  // THE FULL SECTION, not the bare patch: the write port types `team` as a
+  // whole `TeamConfig` (its merge then deep-merges over what is on disk), and
+  // the section the file already carries plus the zeroed keys IS the section
+  // we want on disk.
+  const migratedTeam: TeamConfig = { ...raw!.team!, ...patch };
+  Object.assign(raw!.team!, patch);
+  try {
+    updatePersistedConfig({ team: migratedTeam });
+  } catch {
+    // Unwritable config dir: in-memory values are already migrated; retry
+    // next launch (idempotent).
+  }
+  getLogger().warn('config', 'team_legacy_ceilings_migrated', {
+    keys: Object.keys(patch).join(','),
+  });
 }
 
 /**
@@ -791,6 +901,7 @@ export function loadConfig(
   loadDotenv(cwd);
 
   const read = readConfigFile();
+  migrateLegacyTeamCeilings(read.config);
   const projection = projectModelProfiles(read.config ?? {});
   const file: Partial<PersistedConfig> = projection.file;
   const env = readEnvConfig();
@@ -833,7 +944,9 @@ export function loadConfig(
     DEFAULT_CONFIG.liveToolOutput;
 
   const maxTokens = resolveMaxTokens(flags, env.partial, file);
-  const contextWindow = resolveContextWindow(env.partial, file);
+  const resolvedWindow = resolveContextWindow(env.partial, file,
+    projection.mainOwnsContextWindow);
+  const contextWindow = resolvedWindow.value;
 
   // `clampTheme` is also where the v0.3.0 `dark` name is migrated to `cool`,
   // so reading a legacy config file needs no extra step here (§4.5 / R-4).
@@ -875,6 +988,15 @@ export function loadConfig(
     DEFAULT_CONFIG.toolTimeoutMs,
   );
 
+  // THE `jobs` SECTION IS RESOLVED HERE, ABOVE THE TIMEOUT BLOCK, and the
+  // position is the whole of RV-P1-2. The design's first draft put the I-4 clamp
+  // next to the `idleTimeoutMs` invariant below, but `jobs` is parsed inside the
+  // big config literal a hundred lines further down — a reference to it here would
+  // be a use-before-declaration, and "resolve it later and patch the object" is
+  // how the invariant gets silently skipped. Resolving it first makes the clamp
+  // impossible to omit.
+  const jobs = resolveJobsConfig(env.partial, file);
+
   let idleTimeoutMs = coercePositiveInt(
     pick(flags.idleTimeout, file.idleTimeoutMs),
     DEFAULT_CONFIG.idleTimeoutMs,
@@ -883,6 +1005,21 @@ export function loadConfig(
   // Timeout invariant (R1): idle must be strictly greater than the tool ceiling
   // so a long single tool run is never aborted by the idle watchdog.
   idleTimeoutMs = Math.max(idleTimeoutMs, toolTimeoutMs + IDLE_TIMEOUT_MARGIN_MS);
+
+  // INVARIANT I-4 (long-task-jobs): a wait must fit inside the tool call that
+  // hosts it, `jobs.waitSeconds * 1000 + JOB_WAIT_MARGIN_MS <= toolTimeoutMs`.
+  //
+  // `Math.min`, AND THE DIRECTION IS THE POINT. The invariant above RAISES the
+  // idle window to accommodate the tool; this one LOWERS the wait to accommodate
+  // the tool. Copying `Math.max` here would produce a wait that outlives its own
+  // tool call — which is exactly the `Command timed out` failure the feature
+  // exists to remove, re-created by its own config check.
+  //
+  // With an operator-set ceiling below the margin the floor of 1s applies rather
+  // than a negative wait: the invariant wins over the minimum, because a wait
+  // longer than its host is worse than a short wait.
+  const waitCeilingSeconds = Math.floor((toolTimeoutMs - JOB_WAIT_MARGIN_MS) / 1000);
+  jobs.waitSeconds = Math.max(1, Math.min(jobs.waitSeconds, waitCeilingSeconds));
 
   // Resolve API keys: config-file key wins over the provider env var.
   const fileKeys = file.apiKeys ?? {};
@@ -972,6 +1109,12 @@ export function loadConfig(
     liveToolOutput,
     maxTokens,
     contextWindow,
+    // CONDITIONAL SPREAD so a feature-off config object stays byte-identical
+    // (invariant 6): with no override there is no origin KEY, not an undefined
+    // one, and every `toEqual` on a default config keeps passing untouched.
+    ...(resolvedWindow.origin !== undefined
+      ? { contextWindowOrigin: resolvedWindow.origin }
+      : {}),
     theme,
     reducedMotion,
     exitTranscript:
@@ -987,6 +1130,7 @@ export function loadConfig(
       DEFAULT_CONFIG.maxRenderIntervalMs,
     ),
     diffRender: resolveDiffRender(flags, env.partial, file),
+    scrollMode: resolveScrollMode(flags, env.partial, file),
     syncOutput: resolveSyncOutput(flags, env.partial, file),
     confirmTools,
     toolTimeoutMs,
@@ -1025,6 +1169,10 @@ export function loadConfig(
     update: resolveUpdateConfig(flags, env.partial, file),
     compaction: resolveCompactionConfig(flags, env.partial, file),
     bash: resolveBashConfig(env.partial, file),
+    // The already-resolved-and-converged section from the timeout block above.
+    // NOT `resolveJobsConfig(...)` a second time: that would re-apply the
+    // un-converged `waitSeconds` and silently undo I-4.
+    jobs,
     cwd,
     color,
     colorLevel,
@@ -1071,6 +1219,11 @@ function recordResolvedConfig(config: CliConfig): void {
     // trace — so "why did my failing call sit there for three minutes" (or
     // "why did it not retry at all") has an answer after the fact.
     retry: config.retry.enabled ? config.retry.maxRetries : 'off',
+    // The CONVERGED value, not the configured one: after I-4 they can differ, and
+    // "my 30s wait became 10s" is answerable only if the resolved number is
+    // recorded rather than the one on disk.
+    jobWaitSeconds: config.jobs.waitSeconds,
+    jobsEnabled: config.jobs.enabled,
     hasApiKey: Boolean(config.apiKeys[config.provider]),
     configPath: getConfigPath(),
   });

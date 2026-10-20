@@ -41,3 +41,38 @@ describe('补全菜单总高度', () => {
     view.unmount();
   });
 });
+
+// DEFECT 7. The selected row was marked ONLY with `inverse`, which is chalk's
+// identity at colour level 0, and every `theme.*` colour is undefined there too -
+// so under `--no-color` all six commands looked alike and Enter was a guess. The
+// caret prefix is the same affordance the `/model` picker already uses.
+describe('选中行在无颜色档位下也可见', () => {
+  it('选中行画 caret 前缀，其余行留两格空白', () => {
+    const caps = { unicode: false, colorLevel: 0 as const };
+    const theme = getTheme('cool', caps);
+    const items = [{ label: '/help' }, { label: '/model' }, { label: '/theme' }];
+    const layout = buildAutocompleteLayout({ itemCount: items.length, selected: 1, maxHeight: 9 });
+    const view = render(<AutocompletePopup items={items} selected={1} layout={layout}
+      theme={theme} caps={caps} />);
+    const rows = (view.lastFrame() ?? '').split('\n');
+    const selected = rows.find((row) => row.includes('/model'))!;
+    const other = rows.find((row) => row.includes('/help'))!;
+    expect(selected).toMatch(/> +\/model/);
+    expect(other).not.toMatch(/> +\//);
+    // The caret is the whole signal here: there is no inverse SGR to fall back on.
+    expect(selected).not.toContain('\u001b[7m');
+    view.unmount();
+  });
+
+  it('unicode 档位用与 /model 选择器相同的 caret 字形', () => {
+    const caps = { unicode: true, colorLevel: 3 as const };
+    const theme = getTheme('cool', caps);
+    const items = [{ label: '/help' }, { label: '/model' }];
+    const layout = buildAutocompleteLayout({ itemCount: items.length, selected: 1, maxHeight: 9 });
+    const view = render(<AutocompletePopup items={items} selected={1} layout={layout}
+      theme={theme} caps={caps} />);
+    const selected = (view.lastFrame() ?? '').split('\n').find((row) => row.includes('/model'))!;
+    expect(selected).toContain('\u276f');
+    view.unmount();
+  });
+});

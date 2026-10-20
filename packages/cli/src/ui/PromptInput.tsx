@@ -378,6 +378,32 @@ export function fileTokenAt(
   return { start, end, query: buffer.slice(start + 1, end) };
 }
 
+/**
+ * How many `@file` candidates reach the popup.
+ *
+ * The popup has its own row budget; this is the list it windows. Twenty ranked
+ * paths are enough to spot the one you meant, and it bounds the array that every
+ * draft edit re-renders.
+ */
+const FILE_MATCH_LIMIT = 20;
+
+/**
+ * Segments in a path - the first ranking key for an EMPTY `@` query (defect 10).
+ *
+ * A bare `@` matches every file in the tree, and `tinyGlob` returns them in
+ * whatever order the filesystem walked, so opening the popup without a rank gave
+ * a correct-but-arbitrary twenty. Shallowest first, then shortest, then
+ * alphabetical: the paths a user is reaching for (`src/`, a root config) come
+ * before `packages/cli/src/ui/layout/deep/thing.ts`.
+ */
+function pathDepth(path: string): number {
+  let depth = 1;
+  for (const char of path) {
+    if (char === '/' || char === '\\') depth += 1;
+  }
+  return depth;
+}
+
 /** A leading C0 control byte or ESC sequence should never be inserted raw. */
 function isControlSeq(input: string): boolean {
   if (input.length === 0) return true;
@@ -423,7 +449,11 @@ export function PromptInput({
   const slashSug = dismissed ? null : slashSuggestions(buffer, commands);
   const fileTok = fileTokenAt(buffer, cursor);
   const fileQuery = fileTok ? fileTok.query : null;
-  const fileActive = !dismissed && !!fileTok && fileTok.query.length >= 1 && fileMatches.length > 0;
+  // A BARE `@` OPENS THE POPUP (defect 10). The `query.length >= 1` gate here and
+  // the `< 1` early return in the scan effect below were the whole reason a lone
+  // `@` showed nothing while `README.md` promises "@ opens a file-path completion
+  // popup". An empty query is a legitimate one: it lists the shallowest paths.
+  const fileActive = !dismissed && !!fileTok && fileMatches.length > 0;
   const popupKind: 'slash' | 'file' | null =
     slashSug && slashSug.length > 0 ? 'slash' : fileActive ? 'file' : null;
   const popupItems: Suggestion[] =
@@ -435,7 +465,7 @@ export function PromptInput({
   const clampedSel = popupItems.length > 0 ? Math.min(sel, popupItems.length - 1) : 0;
   // --- Debounced `@file` scan. ---------------------------------------------
   useEffect(() => {
-    if (fileQuery === null || fileQuery.length < 1) {
+    if (fileQuery === null) {
       setFileMatches([]);
       return;
     }
@@ -450,7 +480,16 @@ export function PromptInput({
         .then((matches) => {
           if (cancelled) return;
           const q = fileQuery.toLowerCase();
-          setFileMatches(matches.filter((m) => m.toLowerCase().includes(q)).slice(0, 20));
+          // RANKED, NOT WALK ORDER (defect 10). An empty query matches every path
+          // in the tree, so without a sort the popup for a bare `@` was
+          // correct-but-arbitrary - the first twenty the filesystem happened to
+          // hand back.
+          const ranked = matches
+            .filter((m) => m.toLowerCase().includes(q))
+            .sort((a, b) => pathDepth(a) - pathDepth(b)
+              || a.length - b.length || (a < b ? -1 : a > b ? 1 : 0))
+            .slice(0, FILE_MATCH_LIMIT);
+          setFileMatches(ranked);
         })
         .catch(() => {
           if (!cancelled) setFileMatches([]);
@@ -730,7 +769,7 @@ export function PromptInput({
         return;
       }
 
-      if (key.ctrl) return; // App owns Ctrl+C / L / T / O.
+      if (key.ctrl) return; // App owns Ctrl+C / L / T / O, and now Ctrl+K (the kit picker).
 
       if (key.return) {
         if (key.meta || key.shift) {

@@ -94,6 +94,23 @@ export function clampTheme(v: unknown, fallback: ThemeName): ThemeName {
 // Density / hints (v0.4.0)
 // ---------------------------------------------------------------------------
 
+export const SCROLL_MODES = ['native', 'app'] as const;
+/**
+ * How the interactive TUI scrolls (tui-native-terminal-scroll D1).
+ *
+ * `native` prints settled conversation into the host terminal's own scrollback and
+ * keeps only a bounded live region on screen; `app` is the original full-screen
+ * alternate-screen layout with application-owned scrolling.
+ */
+export type ScrollMode = (typeof SCROLL_MODES)[number];
+export const DEFAULT_SCROLL_MODE: ScrollMode = 'native';
+
+export function clampScrollMode(v: unknown, fallback: ScrollMode): ScrollMode {
+  if (typeof v !== 'string') return fallback;
+  const normalized = v.trim().toLowerCase();
+  return normalized === 'native' || normalized === 'app' ? normalized : fallback;
+}
+
 export const DENSITY_MODES = ['comfortable', 'compact'] as const;
 export type DensityMode = (typeof DENSITY_MODES)[number];
 
@@ -182,6 +199,41 @@ export function clampContextWindow(v: unknown, fallback: number | null): number 
   const n = typeof v === 'number' ? v : Number.parseInt(String(v), 10);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return Math.min(MAX_CONTEXT_WINDOW, Math.max(MIN_CONTEXT_WINDOW, Math.floor(n)));
+}
+
+/**
+ * Where the effective `contextWindow` override came from
+ * (profile-context-window §5.2).
+ *
+ * A CLI-LOCAL RUNTIME FACT: never persisted, never promoted into Core's event
+ * shapes. It exists so `/context` can name WHICH surface supplied a
+ * denominator the user asserted - the environment, the legacy top-level key,
+ * or the model profile bound as Main.
+ */
+export type ContextWindowOrigin = 'env' | 'config' | 'profile';
+
+/**
+ * Parse text typed into the settings screen or the profile editor for a
+ * context window (profile-context-window §5.3).
+ *
+ * THE MIRROR OF `parseMaxTokensInput` BELOW, down to the tri-state shape: it
+ * distinguishes AUTO from "the user typed nonsense", which `clampContextWindow`
+ * cannot - a typo must change NOTHING rather than silently discard the number
+ * the user meant to set. `''` / `'auto'` / `'0'` are AUTO (`isAutoToken`);
+ * a digit run is clamped through THE single gate; anything else is invalid.
+ */
+export function parseContextWindowInput(
+  raw: string,
+):
+  | { kind: 'auto' }
+  | { kind: 'value'; value: number; clamped: boolean }
+  | { kind: 'invalid' } {
+  const trimmed = String(raw ?? '').trim();
+  if (isAutoToken(trimmed)) return { kind: 'auto' };
+  if (!/^\d+$/.test(trimmed)) return { kind: 'invalid' };
+  const value = clampContextWindow(trimmed, null);
+  if (value === null) return { kind: 'invalid' };
+  return { kind: 'value', value, clamped: value !== Number.parseInt(trimmed, 10) };
 }
 
 /**
@@ -691,6 +743,26 @@ export interface TeamConfig {
    * meaningful while `team.overseer` is true.
    */
   overseerIntervalMs: number;
+  /**
+   * Which model a team child runs on (subagent-model-and-question-controls
+   * D-2). `'main'` = the lead's own connection - the default and the
+   * historical parity behavior; `'fast'` = the fast tier, resolved per
+   * dispatch through `resolveFastTier`; `'profile'` = the entry named by
+   * `team.modelProfileId`.
+   *
+   * A USER-OWNED SETTING, NEVER A TOOL PARAMETER (D-1): `normalizeSubagentSpecs`
+   * keeps silently dropping a stale `model` key, so the MODEL cannot downgrade
+   * its own delegation. This key is the one explicit, visible, reversible
+   * switch the human owns.
+   */
+  model: 'main' | 'fast' | 'profile';
+  /**
+   * The profile entry a `model: 'profile'` dispatch binds to; `null` = not
+   * bound. IGNORED by the other modes. Existence is NOT validated here - a
+   * dangling id degrades to the main model with a disclosed reason at
+   * resolution time (D-4), so deleting a profile can never break a dispatch.
+   */
+  modelProfileId: string | null;
 }
 
 /**
@@ -718,6 +790,10 @@ export const DEFAULT_TEAM_CONFIG: TeamConfig = {
   overseer: true,
   // 0 = the structural cadence default (300 s). See the field docstring.
   overseerIntervalMs: 0,
+  // The parity default: children run the lead's own model until the user
+  // says otherwise (AC-1 - an upgraded config behaves exactly as before).
+  model: 'main',
+  modelProfileId: null,
 };
 
 const SUBAGENTS_RANGE = { min: 1, max: HARD_MAX_SUBAGENTS };
@@ -774,7 +850,63 @@ export function clampTeamConfig(raw: unknown): TeamConfig {
       DEFAULT_TEAM_CONFIG.overseerIntervalMs,
       OVERSEER_INTERVAL_RANGE,
     ),
+    // typo-changes-nothing, the discipline every enum clamp here follows: a
+    // hand-edited `model: 'fats'` resolves to 'main' (the parity default)
+    // rather than invalidating the file or refusing to launch. A bad
+    // `modelProfileId` (wrong type, or over the 128-codepoint budget
+    // `model-profiles.ts::validText` defines) is nulled the same way;
+    // reference EXISTENCE stays a resolution-time concern (D-4).
+    model: src.model === 'fast' || src.model === 'profile' ? src.model : 'main',
+    modelProfileId:
+      typeof src.modelProfileId === 'string' && src.modelProfileId.length > 0
+        && [...src.modelProfileId].length <= 128
+        ? src.modelProfileId
+        : null,
   };
+}
+
+/**
+ * The team ceilings cli <= 0.6.16 (7a6bf5630) persisted as its OWN defaults:
+ * every user who touched team mode back then still carries this exact triple
+ * in config.json, because `resolveTeamConfig` merges file values verbatim and
+ * no migration ever rewrote them. They are the kill ceilings behind F-8's
+ * "first block all failed" dispatches, so loading rewrites them to 0 (= no
+ * ceiling, the shipped default since 2ff15a9c3).
+ *
+ * EXACT-EQUALITY ONLY: a value that differs was a deliberate user choice and
+ * survives untouched. The price of that test is that a user who hand-types
+ * 300000 today is migrated to 0 too - the accepted trade, and the safe
+ * direction (no ceiling, not a cliff).
+ */
+export const LEGACY_TEAM_CEILING_DEFAULTS: Readonly<{
+  subagentTimeoutMs: number;
+  dispatchTimeoutMs: number;
+  maxTurnsPerSubagent: number;
+}> = {
+  subagentTimeoutMs: 300_000,
+  dispatchTimeoutMs: 900_000,
+  maxTurnsPerSubagent: 24,
+};
+
+/**
+ * The `{ key: 0 }` patch for legacy-default-equal ceilings, or `null` when
+ * nothing matches. Pure on purpose: `loadConfig` decides WHERE the patch is
+ * applied and persisted; this function only answers WHICH keys match, so the
+ * equality test lives beside the constants it reads.
+ */
+export function legacyTeamCeilingPatch(raw: unknown): Partial<TeamConfig> | null {
+  if (!raw || typeof raw !== 'object') return null;
+  type CeilingKey = keyof typeof LEGACY_TEAM_CEILING_DEFAULTS;
+  const src = raw as Partial<Record<CeilingKey, unknown>>;
+  const patch: Partial<TeamConfig> = {};
+  let matched = false;
+  for (const key of Object.keys(LEGACY_TEAM_CEILING_DEFAULTS) as CeilingKey[]) {
+    if (src[key] === LEGACY_TEAM_CEILING_DEFAULTS[key]) {
+      patch[key] = 0;
+      matched = true;
+    }
+  }
+  return matched ? patch : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1534,6 +1666,89 @@ export function clampBashConfig(raw: unknown): BashConfig {
   };
 }
 
+export interface JobsConfig {
+  /**
+   * Register `job_wait` / `job_list`, splice the `<background_jobs>` block,
+   * mirror job logs. Default TRUE.
+   *
+   * READ ONCE AT CONSTRUCTION, the `bash.background` / `team.enabled` rule. Its
+   * job is to be the single switch under which the tool array, the tool
+   * descriptions and the system prompt are BYTE-IDENTICAL to the pre-feature
+   * build (I-3) - which is why it is a registration switch and not a behaviour
+   * flag.
+   */
+  enabled: boolean;
+  /**
+   * Seconds one `job_wait` blocks by default. Default 30, range 5..60.
+   *
+   * ALSO CONVERGED AGAINST THE TOOL CEILING at load time and again at call time
+   * (I-4): a wait that outlives the tool call hosting it would turn every long
+   * job into `Command timed out`, which is the defect this feature removes.
+   */
+  waitSeconds: number;
+  /**
+   * Seconds without output before a job is reported `[stalled]`. Default 300,
+   * range 30..3600.
+   *
+   * A REPORT, NEVER AN ACTION: nothing kills or retries on this (R-13). The
+   * default is deliberately generous, because a training epoch that prints every
+   * five minutes is healthy.
+   */
+  stallSeconds: number;
+  /**
+   * Mirror each job's full output to `<home>/jobs/<session>/<id>.log`. Default
+   * TRUE; `false` creates no directory at all, for privacy- or IO-sensitive
+   * environments (D-6).
+   */
+  persistLog: boolean;
+  /**
+   * Whether a completion notice may STEER the running turn. Default TRUE.
+   *
+   * NOT A NOTICE SWITCH (§6.5). With this off, notices still arrive at the end of
+   * the next tool result and before the next user turn; only the active
+   * interruption stops. Turning notifications off entirely would require running
+   * no jobs.
+   */
+  noticeSteer: boolean;
+}
+
+export const DEFAULT_JOBS_CONFIG: JobsConfig = {
+  enabled: true,
+  waitSeconds: 30,
+  stallSeconds: 300,
+  persistLog: true,
+  noticeSteer: true,
+};
+
+const WAIT_SECONDS_RANGE = { min: 5, max: 60 };
+const STALL_SECONDS_RANGE = { min: 30, max: 3600 };
+
+/**
+ * THE single gate for every `jobs` read AND write, mirroring `clampBashConfig`
+ * and the four sections before it.
+ *
+ * THE ELEVENTH SECTION, AND THE FIRST ONE THAT `config set` CAN REACH BY
+ * NESTED KEY (§6.5). Every key is a SCALAR and the section is ONE level deep,
+ * because `runConfigGet` splits on a single dot - a `jobs.mirror.enabled` would
+ * resolve to `undefined` and the setting would silently never apply.
+ */
+export function clampJobsConfig(raw: unknown): JobsConfig {
+  const src = (raw && typeof raw === 'object' ? raw : {}) as Partial<
+    Record<keyof JobsConfig, unknown>
+  >;
+  return {
+    enabled: bool(src.enabled, DEFAULT_JOBS_CONFIG.enabled),
+    waitSeconds: clampInt(src.waitSeconds, DEFAULT_JOBS_CONFIG.waitSeconds, WAIT_SECONDS_RANGE),
+    stallSeconds: clampInt(
+      src.stallSeconds,
+      DEFAULT_JOBS_CONFIG.stallSeconds,
+      STALL_SECONDS_RANGE,
+    ),
+    persistLog: bool(src.persistLog, DEFAULT_JOBS_CONFIG.persistLog),
+    noticeSteer: bool(src.noticeSteer, DEFAULT_JOBS_CONFIG.noticeSteer),
+  };
+}
+
 /**
  * Parse `0.9`, `90%` or `90` into a ratio, or `null` when it is neither.
  *
@@ -1629,6 +1844,8 @@ export interface PersistedConfig {
   maxRenderIntervalMs: number;
   /** Repaint only the frame rows that changed (tui-input-flicker-fix §5.1). */
   diffRender: boolean;
+  /** Native terminal scrolling vs the full-screen app layout (tui-native-terminal-scroll D1). */
+  scrollMode: ScrollMode;
   /** Wrap each repaint batch in DEC 2026 synchronized update (§5.1). */
   syncOutput: boolean;
   confirmTools: boolean;
@@ -1707,6 +1924,8 @@ export interface PersistedConfig {
   compaction: CompactionConfig;
   /** Background services. The TENTH nested object; scalars only (see BashConfig). */
   bash: BashConfig;
+  /** Background jobs and bounded waiting. The ELEVENTH; scalars only (see JobsConfig). */
+  jobs: JobsConfig;
 }
 
 export const DEFAULT_CONFIG: PersistedConfig = {
@@ -1736,6 +1955,7 @@ export const DEFAULT_CONFIG: PersistedConfig = {
   renderGovernor: DEFAULT_RENDER_GOVERNOR,
   maxRenderIntervalMs: DEFAULT_MAX_RENDER_INTERVAL_MS,
   diffRender: DEFAULT_DIFF_RENDER,
+  scrollMode: DEFAULT_SCROLL_MODE,
   syncOutput: DEFAULT_SYNC_OUTPUT,
   confirmTools: false,
   toolTimeoutMs: DEFAULT_TOOL_TIMEOUT_MS,
@@ -1785,6 +2005,12 @@ export const DEFAULT_CONFIG: PersistedConfig = {
   // `undefined` would arrive with background services OFF for every existing
   // user — the same direction the compaction line above must never fail in.
   bash: DEFAULT_BASH_CONFIG,
+  // And one section later again, for the sixth time, and this one would fail
+  // in the WORSE direction: every key in `jobs` is `true` or positive by
+  // default, so a `config.json` predating this feature resolving `config.jobs`
+  // to `undefined` would throw on `config.jobs.waitSeconds` at construction
+  // rather than quietly disabling something.
+  jobs: DEFAULT_JOBS_CONFIG,
 };
 
 /**
@@ -1831,6 +2057,19 @@ export interface CliConfig {
   modelSettingsRestartRequired?: boolean;
   modelProfiles?: import('./model-profiles.js').ModelProfilesConfig;
   modelProfileState?: import('./model-profiles.js').ModelProfilesRuntime;
+  /**
+   * The SESSION kit (agent-model-kits D-5 / §7.2). RUNTIME-ONLY.
+   *
+   * IT IS NOT IN `PersistedConfig` AND IT NEVER WILL BE (I-5 / I-14): `ctrl+K`
+   * and `/kit use` promise "this session only", and that promise is worth more
+   * than a saved convenience - it is what makes "one keystroke changed my
+   * defaults" structurally impossible rather than merely unlikely.
+   *
+   * `held` is the only fact worth storing: WHICH slots still belong to the kit.
+   * The bindings are derivable, and a stored copy of them would be a second
+   * truth (I-7: every held slot must have been written into the live config).
+   */
+  sessionKit?: { id: string; held: import('./model-kits.js').KitSlot[] };
   apiKeyOverrideTarget?: { provider: string; baseUrl: string | null };
   provider: string;
   model: string;
@@ -1871,6 +2110,18 @@ export interface CliConfig {
    * would parse and be discarded, with nothing failing.
    */
   contextWindow: number | null;
+  /**
+   * WHERE the override above came from, or `undefined` when there is none
+   * (profile-context-window §5.2). RUNTIME-ONLY, never persisted.
+   *
+   * THE CONTRACT IS AN IFF: `contextWindowOrigin !== undefined` exactly when
+   * `contextWindow !== null`. An explicit AUTO (profile set to auto,
+   * `config set contextWindow auto`, `ARAGON_CONTEXT_WINDOW=auto`) has value
+   * null, so its origin is undefined - "the user asserted this denominator"
+   * and "the user declared AUTO" are different facts, and the meter's
+   * override branch only ever sees the first.
+   */
+  contextWindowOrigin?: ContextWindowOrigin;
   theme: ThemeName;
   reducedMotion: boolean;
   /** Replay a plain-text summary on exit (full-screen only — see §4.4). */
@@ -1911,6 +2162,20 @@ export interface CliConfig {
    * with no compile error and no runtime error.
    */
   diffRender: boolean;
+  /**
+   * Native terminal scrolling vs the full-screen app layout
+   * (tui-native-terminal-scroll D1).
+   *
+   * IT MUST EXIST HERE AND NOT ONLY IN `PersistedConfig`, for the reason
+   * `diffRender` above records: `runInteractive` reads `config.scrollMode`, where
+   * `config` is a `CliConfig`, so a key added to the persisted shape alone would
+   * round-trip through `config set` and never reach the screen plan.
+   *
+   * OPTIONAL ON THIS SHAPE ONLY so the many hand-built `CliConfig` fixtures in the
+   * test suite stay valid without edits (I-S9); `loadConfig` always sets it and
+   * the one reader (`runInteractive`) falls back to `DEFAULT_SCROLL_MODE`.
+   */
+  scrollMode?: ScrollMode;
   /** Wrap each repaint batch in DEC 2026 synchronized update (§5.1). */
   syncOutput: boolean;
   confirmTools: boolean;
@@ -2078,6 +2343,22 @@ export interface CliConfig {
    * either of them.
    */
   bash: BashConfig;
+
+  /**
+   * Background jobs and bounded waiting (long-task-jobs §6.5). The ELEVENTH
+   * nested object; five scalar keys, one level deep.
+   *
+   * ON `CliConfig` AS WELL AS `PersistedConfig`, for the reason every section
+   * above records: `AgentController` reads `config.jobs.waitSeconds` through a
+   * closure and `job_wait` reads it again at call time, so a key persisted and
+   * never projected would round-trip through `config set`, show up in
+   * `config list`, and change nothing.
+   *
+   * ONE LEVEL DEEP IS A HARD REQUIREMENT, NOT A PREFERENCE: `runConfigGet` splits
+   * `jobs.waitSeconds` on a single dot, so a nested sub-object would resolve to
+   * `undefined` and report an empty value for a setting that IS on disk.
+   */
+  jobs: JobsConfig;
 
   // Resolved, non-persisted fields.
   /**

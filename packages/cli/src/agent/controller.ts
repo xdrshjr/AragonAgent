@@ -1,11 +1,16 @@
 import {
-  createModelSettingsDraft, saveModelSettings, reloadModelSettings,
+  createModelSettingsDraft, previewModelSettings, saveModelSettings, reloadModelSettings,
   type ModelSettingsSnapshot,
 } from './model-profile-settings.js';
+import { applySessionKit as applySessionKitPort, clearSessionKit as clearSessionKitPort,
+  type KitApplyPort } from './kit-apply.js';
+import { resolveActiveKit, type ActiveKit } from '../config/kit-resolution.js';
+import type { KitApplyResult } from '../config/model-kits.js';
 import type {
   ModelSettingsDraft, ModelSettingsPatch, ModelSettingsSaveResult,
 } from '../config/model-profile-store.js';
 import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import { verifyCompactionIdentity, type CompactionIdentity } from '../compaction/memory-identity.js';
 import { COMPACTION_LIMITS } from '../compaction/limits.js';
 /**
@@ -72,14 +77,21 @@ import { createChildReviewer } from '../team/child-reviewer.js';
 import { TeamHumanQueue } from '../team/human-queue.js';
 import { createFastOverseerProvider } from '../team/overseer.js';
 import { createTaskTool } from '../team/task-tool.js';
+import { resolveSubagentModel } from '../team/model.js';
+import type { SubagentModelResolution } from '../team/model.js';
 import { buildTeamBlock } from '../team/prompt.js';
 import type { TeamEvent, TeamSnapshot } from '../team/types.js';
 import { buildFastBlock } from '../fast/prompt.js';
 import { ProcSupervisor } from '../proc/supervisor.js';
-import { buildBackgroundServicesBlock } from '../proc/prompt.js';
+import { buildBackgroundJobsBlock, buildBackgroundServicesBlock } from '../proc/prompt.js';
 import { PROC_LIMITS } from '../proc/limits.js';
+import { JobLogMirror } from '../proc/log-mirror.js';
+import { JobNoticeQueue } from '../proc/notices.js';
 import type { ProcEventListener, ServiceSnapshot } from '../proc/types.js';
 import { makeBashKill, makeBashOutput } from '../tools/proc-tools.js';
+import { makeJobList, makeJobWait } from '../tools/job-tools.js';
+import { JobNoticeRelay } from './job-notices.js';
+import { getHomeRoot } from '../config/app-paths.js';
 import { addSignalHook } from '../logging/install.js';
 import { describeFastTierProblem, fastProviderOf, resolveFastTier } from '../fast/resolve.js';
 import { FastWiring, offFastStatus, type FastStatus } from '../fast/wiring.js';
@@ -102,6 +114,15 @@ import { createNodeSkillHost } from '../skills/node-host.js';
 import { SkillService, type ApprovalGate } from '../skills/service.js';
 import { createSkillTools } from '../skills/tools.js';
 import { buildSystemPrompt } from './system-prompt.js';
+import {
+  resetConversationWith,
+  type ConversationResetOptions,
+  type ConversationResetResult,
+} from './conversation-reset.js';
+import {
+  archiveClearedConversation,
+  type ClearedArchiveInput,
+} from '../session/clear-archive.js';
 import type { AgentMode } from './agent-mode.js';
 import type { NoticeLevel } from './reducer.js';
 
@@ -453,6 +474,31 @@ export class AgentController {
   /** Session changes must not make a delayed receipt match a new message. */
   private readonly steeringPrefix = randomUUID();
   private steeringSequence = 0;
+  /**
+   * OPEN TOOL CALLS IN THIS BATCH (long-task-jobs D-5).
+   *
+   * COUNTED HERE, NOT BORROWED FROM `FastWiring`'s `TurnFrameRing`: `fast` can be
+   * switched off entirely, and a completion notice must not go quiet with it. The
+   * cost is a second counter over the same two events, which AC-19 pins with a
+   * replay rather than with trust.
+   */
+  private activeToolCalls = 0;
+  /** The completion-notice queue both the push and the pull channel take from. */
+  private readonly jobNotices = new JobNoticeQueue();
+  /** The optional on-disk log mirror; `undefined` when `jobs.persistLog` is false. */
+  private jobMirror: JobLogMirror | undefined;
+  /** The relay: terminal events in, ledger across `steering_accepted`, safe-point push. */
+  private jobRelay: JobNoticeRelay | undefined;
+  /** `cfg.jobs.enabled` AND `cfg.bash.background`, fixed at construction. */
+  private jobsRegistered = false;
+  /**
+   * One mirror directory per PROCESS.
+   *
+   * The logs are a debugging aid, not a record with an identity: two sessions
+   * writing to one directory would interleave the tails of two different runs, and
+   * the retention sweep in `log-mirror.ts` keeps the newest few directories.
+   */
+  private readonly jobSessionTag = Date.now().toString(36);
 
   constructor(private config: CliConfig, deps: ControllerDeps = {}) {
     this.cwd = config.cwd;
@@ -604,7 +650,22 @@ export class AgentController {
     // comment. `readyTimeoutMs` is read through a closure rather than captured,
     // so a live config change reaches the next service rather than the next
     // launch of the CLI.
-    this.procs = new ProcSupervisor({ readyTimeoutMs: () => this.config.bash.readyTimeoutMs });
+    // `jobs` is the FIRST section whose registration depends on two keys: the
+    // tools need a supervisor to talk to (`bash.background`) and their own switch.
+    // With either off, no `job_*` tool, no prompt block, no mirror - which is what
+    // makes I-3 (byte-identical when off) measurable rather than asserted.
+    this.jobsRegistered = config.jobs.enabled && config.bash.background;
+    this.jobMirror =
+      this.jobsRegistered && config.jobs.persistLog
+        ? new JobLogMirror({ root: () => join(getHomeRoot(), 'jobs', this.jobSessionTag) })
+        : undefined;
+    this.procs = new ProcSupervisor({
+      readyTimeoutMs: () => this.config.bash.readyTimeoutMs,
+      // Live closures, not captured values: a `config set` must reach the card of
+      // the job already running.
+      stallMs: () => this.config.jobs.stallSeconds * 1000,
+      ...(this.jobMirror ? { mirror: this.jobMirror } : {}),
+    });
     this.notifyHostFn = deps.notify;
     this.bashBackgroundRegistered = config.bash.background;
     // THE EXIT REAPER (G5 / P1-2 / R-10). An APPEND-ONLY hook rather than a
@@ -613,6 +674,23 @@ export class AgentController {
     // that leaves the user staring at a blank alternate screen. `reapSync` is
     // the only entry point it calls, and it is synchronous end to end (I-9).
     this.releaseSignalHook = addSignalHook(() => this.procs.reapSync());
+
+    // THE RELAY IS BUILT HERE, BEFORE THE TOOLS, because the tools take its
+    // `drain` as the PULL port and the supervisor's stream as their source. Its
+    // `steer` is the same receipt-less path `FastWiring` already uses, and its
+    // safe-point test is this class's own batch counter (D-5).
+    this.jobRelay = new JobNoticeRelay({
+      queue: this.jobNotices,
+      steer: (text) => this.enqueueSteering(text, false),
+      isAtSafeSteerPoint: () => this.isAtSafeSteerPoint(),
+      // The FILL channel precondition: no tool batch open, nothing being aborted -
+      // and deliberately no isRunning(), because this path runs just BEFORE
+      // agent.prompt() / agent.continue(), where the engine is idle by contract.
+      // The dep documents why that one missing clause is the whole difference.
+      canSteerBeforeTurn: () => this.activeToolCalls === 0 && !this.abortRequested,
+      steerEnabled: () => this.config.jobs.noticeSteer,
+    });
+    this.jobRelay.attach((listener) => this.procs.subscribe(listener));
 
     this.tools = createBuiltinTools({
       getCwd: () => this.cwd,
@@ -697,6 +775,35 @@ export class AgentController {
       procTools: this.bashBackgroundRegistered
         ? [makeBashOutput({ supervisor: this.procs }), makeBashKill({ supervisor: this.procs })]
         : [],
+      // THROUGH THE FACTORY for the reason above, and GATED ON BOTH KEYS:
+      // `job_wait` with no supervisor to read is a tool that can only say "no
+      // jobs", and `jobs.enabled: false` must leave the array byte-identical to
+      // the baseline (I-3).
+      jobTools: this.jobsRegistered
+        ? [
+            makeJobWait({
+              supervisor: this.procs,
+              waitSeconds: () => this.config.jobs.waitSeconds,
+              stallSeconds: () => this.config.jobs.stallSeconds,
+              toolTimeoutMs: () => this.config.toolTimeoutMs,
+              maxConsecutiveWaits: PROC_LIMITS.maxConsecutiveWaits,
+              terminalRecord: (id) => this.jobRelay?.terminalRecord(id),
+            }),
+            makeJobList({
+              supervisor: this.procs,
+              waitSeconds: () => this.config.jobs.waitSeconds,
+              stallSeconds: () => this.config.jobs.stallSeconds,
+              toolTimeoutMs: () => this.config.toolTimeoutMs,
+              maxConsecutiveWaits: PROC_LIMITS.maxConsecutiveWaits,
+              terminalRecord: (id) => this.jobRelay?.terminalRecord(id),
+            }),
+          ]
+        : [],
+      // The PULL port. Absent when jobs are off, which leaves every tool object
+      // untouched and provable by identity.
+      ...(this.jobsRegistered
+        ? { jobNotices: { drain: () => this.jobRelay?.drainForTail() ?? [] } }
+        : {}),
       // THROUGH THE FACTORY, NEVER APPENDED AFTERWARDS (D-15 / P0-1).
       // `tools.test.ts::C7` asserts `HOST_TOOL_NAMES` equals what
       // `createBuiltinTools` produces, so appending `task` here would turn that
@@ -713,9 +820,21 @@ export class AgentController {
               maxSubagents: () => this.config.team.maxSubagents,
               hasApiKey: () => this.hasApiKey(),
               activeProvider: () => this.config.provider,
-              // Every child runs the lead's own model, so the lead's cost table
-              // is the one honest price for the dispatch total.
-              modelCost: () => this.getModelInfo().cost,
+              // Priced at the model children ACTUALLY run (subagent-model §3.4):
+              // under the default `main` mode this is exactly the lead's own
+              // table (I-2 byte parity); a fast or profile model the static
+              // tables do not price yields undefined, so the report says
+              // `pricing unknown` rather than fabricating $0.00 (C-11 / RV-4).
+              modelCost: () => {
+                const resolution = this.subagentModelResolution();
+                if (resolution.effective === 'main') return this.getModelInfo().cost;
+                return this.isPricedModel(resolution.ref)
+                  ? this.getModelInfoFor(resolution.ref).cost
+                  : undefined;
+              },
+              // The same resolution, re-read per dispatch, feeds the report's
+              // disclosure line - one read per consumer, one authority both.
+              subagentModel: () => this.subagentModelResolution(),
               // The FAST table for the supervisor's own spend line
               // (subagent-overseer-v2 D-7 / R-P1-2). Reuses the tier
               // resolution and the unknown-pricing predicate the fast
@@ -773,6 +892,10 @@ export class AgentController {
       isWindowKnown: () => this.getModelInfo().contextWindowSource !== 'fallback',
       // LIVE, so a settings-screen edit moves the denominator without a relaunch.
       getWindowOverride: () => this.config.contextWindow,
+      // Beside the value, LIVE too: `/context` must name the surface that
+      // supplied the denominator (profile-context-window AC-9, one of four
+      // meter sites that must stay in lockstep).
+      getWindowOverrideOrigin: () => this.config.contextWindowOrigin,
     });
 
     // --- Context compaction, part 1: BEFORE the Agent ----------------------
@@ -834,7 +957,15 @@ export class AgentController {
           // `dispatchTimeoutMs: 0` (the default) reaches the executor as an
           // override of `0` = NO TIMER AT ALL: the dispatch lasts as long as its
           // slowest child, and only an Esc ends it early (main-agent parity).
-          ...(this.teamRegistered ? { task: config.team.dispatchTimeoutMs } : {}),
+          // D-4, THE SECOND ARMING SITE: the runtime arms its own dispatch
+          // timer under the same gate, because the executor timeout being
+          // cooperative means this override must never be the ONLY ceiling.
+          // With the supervisor gate open the ceiling disarms HERE too, so
+          // team.overseer can never leave two kill paths alive behind one
+          // config. Read once at construction, exactly as before.
+          ...(this.teamRegistered
+            ? { task: config.team.overseer ? 0 : config.team.dispatchTimeoutMs }
+            : {}),
         },
       },
     });
@@ -894,13 +1025,31 @@ export class AgentController {
       if (event.type === 'agent_start') this.abortRequested = false;
       if (event.type === 'steering_accepted') {
         for (const id of event.ids) this.pendingUserSteering.delete(id);
+        // A receipt means Core took a batch out of the queue, which is the only
+        // proof a steered notice has that it was not discarded (§4.6.1).
+        this.jobRelay?.onSteeringAccepted();
       }
-      // The authoritative result arrives with this event, so from this instant
-      // the tail is superseded and its slot must be released (§3.1.1). Clearing
-      // HERE rather than on read is what keeps the store's size a function of
-      // CONCURRENT calls instead of total calls.
+      // THE BATCH COUNTER (D-5 / I-5). Decremented BEFORE the push attempt below,
+      // because "the batch is empty" is only true after the last one has ended.
+      if (event.type === 'tool_execution_start') this.activeToolCalls += 1;
       if (event.type === 'tool_execution_end') {
-        this.toolOutputs?.clear('lead', event.toolCallId);
+        this.activeToolCalls = Math.max(0, this.activeToolCalls - 1);
+        // THE ONE PUSH SITE. A notice that could not be pushed here is picked up
+        // by the next tool result (the pull channel) or by the next user turn
+        // (the fill channel), so nothing is lost by declining.
+        this.jobRelay?.tryPush();
+      }
+      if (event.type === 'turn_start') {
+        // A new turn's first checkpoint is a safe point, and anything still
+        // steered-but-unproven must go back in the queue first: `fast`'s
+        // `recoverStranded()` may have wiped it at the end of the last run.
+        this.jobRelay?.requeueUndelivered();
+      }
+      if (event.type === 'agent_end') {
+        // The same reconciliation at the other end of a run. Both ends are
+        // required: `turn_start` covers the next turn of the same run, and this
+        // covers a run that ended with a notice stranded in the queue.
+        this.jobRelay?.requeueUndelivered();
       }
     });
 
@@ -1000,6 +1149,11 @@ export class AgentController {
       // `todo.enabled` rule). So the block is present exactly when the tools are,
       // and can never advertise a capability the model does not have.
       backgroundBlock: this.bashBackgroundRegistered ? buildBackgroundServicesBlock() : '',
+      // ONE FLAG, like `backgroundBlock` and for the same reason: `jobs.enabled`
+      // is read once at construction, so the block is present exactly when the
+      // tools that make its promises achievable are registered. With the flag off
+      // the prompt is byte-identical to the pre-feature text (I-3).
+      jobsBlock: this.jobsRegistered ? buildBackgroundJobsBlock() : '',
       // Read from the FIELD on every rebuild, for the reason the field's own
       // comment gives. Empty everywhere but `aragon exec`, and `buildSystemPrompt`
       // splices it conditionally, so every existing prompt is byte-identical.
@@ -1170,8 +1324,30 @@ export class AgentController {
       return { status: 'not-started', reason: 'cancelled' };
     }
     this.todos?.beginUserTurn(options.todoPolicy);
+    // BEFORE the engine is entered, so the loop's first checkpoint (the top of
+    // the loop, before any LLM call) merges them into history. Anything left over
+    // from the previous run - a notice `fast` wiped, or one the model never saw
+    // because it answered and stopped - is delivered here (RV-P1-7).
+    this.flushPendingNotices();
     await this.agent.prompt(text);
     return { status: 'finished' };
+  }
+
+  /**
+   * Deliver undelivered job notices, if any and if it is safe to steer.
+   *
+   * ONE METHOD, TWO CALL SITES, AND NOT INSIDE `prepareUserTurn` (RV-P1-7).
+   * `prepareUserTurn` is called from `startPrompt` AND from `continue` (with the
+   * CONCATENATED queued text), and it does three specific things for the engine's
+   * benefit. Hanging a delivery path off it would make `fast.setGoal`'s input
+   * semantics depend on whether a notice happened to be pending.
+   */
+  private flushPendingNotices(): void {
+    // FLUSH, NOT PUSH. The push channel requires `isRunning()`, and the engine is
+    // idle on this path by contract - reusing it here would leave every stranded
+    // notice waiting for a tool batch that may never come, which is exactly the
+    // failure AC-25 exists to prevent.
+    this.jobRelay?.flushForTurn();
   }
 
   private prepareUserTurn(text: string): void {
@@ -1374,6 +1550,10 @@ export class AgentController {
       }
       this.todos?.beginUserTurn('new-task');
     }
+    // The `continue()` path needs its own delivery for the reason RV-P1-7 gives:
+    // a run that ended with a notice still queued resumes through here, and this
+    // is the most common way a stranded notice gets its second chance.
+    this.flushPendingNotices();
     await this.agent.continue();
     return { status: 'finished' };
   }
@@ -1388,6 +1568,23 @@ export class AgentController {
 
   isRunning(): boolean {
     return this.agent.state.isRunning;
+  }
+
+  /**
+   * The one condition under which automated text may be injected (I-5).
+   *
+   * `activeToolCalls === 0` is the whole safety argument: `steer()` has exactly
+   * one safe checkpoint - the top of the loop, before the LLM call - so injecting
+   * text in the middle of a tool batch replaces the remaining `tool_use` blocks
+   * with "skipped due to steering interrupt" and the next request is malformed.
+   */
+  private isAtSafeSteerPoint(): boolean {
+    return this.activeToolCalls === 0 && this.isRunning() && !this.abortRequested;
+  }
+
+  /** How many completion notices are waiting for the model. */
+  pendingJobNotices(): number {
+    return this.jobNotices.pending();
   }
 
   // -----------------------------------------------------------------------
@@ -1547,6 +1744,19 @@ export class AgentController {
     return team;
   }
 
+  /**
+   * The dispatch-time subagent model resolution (subagent-model §3.4).
+   *
+   * One authority for the `task` report's disclosure line and its price
+   * table: both read through here, so the header can never name one model
+   * while pricing another. Re-resolved on every call for the reason
+   * `resolveFastTier` records - `/fast off`, a settings save and `/team model`
+   * all rewrite the inputs mid-session.
+   */
+  subagentModelResolution(): SubagentModelResolution {
+    return resolveSubagentModel(this.config, (id, role) => this.hasApiKey(id, role));
+  }
+
   /** Refused mid-dispatch by `/team`; half a dispatch under two ceilings is not
    *  a result anything can afterwards explain (the reasoning `/reload` uses). */
   isTeamBusy(): boolean {
@@ -1583,6 +1793,12 @@ export class AgentController {
     this.procs.reapSync();
     this.releaseSignalHook();
     this.procs.dispose();
+    // THE MIRROR FLUSHES BEFORE THE RELAY DETACHES: whatever the last job wrote is
+    // already on disk in the ring, and the file is the only copy that survives
+    // this process.
+    this.jobRelay?.detach();
+    this.jobMirror?.dispose();
+    this.jobNotices.clear();
   }
 
   // -----------------------------------------------------------------------
@@ -1666,9 +1882,12 @@ export class AgentController {
   }
 
   /**
-   * `/todo clear` and `/clear`. A user override of a projection (I-2's standing
-   * exception). `/todo` refuses mid-run before it gets here; `/clear` does not,
-   * on purpose — refusing there would leave it unable to clear the transcript.
+   * `/todo clear` and `/clear screen`. A user override of a projection (I-2's
+   * standing exception). `/todo` refuses mid-run before it gets here;
+   * `/clear screen` does not, on purpose - refusing there would leave a user
+   * unable to clear the transcript mid-run. `/clear` itself is the conversation
+   * boundary: it reaches the store through `clearMessages()` with reason
+   * 'reset', after it has interrupted the run.
    */
   clearTodos(): void {
     this.todos?.clear('user');
@@ -1746,6 +1965,49 @@ export class AgentController {
 
   /** Refresh both role connections and credentials while retaining conversation state. */
   reloadModelSettings(): ModelSettingsSaveResult { return reloadModelSettings(this); }
+
+  /**
+   * The narrow port `agent/kit-apply.ts` runs against (agent-model-kits §6.3).
+   *
+   * A LITERAL ADAPTER RATHER THAN `this`: the port's member names (`isBusy`,
+   * `hasKey`, `preview`) are deliberately NOT the controller's names, because a
+   * port that shadows a public method is one signature change away from silently
+   * calling itself. Three of the five members are one-liners onto existing
+   * methods; nothing here is new state.
+   */
+  private kitApplyPort(): KitApplyPort {
+    return {
+      getConfig: () => this.config,
+      isBusy: () => this.isModelSettingsBusy(),
+      hasKey: (providerId, role) => this.hasApiKey(providerId, role),
+      createDraft: () => this.createModelSettingsDraft(),
+      preview: (draft) => previewModelSettings(draft, this),
+    };
+  }
+
+  /**
+   * Apply a kit for THIS SESSION ONLY (D-7 / I-5): no commit, ever.
+   *
+   * Failed applies leave the live config and the file untouched (I-10), because
+   * the whole operation is one prepare-and-apply with no commit in between.
+   */
+  applySessionKit(kitId: string): KitApplyResult {
+    return applySessionKitPort({ kitId, port: this.kitApplyPort() });
+  }
+
+  /** Release the session kit and return to the config file's bindings (RV-P1-6). */
+  clearSessionKit(): KitApplyResult {
+    return clearSessionKitPort(this.kitApplyPort());
+  }
+
+  /**
+   * Which kit is in effect right now (session > default > disk bindings).
+   *
+   * DERIVED, never stored (D-5): the header chip, the settings root row and
+   * `/kit` all read this, so there is exactly one answer to "which preset am I
+   * running" and no copy of it that can drift.
+   */
+  getActiveKit(): ActiveKit { return resolveActiveKit(this.config); }
 
   /** Prebuild all potentially failing model/prompt work before committing the file. */
   prepareModelSettingsSnapshot(config: CliConfig): ModelSettingsSnapshot {
@@ -1931,6 +2193,16 @@ export class AgentController {
     };
   }
 
+  /**
+   * Clear the conversation history: THE NEW-CONVERSATION BOUNDARY.
+   *
+   * Six things, and every one of them is session-scoped: cancel the idle
+   * compaction, drop the `/resume` identity, clear Core's history, bump
+   * `startupSequence`, deep-invalidate compaction and the meter, and clear the
+   * skill activation frames. `/resume` has the twin of this in `replaceMessages`,
+   * and `/clear` is this one's second caller - see
+   * `docs/plans/clear-command-context-reset/spec.md`.
+   */
   clearMessages(): void {
     this.idleCompaction?.abort();
     this.restoredCompactionIdentity = undefined;
@@ -1956,6 +2228,68 @@ export class AgentController {
     // remains: this path is a belief that no longer exists, that one is a user
     // overriding a projection of a belief the model still holds.
     this.todos?.clear('reset');
+  }
+
+  /**
+   * `/clear` (and therefore `/reset`) - the conversation reset, in the one order
+   * that is safe.
+   *
+   * A THIN ADAPTER AND NOTHING ELSE (D-7). The order - interrupt, bounded wait,
+   * archive, clear queues, clear history - lives in `agent/conversation-reset.ts`
+   * so it can be proven against a six-line fake instead of against a fully
+   * constructed controller. Everything below is a wiring decision, and two of
+   * them are load-bearing:
+   *
+   * `interruptRun` IS `forceStop()`, NOT `abort()` (P0-2 / C-1). `abort()` bumps
+   * `startupSequence` only, so the events the engine keeps emitting while it
+   * unwinds would be adopted by `App` as ordinary events of the new run - the
+   * first screen of a fresh conversation would show the previous task's text and
+   * tool cards, and the status bar would bounce back out of `idle`. `forceStop()`
+   * also increments `runGen`, which is the fence `App` compares every event
+   * against, and hard-kills a foreground `bash` that ignores the abort signal -
+   * without which the bounded wait below could only ever time out.
+   *
+   * The session is archived BEFORE the clear and never after (D-9 step 4),
+   * because after it there is nothing left to save.
+   */
+  async resetConversation(opts: ConversationResetOptions = {}): Promise<ConversationResetResult> {
+    return resetConversationWith({
+      isRunning: () => this.isRunning(),
+      interruptRun: () => this.forceStop(),
+      awaitEngineIdle: () => this.waitForEngineIdle().then(() => !this.isRunning()),
+      archive: (readTranscript) => archiveClearedConversation({
+        ...this.describeClearedConversation(),
+        entries: readTranscript(),
+      }),
+      clearQueues: () => this.clearAllQueues(),
+      clearHistory: () => {
+        const cleared = this.agent.state.messages.length;
+        this.clearMessages();
+        return cleared;
+      },
+    }, opts);
+  }
+
+  /**
+   * The four parts of the archive input this controller can answer itself.
+   *
+   * `entries` is NOT one of them (P0-1). The screen transcript lives in `App`'s
+   * `ViewState`, and teaching the controller about the view layer to obtain it
+   * would invert the dependency this class exists to keep. The command layer
+   * passes a thunk instead - see `CommandContext.transcriptEntries`.
+   */
+  private describeClearedConversation(): Omit<ClearedArchiveInput, 'entries'> {
+    const snapshot = this.getSessionSnapshot();
+    return {
+      model: {
+        providerId: this.config.provider,
+        modelId: this.config.model,
+        ...(this.config.baseUrl ? { baseUrl: this.config.baseUrl } : {}),
+      },
+      messages: snapshot.messages,
+      ...(snapshot.compactionIdentity ? { compactionIdentity: snapshot.compactionIdentity } : {}),
+      todos: this.getTodoSnapshot()?.items ?? [],
+    };
   }
 
   /** Read-only view of the live system prompt (regression tests, /debug). */
@@ -2005,6 +2339,13 @@ export class AgentController {
   clearAllQueues(): void {
     this.agent.clearAllQueues();
     this.pendingUserSteering.clear();
+    // A WIPE OF THE STEERING QUEUE MUST NOT TAKE A NOTICE WITH IT (I-11).
+    // `fast/reviewer.ts` clears this queue when `userSteerCount() === 0`, on the
+    // stated premise that `AgentController.steer()` is the only other writer - and
+    // a steered job notice is invisible to that counter because it carries no
+    // receipt id. Anything still unproven goes straight back into the notice
+    // queue, so the wipe costs a delay instead of a fact the model never learns.
+    this.jobRelay?.requeueUndelivered();
   }
 
   // -----------------------------------------------------------------------

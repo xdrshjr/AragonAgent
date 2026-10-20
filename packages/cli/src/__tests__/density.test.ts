@@ -107,7 +107,12 @@ describe('Gutter (A-6 / invariant I-2)', () => {
     // assertion lives in `app.test.tsx` ("actually scrolls when the content
     // overflows the viewport").
     const src = readFileSync(resolve(SRC, 'ui/layout/Gutter.tsx'), 'utf8');
-    const contentColumn = /<Box flexDirection="column" flexShrink=\{0\}>/;
+    // THE PROP IS THE INVARIANT, NOT ITS POSITION ON THE LINE. This used to be the
+    // literal `<Box flexDirection="column" flexShrink={0}>`, so adding the
+    // `flexBasis`/`flexGrow` pair (defect 1) failed a test about shrinking. The
+    // pattern below still requires `flexShrink={0}` on the content column and no
+    // longer cares where else the column's props sit.
+    const contentColumn = /<Box flexDirection="column"[^>]*flexShrink=\{0\}[^>]*>/;
     expect(contentColumn.test(src)).toBe(true);
   });
 

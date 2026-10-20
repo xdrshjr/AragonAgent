@@ -21,6 +21,7 @@ import { adaptLegacyConnectionPatch, ModelProfileConfigError, readModelSettingsD
 import { normalizeModelProfiles, type ModelProfilesConfig } from './model-profiles.js';
 import {
   clampBashConfig,
+  clampJobsConfig,
   CONFIG_VERSION,
   DEFAULT_CONFIG,
   clampCompactionConfig,
@@ -219,6 +220,12 @@ export function normalizePersistedConfig(input: Partial<PersistedConfig>): Persi
     // and NOT merged over the defaults, which is verbatim the failure the
     // paragraph above says this line prevents.
     bash: clampBashConfig({ ...DEFAULT_CONFIG.bash, ...(partial.bash ?? {}) }),
+    // And the eleventh, on the same line and for the same reason. `jobs.enabled`
+    // is `true` by default, so a user whose `config.json` predates this feature
+    // must not resolve it to `undefined` — and `waitSeconds` would be `undefined`
+    // outright, which is a crash on the first `job_wait` rather than a silently
+    // wrong setting.
+    jobs: clampJobsConfig({ ...DEFAULT_CONFIG.jobs, ...(partial.jobs ?? {}) }),
   };
 }
 
@@ -324,6 +331,13 @@ export function mergePersistedConfig(
     // top level and write `background` absent, silently unregistering
     // `bash_output` / `bash_kill` from the next launch onward.
     bash: clampBashConfig({ ...current.bash, ...(patch.bash ?? {}) }),
+    // The eleventh section, and the sixth time this file records the same trap.
+    // `aragon config set jobs.waitSeconds 45` sends `{ jobs: { waitSeconds: 45 } }`;
+    // without this line the shallow top-level spread REPLACES the section and
+    // `persistLog` / `noticeSteer` / `enabled` / `stallSeconds` are written
+    // absent — with `noticeSteer`'s default masking it on the next load, so the
+    // user would never learn that their privacy switch had been turned back on.
+    jobs: clampJobsConfig({ ...current.jobs, ...(patch.jobs ?? {}) }),
   };
   return merged;
 }

@@ -50,7 +50,8 @@ async function mount(element: React.ReactElement) {
 
 const initial: SettingsValues = {
   provider: 'anthropic', model: '', baseUrl: '', thinkingLevel: 'off',
-  showThinking: 'off', liveToolOutput: 'off', maxTokens: '', apiKey: '', logLevel: 'info',
+  showThinking: 'off', liveToolOutput: 'off', maxTokens: '', contextWindow: '', apiKey: '',
+  logLevel: 'info',
   fastEnabled: 'off', fastModel: '', fastProvider: '', fastReview: '', fastReviewBudget: '',
   compactionEnabled: 'off', compactionThreshold: '90', compactionKeepTurns: '3',
   compactionSubagents: 'off', compactionArchive: 'off',
@@ -65,11 +66,13 @@ describe('五种弹层通过真实过滤器和 Ink 保持 Enter 兼容', () => {
   it.each(ENTER_ENCODINGS)('配置编辑器净化密钥帧且 %j 仅合入子草稿', async (enter) => {
     const dispatch = vi.fn();
     const editor = createProfileEditor({ id: 'new', name: 'Custom', provider: 'openai',
-      model: 'custom', baseUrl: null, apiKey: null });
+      model: 'custom', baseUrl: null, apiKey: null, contextWindow: null });
     editor.credentialMode = 'replace';
     const view = await mount(<ModelProfileEditor {...common} scrollOffset={0}
       editor={editor} users="Main + Fast" dispatch={dispatch} />);
-    for (let index = 0; index < 5; index++) await view.send('\x1b[B');
+    // SIX rows down to `apiKey`, not five: `Context window` sits after Model
+    // (profile-context-window §6.5), shifting every later field by one.
+    for (let index = 0; index < 6; index++) await view.send('\x1b[B');
     await view.send('a\x1b[13;2ub\x1b[13u');
     expect(dispatch).toHaveBeenLastCalledWith({ type: 'editor-field', field: 'apiKey', value: 'ab' });
     expect(dispatch).not.toHaveBeenCalledWith({ type: 'merge-editor' });

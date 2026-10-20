@@ -60,14 +60,25 @@ function renderBlock(
   switch (block.kind) {
     case 'code':
       return (
-        <CodeBlock key={`b${key}`} code={block.code} lang={block.lang} theme={theme} glyphs={glyphs} />
+        <CodeBlock
+          key={`b${key}`}
+          code={block.code}
+          lang={block.lang}
+          theme={theme}
+          glyphs={glyphs}
+        />
       );
     case 'table': {
-      const formatted = formatTable(block.rows, block.align);
+      // Glyphs are injected rather than hardcoded: this module is inside the
+      // ASCII-only scan, and the pure parser defaults to ASCII `|` / `-`.
+      const formatted = formatTable(block.rows, block.align, {
+        separator: glyphs.railVertical,
+        rule: glyphs.hrule,
+      });
       return (
         <Box key={`b${key}`} flexDirection="column">
           {formatted.map((row, r) => (
-            <Text key={r} wrap="truncate" bold={r === 0} color={r === 0 ? theme.accent : undefined}>
+            <Text key={r} wrap="truncate" bold={r === 0} color={tableRowColor(r, theme)}>
               {row}
             </Text>
           ))}
@@ -80,10 +91,31 @@ function renderBlock(
 }
 
 /**
+ * Table row 0 is the header (bold + accent); row 1 is the divider drawn under it.
+ *
+ * The divider must stay distinguishable at colour level 0, where bold is dropped
+ * to nothing, so it is MUTED and never bold: in `--no-color` the `----` run is
+ * itself the signal, and in a coloured tier the weight difference separates the
+ * header from the rule beneath it.
+ */
+function tableRowColor(index: number, theme: Theme): string | undefined {
+  if (index === 0) return theme.accent;
+  if (index === 1) return theme.muted;
+  return undefined;
+}
+
+/**
  * Fenced code. The round border is gone (§4.3): nested inside a tool card it
  * produced a box inside a box and squeezed an 80-column terminal down to 74
  * usable columns. A left rail plus the language tag conveys the same "this is
  * code" boundary for 1 column and 0 rows.
+ *
+ * The language tag is a muted TITLE, not a body row: it used to carry a chip
+ * background and one padding space either side of the text, so it rendered as
+ * `  |  ts` above code rows that start at `| export ...` — a body line that
+ * happened to be the language. It keeps its own row on purpose: the height
+ * estimator (`virtual-window.estimateEntryRows`) counts RAW markdown lines and
+ * has no code-block branch, so the fence line must still occupy exactly 1 row.
  */
 function CodeBlock({
   code,
@@ -105,8 +137,8 @@ function CodeBlock({
       {...railBorderProps(glyphs.railVertical, theme.border)}
     >
       {lang.length > 0 && (
-        <Text color={theme.chip.fg} backgroundColor={theme.chip.bg}>
-          {` ${lang} `}
+        <Text bold color={theme.muted}>
+          {lang}
         </Text>
       )}
       <Text>{rendered}</Text>

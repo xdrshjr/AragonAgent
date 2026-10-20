@@ -95,7 +95,16 @@ function occupancyLine(usage: ContextUsageSnapshot): string {
  */
 function windowLine(usage: ContextUsageSnapshot): string {
   if (usage.windowOverridden) {
-    return `${usage.window}   from contextWindow configuration (overrides API, model table, and model-windows.json)`;
+    // THREE NAMED SURFACES (profile-context-window §6.2). `undefined` falls
+    // into the config branch ON PURPOSE: that string is what every pre-feature
+    // test asserts, and a meter built without the origin dep must report
+    // byte-identically (invariant 6).
+    const named = usage.windowOverrideOrigin === 'profile'
+      ? 'from your model profile'
+      : usage.windowOverrideOrigin === 'env'
+        ? 'from ARAGON_CONTEXT_WINDOW'
+        : 'from contextWindow configuration';
+    return `${usage.window}   ${named} (overrides API, model table, and model-windows.json)`;
   }
   if (!usage.windowKnown) {
     return (

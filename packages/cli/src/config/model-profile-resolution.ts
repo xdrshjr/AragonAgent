@@ -7,6 +7,14 @@ export interface ProfileProjection {
   file: Partial<PersistedConfig>;
   state: ModelProfilesRuntime;
   issues: ProfileValidationIssue[];
+  /**
+   * True when a valid library has Main bound, so the bound profile OWNS the
+   * context-window denominator (profile-context-window tradeoff B). THE ONE
+   * AUTHORITY for "does the profile decide the window" - load.ts and the save
+   * transaction both read it rather than comparing numbers, which would lie on
+   * a coincidental match.
+   */
+  mainOwnsContextWindow: boolean;
 }
 export interface RoleKeyInput { config: CliConfig; role: ModelRole; providerId: string }
 
@@ -19,7 +27,9 @@ export function projectModelProfiles(file: Partial<PersistedConfig>): ProfilePro
   const issues = validateModelProfiles(file.modelProfiles);
   const state = emptyModelProfileState(issues.length > 0);
   const projected = { ...file };
-  if (issues.length || !file.modelProfiles) return { file: projected, state, issues };
+  if (issues.length || !file.modelProfiles) {
+    return { file: projected, state, issues, mainOwnsContextWindow: false };
+  }
   const library = normalizeModelProfiles(file.modelProfiles);
   projected.modelProfiles = library;
   for (const role of ['main', 'fast'] as const) {
@@ -28,11 +38,18 @@ export function projectModelProfiles(file: Partial<PersistedConfig>): ProfilePro
     state[role] = { selectedId: entry.id, appliedId: entry.id,
       overriddenFields: [], invalid: false };
     const connection = { provider: entry.provider, model: entry.model, baseUrl: entry.baseUrl };
-    if (role === 'main') Object.assign(projected, connection);
-    else projected.fast = { ...DEFAULT_CONFIG.fast, ...file.fast, ...connection,
-      baseUrl: entry.baseUrl ?? '' };
+    if (role === 'main') {
+      // The profile owns the denominator: project BOTH a number and null
+      // (null = AUTO), so "profile set auto" stays distinguishable from
+      // "no profile bound" (profile-context-window tradeoff B).
+      Object.assign(projected, connection, { contextWindow: entry.contextWindow });
+    } else {
+      projected.fast = { ...DEFAULT_CONFIG.fast, ...file.fast, ...connection,
+        baseUrl: entry.baseUrl ?? '' };
+    }
   }
-  return { file: projected, state, issues };
+  return { file: projected, state, issues,
+    mainOwnsContextWindow: state.main.appliedId !== null };
 }
 /** Derive binding status from current connections, including session/model overrides. */
 export function resolveModelProfileState(

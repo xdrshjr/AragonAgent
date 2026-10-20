@@ -32,7 +32,10 @@ function New-ReleaseFixture(
   [string]$CliVersion = '0.2.0',
   [string]$CoreRange = '^0.1.0',
   [string[]]$PublishedCore = @(),
-  [string[]]$PublishedCli = @()
+  [string[]]$PublishedCli = @(),
+  # The negative case for Assert-TestRuntimePinned: the installed tree disagrees with
+  # the manifests, which is what a drifted `npm install` used to produce silently.
+  [string]$InstalledVitestVersion = '4.1.9'
 ) {
   $base = Join-Path ([IO.Path]::GetTempPath()) ("aragon release test " + [guid]::NewGuid().ToString('N'))
   $repo = Join-Path $base 'repo'
@@ -48,12 +51,27 @@ function New-ReleaseFixture(
   Write-Json (Join-Path $repo 'packages\core\package.json') ([ordered]@{
     name = '@aragon-agent/core'
     version = $CoreVersion
+    devDependencies = [ordered]@{ vitest = '4.1.9' }
   })
   Write-Json (Join-Path $repo 'packages\cli\package.json') ([ordered]@{
     name = '@aragon-agent/cli'
     version = $CliVersion
     bin = [ordered]@{ aragon = './dist/launcher.js' }
     dependencies = [ordered]@{ '@aragon-agent/core' = $CoreRange }
+    devDependencies = [ordered]@{ vitest = '4.1.9' }
+  })
+  # Assert-TestRuntimePinned reads the INSTALLED tree, so the fixture has to have one.
+  # Without these two files the release would abort inside the version gate and every
+  # scenario below would fail for the wrong reason.
+  New-Item -ItemType Directory -Force -Path (Join-Path $repo 'node_modules\vitest') | Out-Null
+  New-Item -ItemType Directory -Force -Path (Join-Path $repo 'node_modules\vite') | Out-Null
+  Write-Json (Join-Path $repo 'node_modules\vitest\package.json') ([ordered]@{
+    name = 'vitest'
+    version = $InstalledVitestVersion
+  })
+  Write-Json (Join-Path $repo 'node_modules\vite\package.json') ([ordered]@{
+    name = 'vite'
+    version = '8.0.16'
   })
   Write-Json (Join-Path $repo 'package-lock.json') ([ordered]@{
     name = 'release-fixture'
@@ -94,7 +112,12 @@ function Invoke-ReleaseFixture(
   [switch]$Unauthenticated,
   [switch]$ScopeMissing,
   [switch]$OmitCliRuntime,
-  [string]$FailTestWorkspace = ''
+  [string]$FailTestWorkspace = '',
+  # `environment` makes `verify:test-gate --classify` answer 0, which is the only way
+  # the single retry is allowed to happen.
+  [string]$Classify = '',
+  # Fail the first `npm test` for $FailTestWorkspace and pass the second.
+  [switch]$FailTestOnce
 ) {
   $previousLog = $env:ARAGON_FAKE_NPM_LOG
   $previousState = $env:ARAGON_FAKE_NPM_STATE
@@ -102,7 +125,16 @@ function Invoke-ReleaseFixture(
   $previousScopeMissing = $env:ARAGON_FAKE_NPM_SCOPE_MISSING
   $previousOmitCliRuntime = $env:ARAGON_FAKE_NPM_OMIT_CLI_RUNTIME
   $previousFailTestWorkspace = $env:ARAGON_FAKE_NPM_FAIL_TEST_WORKSPACE
+  $previousClassify = $env:ARAGON_FAKE_NPM_CLASSIFY
+  $previousFailOnce = $env:ARAGON_FAKE_NPM_FAIL_TEST_ONCE
   try {
+    $env:ARAGON_FAKE_NPM_CLASSIFY = $Classify
+    $env:ARAGON_FAKE_NPM_FAIL_TEST_ONCE = if ($FailTestOnce) { '1' } else { $null }
+    if ($FailTestOnce) {
+      $state = Read-Json $Fixture.State
+      $state | Add-Member -NotePropertyName 'failTestOnce' -NotePropertyValue 1 -Force
+      Write-Json $Fixture.State $state
+    }
     $env:ARAGON_FAKE_NPM_LOG = $Fixture.Log
     $env:ARAGON_FAKE_NPM_STATE = $Fixture.State
     $env:ARAGON_FAKE_NPM_UNAUTHENTICATED = if ($Unauthenticated) { '1' } else { $null }
@@ -123,6 +155,8 @@ function Invoke-ReleaseFixture(
     $env:ARAGON_FAKE_NPM_SCOPE_MISSING = $previousScopeMissing
     $env:ARAGON_FAKE_NPM_OMIT_CLI_RUNTIME = $previousOmitCliRuntime
     $env:ARAGON_FAKE_NPM_FAIL_TEST_WORKSPACE = $previousFailTestWorkspace
+    $env:ARAGON_FAKE_NPM_CLASSIFY = $previousClassify
+    $env:ARAGON_FAKE_NPM_FAIL_TEST_ONCE = $previousFailOnce
   }
 }
 
@@ -281,6 +315,19 @@ function Assert-Command($Commands, [string]$Expected) {
   Assert-True ($Commands -contains $Expected) "missing npm command '$Expected'; got: $($Commands -join ' | ')"
 }
 
+# npm swallows `--classify` unless it follows a `--` separator, and the gate then runs its
+# version/environment checks and exits 0 - which the release reads as "the failure was the
+# environment" and retries a REAL failure (I-13). The stripped `args` cannot show the
+# separator, so the fixture log records `rawArgs` too and this asserts it here.
+function Assert-ClassifyUsage($Fixture) {
+  $classifyRecords = @(Get-LoggedRecords $Fixture |
+    Where-Object { ($_.args -join ' ') -like 'run verify:test-gate --classify *' })
+  Assert-True ($classifyRecords.Count -gt 0) 'the failure was never attributed'
+  foreach ($record in $classifyRecords) {
+    Assert-True (@($record.rawArgs) -contains '--') 'the classify call dropped the npm `--` separator, so npm ate the flag'
+  }
+}
+
 if (-not (Test-Path -LiteralPath $releaseScript)) {
   throw "Release script does not exist: $releaseScript"
 }
@@ -303,10 +350,25 @@ try {
   Assert-Command $patchCommands 'version patch -w packages/cli --no-git-tag-version --no-workspaces-update'
   Assert-Command $patchCommands 'pkg set dependencies.@aragon-agent/core=^0.1.1 -w packages/cli'
   Assert-Command $patchCommands 'install --package-lock-only --ignore-scripts'
-  Assert-Command $patchCommands 'install --include=dev --ignore-scripts'
+  # A-1: the tree is installed from the lockfile, and installed BEFORE any gate runs.
+  # `install --include=dev` is gone from the bump step precisely because it re-resolves
+  # the versions the pin exists to freeze.
+  Assert-Command $patchCommands 'ci --include=dev --ignore-scripts'
+  # The install is the release's only unguarded network edge, so npm's retry budget is
+  # raised for every child rather than spelled on one command line. A reset that used to
+  # fail the whole run now costs a retry before any gate has spoken.
+  foreach ($record in (Get-LoggedRecords $patchFixture)) {
+    $command = $record.args -join ' '
+    Assert-Equal '5' $record.fetchRetries "'$command' lost the release fetch-retry budget"
+    Assert-Equal '600000' $record.fetchTimeout "'$command' lost the release fetch timeout"
+  }
+  Assert-True (-not ($patchCommands -contains 'install --include=dev --ignore-scripts')) 'the bump step re-resolved the pinned tree'
   Assert-Command $patchCommands 'test -w packages/cli'
   Assert-Command $patchCommands 'test -w packages/core'
   Assert-Command $patchCommands 'run build'
+  Assert-Command $patchCommands 'run verify:test-gate'
+  Assert-True ([array]::IndexOf($patchCommands, 'ci --include=dev --ignore-scripts') -lt [array]::IndexOf($patchCommands, 'run build')) 'the lockfile install must precede the first build'
+  Assert-True ([array]::IndexOf($patchCommands, 'run verify:test-gate') -lt [array]::IndexOf($patchCommands, 'test -w packages/cli')) 'the test gate must run before the tests it describes'
   Assert-True ([array]::IndexOf($patchCommands, 'run build') -lt [array]::IndexOf($patchCommands, 'test -w packages/cli')) 'release must build before tests inspect dist'
   Assert-True ([array]::IndexOf($patchCommands, 'test -w packages/cli') -lt [array]::IndexOf($patchCommands, 'test -w packages/core')) 'release must check each workspace separately in order'
   Assert-Command $patchCommands 'run verify:dist -w packages/core'
@@ -331,11 +393,46 @@ try {
     $testFailureText = ($testFailureResult.Output | ForEach-Object { $_.ToString() }) -join "`n"
     Assert-True ($testFailureText.Contains("npm command failed (1): npm test -w $workspace")) 'error did not identify the failing workspace'
     $testFailureCommands = Get-LoggedCommands $testFailureFixture
-    Assert-Equal "test -w $workspace" $testFailureCommands[-1] 'release continued after a workspace test failure'
+    # The failing run is followed by the attribution call, so "the last command is the
+    # test" is no longer the right shape; what must hold is that the LAST test command
+    # is the failing workspace and that it was not retried (a real failure is never
+    # retried, I-13).
+    $testCommands = @($testFailureCommands | Where-Object { $_ -like 'test -w *' })
+    Assert-Equal "test -w $workspace" $testCommands[-1] 'release continued past a workspace test failure'
+    Assert-Equal 1 @($testCommands | Where-Object { $_ -eq "test -w $workspace" }).Count 'a real failure was retried'
+    # Only the CLI workspace goes through the capturing path (its suite is the one that
+    # hit the mirror race); Core keeps the plain throwing call.
+    if ($workspace -eq 'packages/cli') {
+      Assert-True (@($testFailureCommands | Where-Object { $_ -like 'run verify:test-gate --classify *' }).Count -eq 1) 'the failure was not attributed before the release stopped'
+      Assert-ClassifyUsage $testFailureFixture
+    }
     foreach ($path in $versionHashes.Keys) {
       Assert-Equal $versionHashes[$path] (Get-FileHash -LiteralPath (Join-Path $testFailureFixture.Repo $path)).Hash "test failure did not restore $path exactly"
     }
   }
+
+  Write-Host '[release-test] an environment-classified failure is retried exactly once'
+  $retryFixture = New-ReleaseFixture
+  $fixtures += $retryFixture
+  $retryResult = Invoke-ReleaseFixture $retryFixture @('-NpmCommand', $fakeNpm) `
+    -FailTestWorkspace 'packages/cli' -Classify 'environment' -FailTestOnce
+  Assert-Equal 0 $retryResult.ExitCode ($retryResult.Output -join [Environment]::NewLine)
+  $retryCommands = Get-LoggedCommands $retryFixture
+  Assert-Equal 2 @($retryCommands | Where-Object { $_ -eq 'test -w packages/cli' }).Count 'the mirror race must be retried exactly once'
+  # The retry is not a fix: it only follows a positive attribution.
+  Assert-True (@($retryCommands | Where-Object { $_ -like 'run verify:test-gate --classify *' }).Count -eq 1) 'the retry did not follow an attribution'
+  Assert-ClassifyUsage $retryFixture
+  Assert-True (($retryResult.Output -join "`n") -match 'environment failure') 'the retry was not explained'
+
+  Write-Host '[release-test] a drifted test runtime aborts the release'
+  $driftFixture = New-ReleaseFixture -InstalledVitestVersion '4.2.0'
+  $fixtures += $driftFixture
+  $driftResult = Invoke-ReleaseFixture $driftFixture @('-DryRun', '-NpmCommand', $fakeNpm)
+  Assert-True ($driftResult.ExitCode -ne 0) 'release accepted a test runtime that disagrees with the manifests'
+  $driftText = ($driftResult.Output | ForEach-Object { $_.ToString() }) -join "`n"
+  Assert-True ($driftText -match 'Test runtime versions disagree') 'the version gate did not name the disagreement'
+  Assert-True ($driftText -match '4\.2\.0' -and $driftText -match '4\.1\.9') 'the version gate did not print the three versions'
+  Assert-Equal '0.1.0' (Read-Json (Join-Path $driftFixture.Repo 'packages\core\package.json')).version 'version files were not restored after the version gate failed'
 
   Write-Host '[release-test] minor dry-run'
   $minorFixture = New-ReleaseFixture
@@ -485,12 +582,20 @@ try {
   $successPreload = (Resolve-Path (Join-Path $successFixture.Repo 'packages\cli\runtime\insecure-tls-warning.cjs')).Path.Replace('\', '/')
   $successInitialNodeOptions = '--trace-warnings'
   $successExpectedPreload = "--require `"$successPreload`""
+  # The defaults live in the environment, so failing to remove them leaks into the caller's
+  # next command. Asserted only when the caller did not set the variable itself: a
+  # caller-supplied value is deliberately preserved, not overwritten and restored.
+  $resiliencePreExisting = Test-Path Env:NPM_CONFIG_FETCH_RETRIES
   $successCall = Invoke-ReleaseFixtureInProcess $successFixture 'resume' $successInitialNodeOptions
   Assert-Equal 0 $successCall.ExitCode ($successCall.Output -join [Environment]::NewLine)
   Assert-True ($null -ne $successCall.Record) 'same-process success helper did not return control to its caller'
   Assert-True (-not $successCall.Record.threw) $successCall.Record.error
   Assert-True $successCall.Record.nodeOptionsPresent 'successful release removed the caller NODE_OPTIONS'
   Assert-Equal $successInitialNodeOptions $successCall.Record.nodeOptions 'successful release did not preserve exact NODE_OPTIONS'
+  if (-not $resiliencePreExisting) {
+    Assert-True (-not (Test-Path Env:NPM_CONFIG_FETCH_RETRIES)) `
+      'the release leaked its npm fetch-retry defaults into the caller process'
+  }
   foreach ($record in (Get-LoggedRecords $successFixture)) {
     $successChildOptions = [string]$record.nodeOptions
     Assert-True ($successChildOptions.Contains($successInitialNodeOptions)) 'success child lost the caller NODE_OPTIONS'

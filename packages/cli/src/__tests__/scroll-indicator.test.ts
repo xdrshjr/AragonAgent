@@ -1,5 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import { thumbRange } from '../ui/layout/scroll-indicator.js';
+import { createElement } from 'react';
+import { render } from 'ink-testing-library';
+import { ScrollIndicator } from '../ui/layout/ScrollIndicator.js';
+import { getTheme } from '../ui/theme.js';
+import { pickGlyphs } from '../ui/glyphs.js';
+
+const CAPS = { colorLevel: 3 as const, unicode: true };
+const THEME = getTheme('cool', CAPS);
+
+/** One rendered frame of a `rows`-row rail carrying the given thumb. */
+function railFrame(rows: number, thumb: ReturnType<typeof thumbRange>): string {
+  const { lastFrame, unmount } = render(
+    createElement(ScrollIndicator, { rows, thumb, theme: THEME, caps: CAPS }),
+  );
+  const frame = lastFrame() ?? '';
+  unmount();
+  return frame;
+}
+
+function drawnLines(frame: string): string[] {
+  return frame.split('\n').filter((line) => line.trim() !== '');
+}
 
 describe('thumbRange', () => {
   it('returns null when the content fits', () => {
@@ -64,6 +86,28 @@ describe('thumbRange', () => {
   });
 });
 
+
+describe('ScrollIndicator rendering (defect 6)', () => {
+  // The rail used to push one track cell per row even when `thumb === null`, so an
+  // EMPTY transcript still drew a full-height column of track glyphs. The column
+  // itself must stay reserved (the feedback loop at the top of the component), but
+  // there is no position to mark when the content fits.
+  it('draws no track cells when the content fits', () => {
+    const glyphs = pickGlyphs(CAPS);
+    const frame = railFrame(10, null);
+    expect(frame).not.toContain(glyphs.scrollTrack);
+    expect(frame).not.toContain(glyphs.scrollThumb);
+    expect(drawnLines(frame)).toHaveLength(0);
+  });
+
+  it('still draws a full-height track and the thumb when the content overflows', () => {
+    const glyphs = pickGlyphs(CAPS);
+    const frame = railFrame(10, { start: 8, size: 2 });
+    expect(drawnLines(frame)).toHaveLength(10);
+    expect(drawnLines(frame).filter((line) => line.includes(glyphs.scrollTrack))).toHaveLength(8);
+    expect(drawnLines(frame).filter((line) => line.includes(glyphs.scrollThumb))).toHaveLength(2);
+  });
+});
 
 describe('draggable thumb geometry', () => {
   it('retains both endpoints at the one-row overflow boundary', () => {

@@ -41,9 +41,11 @@ import {
 } from './mouse-events.js';
 import {
   ENTER_NEWLINE_FRAME,
+  INDEX_KEY_FRAME,
   PASTE_ASSEMBLY_MAX_MS,
   PASTE_BURST_MS,
   PASTE_CLOSE,
+  PASTE_MARKER_RESCAN_TTL_MS,
   PASTE_MAX_BYTES,
   PASTE_OPEN,
   formatPasteSize,
@@ -53,9 +55,12 @@ import {
   PASTE_BEGIN_MARK,
   PASTE_END_MARK,
   classifyChunk,
+  isPastePrefix,
   sanitisePaste,
   trailingPastePrefixLength,
 } from './paste-parse.js';
+import { hasPasteOnlySequence } from './control-sequences.js';
+import { splitCursorReports, trailingCprPrefixLength } from './cursor-report.js';
 import { splitEnterSequences, trailingEnterPrefixLength } from './enter-sequences.js';
 import { splitCsiUKeys, trailingCsiUPrefixLength, translateCsiUKey } from './csiu-keys.js';
 import {
@@ -101,12 +106,34 @@ export interface StdinFilterFeatures {
    * translates for a session whose mode push actually happened.
    */
   readonly enhancedKeys?: boolean;
+  /**
+   * Strip the Cursor Position Report a terminal sends back for `ESC[6n`
+   * (tui-bottom-anchored-live-region §4.5).
+   *
+   * TOLD, never derived, like the three above: `cli.tsx` passes
+   * `plan.differ === 'scrollback'`, so an `app`-mode session stays byte-identical to
+   * the build without this feature (I-A8). The report MUST NOT reach Ink -- `[` is
+   * 0x5B, so `PromptInput`'s control-sequence guard passes it and the reply gets
+   * typed into the draft -- and a report split across two reads is worse than a
+   * whole one, because `parse-keypress` has no branch for a half sequence.
+   */
+  readonly cursorReport?: boolean;
 }
 
 export interface StdinFilter {
   /** Hand this to Ink: `render(<App/>, { stdin: filter.stdin })`. */
   readonly stdin: NodeJS.ReadStream;
   readonly source: MouseSource;
+  /**
+   * The probe is waiting for an answer: hold a possible report prefix until it
+   * settles instead of flushing it after `PENDING_FLUSH_MS`.
+   *
+   * ConPTY can split `ESC[12;1R` across two reads further apart than 12 ms, and a
+   * half report that reaches Ink lands on an undefined branch of its key parser.
+   * Turning this off flushes whatever is still held as ordinary text -- the
+   * correct degradation for a terminal that answered with something else (R3).
+   */
+  setExpectingCursorReport(on: boolean): void;
   /** Idempotent. Detaches from the real stdin and clears every timer (I-7). */
   dispose(): void;
 }
@@ -186,8 +213,32 @@ export function createStdinFilter(
   let disposed = false;
   let finished = false;
   let paste: PasteState = { kind: 'idle' };
+  /**
+   * The probe window (R3). While true a possible report prefix is held until the
+   * probe settles instead of being flushed after `PENDING_FLUSH_MS`, because a
+   * half `ESC[12` reaching Ink hits an undefined branch of its key parser.
+   */
+  let expectingCursorReport = false;
   let discardBracketed = false;
   let outputBatch: { chunks: string[]; refused: boolean } | null = null;
+
+  /**
+   * A marker head that has ALREADY been released to Ink, kept for one more
+   * chunk (defect 2: the torn-marker rescue in `onData`).
+   *
+   * WHY IT EXISTS. `flushPending` releases a lone ESC after 12 ms because the
+   * Esc key must not be held hostage. When the split point lands inside a paste
+   * marker -- `ESC` in one read and `[200~hello` in the next, which is ordinary
+   * for a Windows console, SSH or tmux under load -- `feed` can no longer find
+   * the marker and `[200~` is typed into the draft. Nothing downstream can undo
+   * that: the marker has to be recognised BEFORE its bytes become text.
+   *
+   * WHAT IT CANNOT DO, STATED HONESTLY. The released ESC has already reached Ink
+   * as an Esc key press and this filter cannot retract a write. The rescue
+   * guarantees the marker CHARACTERS never become draft text; it does NOT undo
+   * that keypress (an armed interrupt gesture, a dismissed popup).
+   */
+  let rescuedPrefix: { text: string; at: number } | null = null;
 
   const writeInput = (text: string): void => {
     if (disposed || outputBatch?.refused) return;
@@ -297,8 +348,8 @@ export function createStdinFilter(
   // -----------------------------------------------------------------------
 
   /**
-   * Text that reached the pass-through: Tier 2 classification, then mouse
-   * stripping, then Ink.
+   * Text that reached the pass-through: a sequence a KEYBOARD cannot produce
+   * first (R-2), then Tier 2 classification, then mouse stripping, then Ink.
    *
    * MOUSE PARSING IS SUSPENDED FOR THE DURATION OF ANY PASTE BODY (I-3), burst
    * and bracketed alike. The Tier 2 population is precisely the terminals with
@@ -317,11 +368,47 @@ export function createStdinFilter(
       return;
     }
 
+    // A SEQUENCE A KEYBOARD CANNOT PRODUCE IS A PASTE, FRAMED OR NOT (R-2).
+    //
+    // WHY THE CLASSIFIER BELOW IS NOT ENOUGH. `classifyChunk` needs either a
+    // line break or a chunk with no control byte but TAB, and a SINGLE-LINE
+    // paste carrying ESC satisfies neither -- so it travels the keystroke path
+    // with `sanitisePaste` never called. Measured on the real component that
+    // cost either a draft holding `[38;2;18;52;86m` ALONGSIDE A LIVE ESC (which
+    // then reached the model, the history and the session file) or an uncaught
+    // `TypeError` in Ink's parser, because `parse-keypress.js` maps `ESC [ 3 2 m`
+    // to a ctrl key whose `name` is undefined. Framing it here routes it through
+    // the ONE cleaning path every other paste already takes.
+    if (features.paste && hasPasteOnlySequence(text)) {
+      paste = { kind: 'burst', body: text, bytes: byteLength(text) };
+      burstTimer = clearTimer(burstTimer);
+      burstTimer = arm(flushBurst, PASTE_BURST_MS);
+      return;
+    }
+
     if (features.paste && classifyChunk(text) === 'paste') {
       paste = { kind: 'burst', body: text, bytes: byteLength(text) };
       burstTimer = clearTimer(burstTimer);
       burstTimer = arm(flushBurst, PASTE_BURST_MS);
       return;
+    }
+
+    // FOURTH PREFIX FAMILY: the terminal's answer to `ESC[6n`
+    // (tui-bottom-anchored-live-region §4.5). AFTER the paste tests, and that order
+    // is the specification: a user who pastes a terminal log containing `ESC[12;1R`
+    // is pasting DATA, and a paste body is the one place such a sequence is kept
+    // verbatim (I-3, the same rule that suspends mouse parsing inside a body).
+    if (features.cursorReport) {
+      const report = splitCursorReports(text);
+      text = report.text;
+      if (report.pending.length > 0) {
+        // Not text yet: it joins the cross-chunk buffer the mouse family uses.
+        // `holdTail` false means a paste marker follows in this very chunk, so no
+        // later byte can complete the prefix and holding it would reorder it (I-5).
+        if (holdTail) pending += report.pending;
+        else writeInput(report.pending);
+      }
+      if (text.length === 0) return;
     }
 
     // Ink conflates DEL Backspace with CSI Delete. Normalize only keyboard
@@ -390,13 +477,43 @@ export function createStdinFilter(
     }
   };
 
+  /**
+   * win32-input-mode records that arrived INSIDE a paste frame (R-4).
+   *
+   * DATA FIDELITY, NOT POLISH. Every character of a `?9001h` session arrives as
+   * `ESC [ vk ; sc ; char ; down ; mods ; rep _`, and once the frame opens
+   * nothing translated them: `sanitisePaste` then removed each record's ESC and
+   * left 15 visible characters of digits per key. Translating them is also what
+   * keeps the fix honest in the OTHER direction -- a whole-sequence stripper
+   * deletes such a record outright, so "clean" would have meant the user's
+   * characters silently vanishing. A record carrying a key FRAME (modified
+   * Enter, Ctrl+I) becomes the byte that frame stands for, because a frame
+   * inside a body is content and never a key.
+   */
+  const translateInPaste = (text: string): string => {
+    if (!enhancedKeys || !text.includes('\x1b[')) return text;
+    let out = '';
+    for (const segment of splitWin32KeySequences(text)) {
+      if (segment.kind === 'text') {
+        out += segment.text;
+        continue;
+      }
+      const legacy = translateWin32Key(segment.record);
+      if (legacy === ENTER_NEWLINE_FRAME) out += '\n';
+      else if (legacy === INDEX_KEY_FRAME) out += '\t';
+      else out += legacy;
+    }
+    return out;
+  };
+
   const appendBracketed = (text: string): void => {
     if (paste.kind !== 'bracketed' || text.length === 0 || discardBracketed) return;
-    const bytes = paste.bytes + byteLength(text);
+    const body = translateInPaste(text);
+    const bytes = paste.bytes + byteLength(body);
     const overflow = paste.overflow || bytes > PASTE_MAX_BYTES;
     paste = {
       kind: 'bracketed',
-      body: overflow ? paste.body : paste.body + text,
+      body: overflow ? paste.body : paste.body + body,
       bytes,
       overflow,
     };
@@ -442,6 +559,7 @@ export function createStdinFilter(
         const keep = Math.max(
           trailingPastePrefixLength(rest),
           features.mouse ? trailingMousePrefixLength(rest) : 0,
+          features.cursorReport ? trailingCprPrefixLength(rest) : 0,
           trailingEnterPrefixLength(rest),
           enhancedKeys ? trailingWin32PrefixLength(rest) : 0,
           enhancedKeys ? trailingCsiUPrefixLength(rest) : 0,
@@ -467,27 +585,77 @@ export function createStdinFilter(
     }
   };
 
+  /**
+   * Hand a held tail to the ordinary text path, remembering it when it could
+   * still be the head of a paste marker.
+   *
+   * THE TAIL IS RELEASED EXACTLY AS BEFORE. Remembering it costs no latency: a
+   * real Esc keypress still reaches Ink after `PENDING_FLUSH_MS`, and the
+   * remembered head is only ever consulted for the NEXT chunk.
+   */
+  const flushTailAsText = (text: string): void => {
+    rescuedPrefix = isPastePrefix(text) ? { text, at: Date.now() } : null;
+    handleOutsidePaste(text, false);
+  };
+
   const flushPending = (): void => {
     flushTimer = clearTimer(flushTimer);
     if (pending.length === 0 || disposed) return;
+    // The probe owes us an answer: releasing a half report now would type it into
+    // the draft. `setExpectingCursorReport(false)` flushes whatever is left.
+    if (expectingCursorReport) return;
     const text = pending;
     pending = '';
     // A tail that never completed is ordinary text; it goes through the same
     // scan so a burst already open keeps coalescing it.
-    handleOutsidePaste(text, false);
+    flushTailAsText(text);
+  };
+
+  /**
+   * One-shot rescue of a marker whose ESC was already flushed as text.
+   *
+   * Returns the string `feed` should scan -- the remembered head followed by
+   * this chunk -- when the chunk COMPLETES that head into a whole marker, and
+   * `null` otherwise. On `null` the chunk travels the normal path: the head has
+   * already been emitted, so re-feeding it would type its bytes twice, and
+   * holding the chunk instead would swallow characters the user really typed.
+   *
+   * STARTS WITH, NOT CONTAINS. A marker completed at the junction starts at
+   * index 0 of the joined text; one starting anywhere later lies wholly inside
+   * `chunk` (the head holds an ESC at index 0 and nothing else that could begin
+   * a marker), and `feed` finds that on its own. Only the junction case needs
+   * re-scanning, and it is the only case where prepending cannot duplicate a
+   * byte that Ink has already seen.
+   *
+   * ONE-SHOT BY CONSTRUCTION: the remembered head is cleared here on every call,
+   * whether or not the rescue fired, so at most one chunk is ever re-scanned
+   * against it and no stale head can outlive its `PASTE_MARKER_RESCAN_TTL_MS`.
+   */
+  const takeRescuedPrefix = (carried: string, chunk: string): string | null => {
+    const rescue = rescuedPrefix;
+    rescuedPrefix = null;
+    if (rescue === null || carried.length > 0 || !features.paste) return null;
+    if (Date.now() - rescue.at > PASTE_MARKER_RESCAN_TTL_MS) return null;
+    const joined = rescue.text + chunk;
+    const completes =
+      joined.startsWith(PASTE_BEGIN_MARK) || joined.startsWith(PASTE_END_MARK);
+    return completes ? joined : null;
   };
 
   const onData = (chunk: string | Buffer): void => {
     if (disposed || finished) return;
     flushTimer = clearTimer(flushTimer);
     const decoded = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+    // Stripped on BOTH paths, because a NUL in a payload must never be able to
+    // forge a `PASTE_OPEN` frame boundary.
+    const cleaned = decoded.replace(/\u0000/g, '');
     const carried = pending;
     pending = '';
     // A rejected paste must not leave earlier text or a later Enter executable.
     const batch = { chunks: [] as string[], refused: false };
     outputBatch = batch;
     try {
-      feed(carried + decoded.replace(/\u0000/g, ''));
+      feed(takeRescuedPrefix(carried, cleaned) ?? (carried + cleaned));
     } finally {
       outputBatch = null;
     }
@@ -507,12 +675,15 @@ export function createStdinFilter(
     if (disposed || finished) return;
     for (const text of batch.chunks) wrapper.write(text);
     if (paste.kind === 'bracketed' || pending.length === 0) return;
-    if (pending.length > MAX_PENDING_CHARS) {
+    if (pending.length > MAX_PENDING_CHARS && !expectingCursorReport) {
       // A malformed sequence that looks like a prefix forever must never wedge
-      // input: past the ceiling the tail becomes ordinary text.
+      // input: past the ceiling the tail becomes ordinary text. NOT DURING THE
+      // PROBE WINDOW THOUGH (L8): there the ceiling could push half a report into
+      // Ink, which is the failure this whole family exists to prevent. The window
+      // is bounded by the probe timeout, after which the ceiling applies again.
       const text = pending;
       pending = '';
-      handleOutsidePaste(text, false);
+      flushTailAsText(text);
       return;
     }
     flushTimer = arm(flushPending, PENDING_FLUSH_MS);
@@ -555,6 +726,15 @@ export function createStdinFilter(
         listeners.add(listener);
         return () => listeners.delete(listener);
       },
+    },
+    setExpectingCursorReport(on: boolean): void {
+      if (expectingCursorReport === on) return;
+      expectingCursorReport = on;
+      if (on || disposed) return;
+      // Settled: nothing that is still held was a report. Release it as text, so a
+      // probe that never got an answer costs its own timeout and not a dead keyboard.
+      flushTimer = clearTimer(flushTimer);
+      flushPending();
     },
     dispose(): void {
       if (disposed) return;

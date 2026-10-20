@@ -305,6 +305,60 @@ describe('the child overlay (§3.4.2 / test 27)', () => {
   });
 });
 
+describe('req-level key resolvers (subagent-model V-4, matrix 23/24)', () => {
+  it('23. req-level hasKey/getApiKey let the summarizer see a key the lead layer cannot', async () => {
+    // The gap: a `team.model: fast/profile` child whose only key lives in a
+    // role the LEAD resolver never consults. The lead layer here sees NO key
+    // at all; only the req-level pair (the same closures `subagent.ts` hands
+    // the child's own `Agent`) can see one.
+    const history = conversation(8);
+    const calls: string[] = [];
+    const { deps } = childHarness(() => baseConfig(), () => history);
+    const manager = createChildContextManager({
+      label: 'profiled', model: CHILD_REF, role: 'main',
+      getApiKey: (id) => { calls.push(`get:${id}`); return 'entry-key'; },
+      hasKey: () => true,
+      getMessages: () => history, getSystemPrompt: () => 'child sys',
+      onCompacted: () => {},
+    }, { ...deps, hasKey: () => false, getApiKey: () => undefined });
+
+    const result = await manager.compact(ctx(history));
+    // The summarizer resolved THROUGH the req-level pair: a real replace
+    // happened instead of `no_summarizer_model`.
+    expect(result.action).toBe('replace');
+    expect(calls.length).toBeGreaterThan(0);
+  });
+
+  it('23b. the fast-role variant: role fast plus a req-level pair resolves where deps cannot', async () => {
+    const history = conversation(8);
+    const { deps } = childHarness(() => baseConfig(), () => history);
+    const manager = createChildContextManager({
+      label: 'fastchild', model: CHILD_REF, role: 'fast',
+      getApiKey: () => 'fast-role-key', hasKey: () => true,
+      getMessages: () => history, getSystemPrompt: () => 'child sys',
+      onCompacted: () => {},
+    }, { ...deps, hasKey: () => false, getApiKey: () => undefined });
+
+    expect((await manager.compact(ctx(history))).action).toBe('replace');
+  });
+
+  it('24. without req-level resolvers the behavior is exactly today\'s', async () => {
+    const history = conversation(8);
+    // The lead layer sees a key: today's default path, byte for byte.
+    const keyed = childHarness(() => baseConfig(), () => history);
+    expect((await keyed.manager.compact(ctx(history))).action).toBe('replace');
+    // And the failure mode is the SAME failure mode there has always been -
+    // a keyless lead layer declines with no_summarizer_model, nothing new.
+    const { deps } = childHarness(() => baseConfig(), () => history);
+    const keyless = createChildContextManager({ label: 'plain', model: CHILD_REF,
+      getMessages: () => history, getSystemPrompt: () => 'child sys',
+      onCompacted: () => {} }, { ...deps, hasKey: () => false });
+    const outcome = await keyless.compact(ctx(history));
+    expect(outcome.action).toBe('keep');
+    expect(outcome.reason).toBe('no_summarizer_model');
+  });
+});
+
 describe('the child accessors are lazy (§3.4.3 / test 26 / RV-1)', () => {
   it('reads state.messages through a closure, so construction sees []', () => {
     let live: Message[] = [];

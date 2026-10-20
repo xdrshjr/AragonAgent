@@ -47,6 +47,27 @@ export const PASTE_BURST_MS = 15;
 export const PASTE_ASSEMBLY_MAX_MS = 2_000;
 
 /**
+ * How long a paste-marker head that was ALREADY released to the pass-through as
+ * ordinary text may still be recognised as the head of a marker (defect 2: the
+ * torn-marker rescue in `stdin-filter.ts`).
+ *
+ * STRUCTURAL, NOT POLICY: no config key exposes it, because it bounds what the
+ * byte stream can physically do -- a marker split across two reads -- and not
+ * what a user prefers. What it does NOT do is delay a keystroke: the 12 ms
+ * pending-flush window in `stdin-filter.ts` still releases a lone ESC exactly as
+ * before, and this window only governs whether that release may be spliced back
+ * in front of the next chunk so an assembled marker is consumed, not typed.
+ *
+ * THE FALSE POSITIVE IS THE TRADE-OFF, AND IT IS ACCEPTED. Firing the rescue
+ * wrongly needs the user to press Esc and then TYPE the literal characters
+ * `[200~` or `[201~` inside this window -- a sequence no keyboard produces, and
+ * at worst five characters of lost typing. Paying that buys a fix for visible
+ * `[200~` / `[201~` garbage in the draft, which is the failure the whole paste
+ * feature exists to prevent.
+ */
+export const PASTE_MARKER_RESCAN_TTL_MS = 250;
+
+/**
  * The inline frame the filter writes into the stream Ink reads (D-3 / I-5).
  *
  * ON THE SAME STREAM, NOT A SIDE CHANNEL. `wrapper.write(text)` is delivered

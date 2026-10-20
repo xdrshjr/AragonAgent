@@ -312,6 +312,37 @@ describe('A-1: no hardcoded non-ASCII outside glyphs.ts', () => {
     expect(inScope('diagnostics/doctor.ts')).toBe(true);
   });
 
+  it('AC-33: the long-task-jobs files all land inside the scanned trees (I-9)', () => {
+    // NO NEW TREE, so the regex in `inScope` above is UNCHANGED - which is the
+    // point: adding a tree and forgetting to name it there is this package's most
+    // repeated defect, so this feature deliberately adds files only to trees that
+    // are already scanned. This asserts that claim file by file, so a later move
+    // into a new directory fails here rather than silently escaping the scan.
+    for (const rel of [
+      'proc/progress.ts',
+      'proc/wait.ts',
+      'proc/notices.ts',
+      'proc/log-mirror.ts',
+      'tools/job-tools.ts',
+      'agent/job-notices.ts',
+    ]) {
+      expect(inScope(rel)).toBe(true);
+    }
+  });
+
+  it('AC-26: the native panel band files land inside the scanned trees', () => {
+    // `release-gate-and-native-panels` adds two files and NO tree, so the `inScope`
+    // regex above must not change - asserted here rather than claimed, because a tree
+    // that stops being scanned stops being guarded with nothing failing (this package
+    // has paid for that lesson once per feature).
+    for (const rel of [
+      'ui/scrollback/band.ts',
+      'ui/scrollback/LiveTail.tsx',
+    ]) {
+      expect(inScope(rel)).toBe(true);
+    }
+  });
+
   it('leaves no component hardcoding a Unicode box style', () => {
     // The static character scan cannot see this one: `borderStyle="round"` is
     // pure ASCII in the source and Unicode only once Ink resolves it through

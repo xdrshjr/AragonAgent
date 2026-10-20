@@ -108,6 +108,18 @@ export interface SystemPromptParams {
    * `bash_kill` would describe tools it does not have.
    */
   backgroundBlock?: string;
+  /**
+   * The rendered `<background_jobs>` block, or `''` (long-task-jobs §12 step 13).
+   *
+   * Spliced conditionally exactly as every block above is, which is what keeps
+   * I-3 true: `jobs.enabled: false` produces the pre-feature prompt BYTE FOR BYTE
+   * for a fixed tool array.
+   *
+   * A CHILD'S PROMPT NEVER CARRIES IT: subagents are built with no supervisor and
+   * no `job_*` tools, so the block's first sentence would describe a capability
+   * the child does not have.
+   */
+  jobsBlock?: string;
 }
 
 /** Describe the active shell so the model does not emit incompatible syntax. */
@@ -150,6 +162,7 @@ export function buildSystemPrompt(params: SystemPromptParams): string {
   const todoBlock = params.todoBlock ?? '';
   const fastBlock = params.fastBlock ?? '';
   const backgroundBlock = params.backgroundBlock ?? '';
+  const jobsBlock = params.jobsBlock ?? '';
   const appended = (params.appendSystemPrompt ?? '').trim();
 
   return [
@@ -173,6 +186,7 @@ export function buildSystemPrompt(params: SystemPromptParams): string {
     ...(todoBlock ? ['', todoBlock] : []),
     ...(fastBlock ? ['', fastBlock] : []),
     ...(backgroundBlock ? ['', backgroundBlock] : []),
+    ...(jobsBlock ? ['', jobsBlock] : []),
     '',
     'Operating guidance:',
     '- Prefer reading files and inspecting the workspace before making changes.',

@@ -38,6 +38,27 @@ const SNAPSHOT: PerfSnapshot = {
 
   viewportRows: 44,
   offset: 0,
+  // No band in the full-screen layout: `/perf` prints `n/a` for it rather than a row
+  // of zeroes that would read like a panel which failed to show.
+  band: null,
+};
+
+/** The native fixture: a mounted band that owns the whole pool. */
+const NATIVE_BAND = {
+  reason: 'visible' as const,
+  bandRows: 24,
+  railRows: 24,
+  railCols: 18,
+  teamRows: 5,
+  previewRows: 19,
+  contentCols: 100,
+  previewCols: 82,
+  heldRailRows: 24,
+  heldTeamRows: 5,
+  windowStart: 14,
+  windowEntries: 10,
+  // The rows the top give-way printed for entries still inside the window.
+  headRows: 12,
 };
 
 interface Harness {
@@ -76,16 +97,17 @@ afterEach(() => {
 });
 
 describe('formatPerfReport', () => {
-  it('reports the six documented lines', () => {
+  it('reports the seven documented lines', () => {
     const report = formatPerfReport(SNAPSHOT);
     const lines = report.split('\n');
-    expect(lines).toHaveLength(6);
+    expect(lines).toHaveLength(7);
     expect(lines[0]).toContain('render');
     expect(lines[1]).toContain('transcript');
     expect(lines[2]).toContain('heights');
     expect(lines[3]).toContain('caches');
     expect(lines[4]).toContain('mode');
-    expect(lines[5]).toContain('writer');
+    expect(lines[5]).toContain('band');
+    expect(lines[6]).toContain('writer');
   });
 
   it('names the frame writer counters when the writer is attached', () => {
@@ -231,5 +253,94 @@ describe('the scrollbar line (T16)', () => {
       thumb: { start: 1, size: 4 }, edgeEl: 'skipped' });
     expect(readScrollbarPerf({ bridge: undefined, diffRender: true, unicode: true })).toBeUndefined();
     expect(readScrollbarPerf({ bridge, diffRender: false, unicode: true })!.edgeEl).toBe('n/a');
+  });
+});
+
+describe('formatPerfReport in native scroll mode', () => {
+  it('says the scrollbar is n/a and names the live region instead of a viewport', () => {
+    const report = formatPerfReport({ ...SNAPSHOT, mode: 'native', viewportRows: 29 });
+    expect(report).toContain('scrollbar  n/a (native scroll)');
+    expect(report).toContain('mode       native  -  live region 29 rows');
+    expect(report).not.toContain('offset');
+  });
+
+  it('names the canvas top, so "the app starts halfway down" is answerable (AC-F13)', async () => {
+    const { setScrollbackStatsProvider } = await import('../commands/perf.js');
+    setScrollbackStatsProvider(() => ({
+      regionRows: 29, framesSeed: 1, framesDiff: 0, framesFull: 0, staticRowsWritten: 0,
+      elidedEntries: 0, guardHits: 0, guardHitsOutsideResize: 0, clippedRows: 0, fallbacks: 0,
+      resizes: 0, repaints: 0, anchorSource: 'probe', anchorCanvasRows: 29, anchorHeldRows: 0,
+      anchorGapRows: 0, anchorTop: 0, anchorScrollRows: 0, anchorResets: 0, anchorReprobes: 0,
+    }));
+    try {
+      expect(formatPerfReport({ ...SNAPSHOT, mode: 'native', viewportRows: 29 }))
+        .toContain('top 0');
+    } finally {
+      setScrollbackStatsProvider(null);
+    }
+    // No writer attached: `n/a`, never a zero that reads like a healthy measurement.
+    expect(formatPerfReport({ ...SNAPSHOT, mode: 'native', viewportRows: 29 }))
+      .toContain('top n/a');
+  });
+
+  it('prints the scrollback writer counters when a provider is attached', async () => {
+    const { setScrollbackStatsProvider } = await import('../commands/perf.js');
+    setScrollbackStatsProvider(() => ({
+      regionRows: 29, framesSeed: 1, framesDiff: 40, framesFull: 3, staticRowsWritten: 120,
+      elidedEntries: 0, guardHits: 0, guardHitsOutsideResize: 0, clippedRows: 0, fallbacks: 0,
+      resizes: 2, repaints: 4,
+      anchorSource: 'probe', anchorCanvasRows: 29, anchorHeldRows: 0, anchorGapRows: 0,
+      anchorTop: 0, anchorScrollRows: 34, anchorResets: 2, anchorReprobes: 1,
+    }));
+    try {
+      const report = formatPerfReport({ ...SNAPSHOT, mode: 'native', viewportRows: 29 });
+      expect(report).toContain('scrollback region 29 rows');
+      expect(report).toContain('guardHits 0 (outside resize 0)');
+      expect(report).toContain('clippedRows 0');
+      // AC-B10: the canvas, the content inside it and the gap above it are three
+      // separate numbers, and the REGION is still reported next to them (P1-4).
+      expect(report).toContain('canvas 29 rows');
+      expect(report).toContain('content 0 rows');
+      expect(report).toContain('gap 0 rows');
+      expect(report).toContain('anchor bottom via probe');
+      expect(report).toContain('scrolled 34 rows');
+      expect(report).toContain('anchor resets 2');
+      expect(report).toContain('reprobes 1');
+    } finally {
+      setScrollbackStatsProvider(null);
+    }
+  });
+
+  it('is unchanged for full-screen snapshots: seven lines, no scrollback line', () => {
+    // Six content lines plus the `band:` line, which is `n/a` outside native mode.
+    expect(formatPerfReport(SNAPSHOT).split('\n')).toHaveLength(7);
+  });
+
+  it('names the band allocation and the reason a panel is missing (AC-27)', () => {
+    const report = formatPerfReport({ ...SNAPSHOT, mode: 'native', band: NATIVE_BAND });
+    expect(report).toContain('rail=24x18');
+    expect(report).toContain('team=5');
+    expect(report).toContain('tail=19');
+    // `pool` is the band's height, and in the full-height region it IS the pool (D5) -
+    // one number, not two fields that can only ever be equal.
+    expect(report).toContain('pool=24');
+    expect(report).toContain('cols=100/82');
+    expect(report).toContain('reason=visible');
+    expect(report).toContain('held=24/5');
+    // The tail window: the number that makes "visible but not printed yet" observable.
+    expect(report).toContain('window=14/10');
+    // The rows the box could not show and gave back to the scrollback.
+    expect(report).toContain('head=12');
+    // Each of the six reasons is reachable, and none of them may print `undefined`:
+    // the silent-degradation cases are the whole point of this line.
+    for (const reason of ['empty', 'disabled', 'narrow', 'short', 'overlay'] as const) {
+      expect(formatPerfReport({
+        ...SNAPSHOT, mode: 'native', band: { ...NATIVE_BAND, reason, railRows: 0, railCols: 0 },
+      })).toContain(`reason=${reason}`);
+    }
+  });
+
+  it('says the band does not apply outside native mode', () => {
+    expect(formatPerfReport(SNAPSHOT)).toContain('band       n/a (full-screen layout)');
   });
 });

@@ -2,6 +2,8 @@ import type { Entry, UsageTotal } from '../agent/reducer.js';
 import { formatCost, formatDuration, formatTokens, promptTokensOf } from '../agent/usage.js';
 import { formatRetryLine } from '../agent/retry-view.js';
 import type { Glyphs } from './glyphs.js';
+import { childStatus, outcomePhrase, rosterCounts, statusMarkerCell } from './team-status.js';
+import { expandTabs } from './display-tab.js';
 // TYPE-ONLY: this module stays free of React, ink and the supervisor itself.
 import type { ServiceStatus } from '../proc/types.js';
 
@@ -37,9 +39,17 @@ const CONTINUATION_INDENT = '  ';
 const TOOL_INDENT = '  ';
 const MAX_ARG_CHARS = 60;
 
-/** Prefix the first line with `marker`, indent the rest to line up under it. */
+/**
+ * Prefix the first line with `marker`, indent the rest to line up under it.
+ *
+ * `expandTabs` RUNS BEFORE THE PREFIX IS ADDED, so a stored line lands on the
+ * same columns the TUI drew it at. Without it this replay -- the only record
+ * left once the alternate screen is torn down -- disagreed with the screen
+ * about every TAB, because the terminal painted an eight-column stop under text
+ * the composer had laid out at four.
+ */
 function block(marker: string, text: string): string[] {
-  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  const lines = expandTabs(text.replace(/\r\n/g, '\n')).split('\n');
   const head = `${marker} ${lines[0] ?? ''}`.trimEnd();
   const rest = lines.slice(1).map((l) => `${CONTINUATION_INDENT}${l}`.trimEnd());
   return [head, ...rest];
@@ -126,16 +136,24 @@ function renderEntry(entry: Entry, glyphs: Glyphs): string[] {
       // dispatch is often the most expensive thing in a session, so leaving it
       // out of the plain-text replay would make the exported transcript
       // unaccountable for most of its own cost.
-      const ok = entry.runs.filter((r) => r.phase === 'done' && !r.error).length;
-      const failed = entry.runs.length - ok;
+      // ONE COUNTING AUTHORITY (`team-status.ts`), so the replay cannot disagree with
+      // the card it replays: `runs.length - ok` counted a cancelled child as a failed
+      // one, and a still-working one as a failure (tui-subagent-double-roster E3/E8).
+      // A cancellation therefore gets its own bucket instead of inflating `failed`.
+      const counts = rosterCounts(entry.runs);
       const head =
         entry.active || (entry.aborted && entry.durationMs === undefined)
           ? 'interrupted'
-          : `${entry.durationMs ?? 0}ms (${ok} ok, ${failed} failed)`;
+          : `${entry.durationMs ?? 0}ms (${outcomePhrase(counts)})`;
       const lines = [
         `${TOOL_INDENT}team ${entry.runs.length} subagents ${head}`,
         ...entry.runs.map((run) => {
-          const glyph = run.phase === 'done' && !run.error ? glyphs.toolDone : glyphs.toolError;
+          // The same five-state judgement the card uses: only a real failure takes
+          // the cross, a cancelled child takes the warning and a running one the
+          // running marker. `statusMarkerCell`, NOT the bare glyph: the ASCII tier
+          // spells `[ok]`, `[x]` and `!` at three widths, and a replay whose label
+          // column shifts from row to row is unreadable.
+          const glyph = statusMarkerCell(childStatus(run), glyphs);
           const detail = run.error ? ` ${run.error}` : '';
           return `${TOOL_INDENT}${CONTINUATION_INDENT}${glyph} ${run.label} ${run.description}${detail}`;
         }),
@@ -228,23 +246,42 @@ function renderEntry(entry: Entry, glyphs: Glyphs): string[] {
   }
 }
 
-/** Render the whole session (summary line + entries) as plain text. */
-export function renderTranscriptText(entries: Entry[], opts: TranscriptTextOptions): string {
+/**
+ * The three figures every session summary carries: turns, tokens, cost.
+ *
+ * One implementation for the exit replay and the native-scroll exit summary
+ * (tui-native-terminal-scroll §4.8), so the two can never disagree.
+ */
+export function formatSessionStats(
+  entries: readonly Entry[],
+  usageTotal: UsageTotal,
+  g: Pick<Glyphs, 'arrowUp' | 'arrowDown'>,
+): { turns: string; tokens: string; cost: string } {
   const turns = entries.filter((e) => e.kind === 'user').length;
-  const g = opts.glyphs;
   // THE SAME PROMPT-SIDE TOTAL THE STATUS BAR SHOWS (context-usage-gauge-accuracy
   // §3.6). This line is what a user compares against the bar they were watching a
   // second earlier, so a different unit here would look like the exit summary
   // losing tokens.
-  const tokens = `${formatTokens(promptTokensOf(opts.usageTotal))}${g.arrowUp} ${formatTokens(
-    opts.usageTotal.outputTokens,
+  const tokens = `${formatTokens(promptTokensOf(usageTotal))}${g.arrowUp} ${formatTokens(
+    usageTotal.outputTokens,
   )}${g.arrowDown}`;
+  return {
+    turns: `${turns} ${turns === 1 ? 'turn' : 'turns'}`,
+    tokens,
+    cost: formatCost(usageTotal.costUsd),
+  };
+}
+
+/** Render the whole session (summary line + entries) as plain text. */
+export function renderTranscriptText(entries: Entry[], opts: TranscriptTextOptions): string {
+  const g = opts.glyphs;
+  const stats = formatSessionStats(entries, opts.usageTotal, g);
   const summary = [
     'aragon',
     `${opts.provider}:${opts.model}`,
-    `${turns} ${turns === 1 ? 'turn' : 'turns'}`,
-    tokens,
-    formatCost(opts.usageTotal.costUsd),
+    stats.turns,
+    stats.tokens,
+    stats.cost,
     formatDuration(Math.max(0, opts.elapsedMs)),
   ].join(` ${g.midDot} `);
 

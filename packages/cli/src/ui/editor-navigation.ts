@@ -1,5 +1,6 @@
 /** Shared UTF-16 grapheme boundaries and terminal-cell layout for the editor. */
 import stringWidth from 'string-width';
+import { TAB_WIDTH } from './display-tab.js';
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
@@ -56,7 +57,17 @@ export interface EditorVisualMap {
   readonly cursor: VisualPosition;
 }
 
-/** Map graphemes to hard-wrapped rows, sharing tab stops and caret reservation. */
+/**
+ * Map graphemes to hard-wrapped rows, sharing tab stops and caret reservation.
+ *
+ * THE TAB STOP IS THE TERMINAL'S (`TAB_WIDTH`), NOT AN EDITOR-SIZED FOUR. It
+ * used to be four, while the transcript handed the raw `\t` to `<Text>` and
+ * the terminal painted it at eight: the same pasted table sat one column off
+ * from itself before and after sending. A tab that would cross the right edge
+ * is still clipped to the row (the caret cannot point past the last cell), so
+ * a tab STRADDLING the wrap is the one shape where the draft and the stored
+ * text can differ by the remainder of the advance.
+ */
 export function buildEditorVisualMap(input: {
   buffer: string; cols: number; cursor: number; active?: boolean;
 }): EditorVisualMap {
@@ -76,11 +87,11 @@ export function buildEditorVisualMap(input: {
       breakRow();
       continue;
     }
-    let width = part.text === '\t' ? Math.min(cols, 4 - column % 4)
+    let width = part.text === '\t' ? Math.min(cols, TAB_WIDTH - column % TAB_WIDTH)
       : graphemeWidth(part.text);
     if (column > 0 && column + width > cols) {
       breakRow();
-      if (part.text === '\t') width = Math.min(cols, 4);
+      if (part.text === '\t') width = Math.min(cols, TAB_WIDTH);
     }
     locate(part.index);
     rows[rows.length - 1]!.push({ ...part,

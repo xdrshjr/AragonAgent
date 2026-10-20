@@ -45,14 +45,21 @@ export function ScrollIndicator({
   const glyphs = pickGlyphs(caps);
   const count = Math.max(0, Math.floor(rows) || 0);
 
+  // NO CELLS WITHOUT A THUMB (defect 6). `thumb === null` means the content fits,
+  // so there is no position to mark and a full-height column of track glyphs is
+  // pure noise next to an empty transcript. The BOX below is still rendered
+  // whatever the thumb is — see the feedback-loop note at the top of this file:
+  // the reserved column, not the glyphs, is what keeps the width constant.
   const cells: React.ReactElement[] = [];
-  for (let i = 0; i < count; i += 1) {
-    const onThumb = !!thumb && i >= thumb.start && i < thumb.start + thumb.size;
-    cells.push(
-      <Text key={i} color={onThumb ? theme.primary : theme.muted} bold={onThumb && dragging}>
-        {onThumb ? glyphs.scrollThumb : glyphs.scrollTrack}
-      </Text>,
-    );
+  if (thumb) {
+    for (let i = 0; i < count; i += 1) {
+      const onThumb = i >= thumb.start && i < thumb.start + thumb.size;
+      cells.push(
+        <Text key={i} color={onThumb ? theme.primary : theme.muted} bold={onThumb && dragging}>
+          {onThumb ? glyphs.scrollThumb : glyphs.scrollTrack}
+        </Text>,
+      );
+    }
   }
 
   return (

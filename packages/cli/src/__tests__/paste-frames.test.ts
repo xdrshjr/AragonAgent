@@ -95,7 +95,11 @@ describe('stripPasteFrames (T-30 / I-12 / P0-2)', () => {
 
   it('cleans a key that carried a stray CR or an ANSI sequence — better than v0.6.3', () => {
     expect(stripPasteFrames(`${PASTE_OPEN}sk-a\rbc${PASTE_CLOSE}`)).toBe('sk-abc');
-    expect(stripPasteFrames('\x1b[0msk-abc')).toBe('[0msk-abc');
+    // Was `'[0msk-abc'`: the residue was the contract. An unframed run is
+    // cleaned by SEQUENCE now, so a key that arrived beside an SGR stores the
+    // key and nothing else -- which is what a settings field needs, since the
+    // value goes straight to `registerSecret()`.
+    expect(stripPasteFrames('\x1b[0msk-abc')).toBe('sk-abc');
   });
 
   it('is a plain sanitise when there is no frame at all', () => {

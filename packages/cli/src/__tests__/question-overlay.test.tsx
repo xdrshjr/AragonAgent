@@ -211,6 +211,162 @@ describe('QuestionOverlay', () => {
   });
 });
 
+/**
+ * SPACE, BY QUESTION SHAPE (subagent-model-and-question-controls §3.5).
+ *
+ * The single-choice space mark and its explicit bit are what keep BOTH paths
+ * honest: cursor+Enter stays today's behavior (the V-1 regression guard),
+ * while space+move+Enter submits the item the user actually marked. The
+ * multi-choice rows are the pure regression suite, and the Other row is a
+ * no-op in both shapes.
+ */
+describe('QuestionOverlay - space selects, enter confirms', () => {
+  const SPACE = ' ';
+  const SINGLE = normalizeQuestions([{
+    id: 'single', header: 'Deploy',
+    question: 'Where should this deploy?',
+    options: [
+      { label: 'Staging', description: 'Safe first', recommended: true },
+      { label: 'Prod', description: 'Straight to production' },
+    ],
+  }]);
+  const MULTI = normalizeQuestions([
+    {
+      id: 'pick', header: 'Areas', question: 'Which areas should the scan cover?',
+      options: [
+        { label: 'Api', description: 'routes and handlers', recommended: true },
+        { label: 'Ui', description: 'components' },
+      ],
+      allowMultiple: true,
+    },
+    {
+      id: 'after', header: 'Report', question: 'Report format?',
+      options: [{ label: 'Short', recommended: true }, { label: 'Full' }],
+    },
+  ]);
+
+  function mountQuestions(questions: typeof SINGLE, onSubmit = vi.fn()) {
+    const utils = render(
+      <QuestionOverlay questions={questions} maxRows={Number.POSITIVE_INFINITY}
+        cols={80} theme={THEME} caps={CAPS} onSubmit={onSubmit} />,
+    );
+    return { ...utils, onSubmit };
+  }
+
+  it('8: single choice - space marks the highlighted item and does NOT advance', async () => {
+    const { stdin, lastFrame, onSubmit, unmount } = mountQuestions(SINGLE);
+    await delay(20);
+    stdin.write(DOWN); // highlight Prod (Staging is recommended and preselected)
+    await delay(20);
+    stdin.write(SPACE);
+    await delay(20);
+    // Still on the SAME question - the mark is not an answer, Enter confirms.
+    expect(lastFrame() ?? '').toContain('Where should this deploy?');
+    expect(lastFrame() ?? '').not.toContain('Review your answers');
+    // Idempotent: a second space on the same item changes nothing.
+    stdin.write(SPACE);
+    await delay(20);
+    expect(lastFrame() ?? '').toContain('Where should this deploy?');
+    stdin.write(ENTER);
+    await delay(20);
+    stdin.write(ENTER); // submit from review
+    await delay(20);
+    expect(onSubmit.mock.calls[0]?.[0][0]?.selected).toEqual(['Prod']);
+    unmount();
+  });
+
+  it('9: after marking, moving the cursor away still submits the MARKED item', async () => {
+    const { stdin, onSubmit, unmount } = mountQuestions(SINGLE);
+    await delay(20);
+    stdin.write(DOWN); // Prod
+    await delay(20);
+    stdin.write(SPACE); // mark Prod
+    await delay(20);
+    stdin.write('\u001b[A'); // back up to Staging (the recommended preselect)
+    await delay(20);
+    stdin.write(ENTER); // confirm - the MARK wins over the cursor
+    await delay(20);
+    stdin.write(ENTER);
+    await delay(20);
+    expect(onSubmit.mock.calls[0]?.[0][0]?.selected).toEqual(['Prod']);
+    unmount();
+  });
+
+  it('10 (V-1 guard): cursor movement ALONE plus Enter still submits the cursor item', async () => {
+    const { stdin, onSubmit, unmount } = mountQuestions(SINGLE);
+    await delay(20);
+    stdin.write(DOWN); // Prod; the recommended preselect stays on Staging
+    await delay(20);
+    stdin.write(ENTER);
+    await delay(20);
+    stdin.write(ENTER);
+    await delay(20);
+    expect(onSubmit.mock.calls[0]?.[0][0]?.selected).toEqual(['Prod']);
+    unmount();
+  });
+
+  it('11: multiple choice - space toggles, Enter tops up the cursor item (regression)', async () => {
+    const { stdin, onSubmit, unmount } = mountQuestions(MULTI);
+    await delay(20);
+    stdin.write(SPACE); // toggle Api OFF (it starts preselected)
+    await delay(20);
+    stdin.write(SPACE); // ...and back ON: both directions of the toggle
+    await delay(20);
+    stdin.write(DOWN); // Ui
+    await delay(20);
+    stdin.write(SPACE); // toggle Ui ON
+    await delay(20);
+    stdin.write(ENTER); // Ui already selected: no top-up, just advance
+    await delay(20);
+    stdin.write(ENTER); // question 2 recommended
+    await delay(20);
+    stdin.write(ENTER); // submit
+    await delay(20);
+    expect(onSubmit.mock.calls[0]?.[0][0]?.selected).toEqual(['Api', 'Ui']);
+    unmount();
+  });
+
+  it('12: the Other row ignores space in BOTH shapes - Enter is its key', async () => {
+    const { stdin, onSubmit, unmount } = mountQuestions(MULTI);
+    await delay(20);
+    stdin.write(SPACE); // Api ON
+    await delay(20);
+    stdin.write(DOWN);
+    await delay(20);
+    stdin.write(DOWN); // Other
+    await delay(20);
+    stdin.write(SPACE); // NO-OP: no toggle, no mark
+    await delay(20);
+    stdin.write('\u001b[A'); // back to Api
+    await delay(20);
+    stdin.write('\u001b[A');
+    await delay(20);
+    stdin.write(ENTER); // confirm q1: only Api
+    await delay(20);
+    stdin.write(ENTER); // q2 recommended
+    await delay(20);
+    stdin.write(ENTER); // submit
+    await delay(20);
+    expect(onSubmit.mock.calls[0]?.[0][0]?.selected).toEqual(['Api']);
+    expect(onSubmit.mock.calls[0]?.[0][0]?.custom).toBeNull();
+    unmount();
+  });
+
+  it('13: the hint names space on single-choice questions too (AC-10)', async () => {
+    const wide = mountQuestions(SINGLE);
+    await delay(20);
+    expect((wide.lastFrame() ?? '').toLowerCase()).toContain('space select');
+    wide.unmount();
+    const narrow = render(
+      <QuestionOverlay questions={SINGLE} maxRows={Number.POSITIVE_INFINITY} cols={40}
+        theme={ASCII_THEME} caps={ASCII_CAPS} onSubmit={vi.fn()} />,
+    );
+    await delay(20);
+    expect(narrow.lastFrame() ?? '').toContain('Space select');
+    narrow.unmount();
+  });
+});
+
 describe('PlanReviewOverlay', () => {
   const PLAN = normalizePlan({
     title: 'Add SSO via OIDC',

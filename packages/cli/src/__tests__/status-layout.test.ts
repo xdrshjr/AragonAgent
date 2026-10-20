@@ -18,13 +18,69 @@ it('keeps five core fields and measured separators from 40 to 200 columns', () =
  }
 });
 it('fits extreme values and preserves copy error plus force-stop', () => {
+ // `copy-sent` IS A NOTIFICATION (defect 8/9): the phase word stays and the body
+ // gets a field of its own, so its plan carries one more field than the action
+ // kinds, which keep replacing the phase word.
  for(const kind of ['copy-error','copy-cleanup','copy-sent','exit'] as const) {
  const plan=layout.planPrimaryStatusFields({...base,columns:40,context:{...base.context,pct:1e300},tokPerSec:1e300,elapsedMs:1e300,
  feedback:{kind,text:'custom',level:'error'},escapeAction:'force-stop',activeTool:{name:'x'.repeat(1000),toolCallId:'t'}});
- expect(plan.fields).toHaveLength(5); expect(plan.cells).toBeLessThanOrEqual(39);
- expect(plan.fields[1]!.text).toBe('C~>999%');
+ const notification = kind === 'copy-sent';
+ expect(plan.fields).toHaveLength(notification ? 6 : 5); expect(plan.cells).toBeLessThanOrEqual(39);
+ expect(plan.fields[notification ? 2 : 1]!.text).toBe('C~>999%');
+ if(notification) expect(plan.fields[1])
+  .toMatchObject({ id: 'feedback', text: 'custom', tone: 'error' });
  if(kind==='copy-error'||kind==='copy-cleanup') expect(plan.fields[0]!.text).toMatch(/Err\/EscF|E\/F/);
  }
+});
+
+// DEFECT 8 + 9. The phase word used to BE the feedback label, so once a notice
+// landed the row no longer answered "is the agent working?" - and the toast body
+// itself only ever appeared on the second status row, behind Ctrl+G.
+describe('a notification keeps the phase word and adds its body', () => {
+ it('shows Idle and the toast text together', () => {
+  const plan = layout.planPrimaryStatusFields({ ...base, columns: 100, phase: 'idle',
+   speedKnown: false, feedback: { kind: 'notice', text: 'Theme set to light.', level: 'info' } });
+  expect(plan.fields.map(f => f.id).slice(0, 2)).toEqual(['phase', 'feedback']);
+  expect(plan.fields[0]!.text).toContain('Idle');
+  expect(plan.fields[1]).toMatchObject({ text: 'Theme set to light.', tone: 'normal' });
+  expect(plan.cells).toBeLessThanOrEqual(99);
+ });
+ it('keeps the phase word while a copy is reported and tones the body', () => {
+  const plan = layout.planPrimaryStatusFields({ ...base, columns: 100, phase: 'idle',
+   feedback: { kind: 'copied', text: 'Copied to clipboard.', level: 'info' } });
+  expect(plan.fields[0]!.text).toContain('Idle');
+  expect(plan.fields[1]!.id).toBe('feedback');
+ });
+ it('never lets the body displace the phase word, whatever the width', () => {
+  for (let columns = 40; columns <= 200; columns += 1) {
+   const plan = layout.planPrimaryStatusFields({ ...base, columns, phase: 'generating',
+    feedback: { kind: 'notice', text: 'x'.repeat(200), level: 'warn' } });
+   expect(plan.fields[0]!.id).toBe('phase');
+   expect(plan.fields[0]!.text).not.toContain('Notice');
+   expect(plan.cells).toBeLessThanOrEqual(columns - 1);
+  }
+ });
+ it('clips a long body instead of pushing the row over budget', () => {
+  const plan = layout.planPrimaryStatusFields({ ...base, columns: 200, phase: 'idle',
+   feedback: { kind: 'notice', text: 'y'.repeat(300), level: 'info' } });
+  const body = plan.fields[1]!;
+  expect(body.id).toBe('feedback');
+  expect(body.cells).toBeLessThanOrEqual(32);
+ });
+ it('drops the body before it would hide the phase word', () => {
+  // 40 columns cannot hold the phase word plus a body; the ladder gives up the
+  // BODY, never the word that says whether the agent is running.
+  const plan = layout.planPrimaryStatusFields({ ...base, columns: 40, phase: 'generating',
+   feedback: { kind: 'notice', text: 'A long confirmation message.', level: 'info' } });
+  expect(plan.fields.some(f => f.id === 'feedback')).toBe(false);
+  expect(plan.fields[0]!.id).toBe('phase');
+ });
+ it('still lets an ACTION kind take the phase slot', () => {
+  const plan = layout.planPrimaryStatusFields({ ...base, columns: 100, phase: 'idle',
+   feedback: { kind: 'exit', text: 'Press Ctrl+C again to exit', level: 'warn' } });
+  expect(plan.fields.map(f => f.id)).not.toContain('feedback');
+  expect(plan.fields[0]!.text).toMatch(/exit/i);
+ });
 });
 it('rejects invalid contexts', () => {
  for(const key of ['occupied','window','pct','deltaTokens'] as const) for(const value of [NaN,Infinity,-1]) {
@@ -92,5 +148,41 @@ describe('planPrimaryStatusFields mode word', () => {
   it('omits the mode field entirely when the caller names no mode', () => {
     const plan = layout.planPrimaryStatusFields({ ...base, columns: 120 });
     expect(plan.fields.map(f => f.id)).toEqual(['phase', 'context', 'thinking', 'speed', 'elapsed']);
+  });
+});
+
+// tui-session-id-resume 7.1 T-35 / T-36. The session-id chip is not a layer over
+// this row: it is planned FIRST and then spent out of this budget, because the
+// row is measured rather than laid out and anything overlapping it eats `phase`.
+describe('reserveRight (tui-session-id-resume 3.10 / I-6)', () => {
+  it('reserveRight shrinks the field budget', () => {
+    for (const columns of [60, 80, 120]) {
+      const full = layout.planPrimaryStatusFields({ ...base, columns });
+      const reserved = layout.planPrimaryStatusFields({ ...base, columns, reserveRight: 12 });
+      expect(reserved.cells).toBeLessThanOrEqual(full.cells);
+      // ...and the reservation is what the planner actually honours.
+      expect(reserved.cells).toBeLessThanOrEqual(columns - 1 - 12);
+    }
+  });
+
+  it('an absent reserveRight is byte-identical to today', () => {
+    // THE REGRESSION RED LINE (I-6): every existing caller passes no
+    // `reserveRight`, and its plan must be deep-equal to the one it got before
+    // the feature existed. `0` and `undefined` therefore mean the same thing.
+    for (const columns of [40, 61, 80, 137]) {
+      for (const extra of [{}, { mode: 'plan' }, { compacting: true }, { scrolledLines: 12 }]) {
+        const withoutKey = layout.planPrimaryStatusFields({ ...base, columns, ...extra });
+        const withZero = layout.planPrimaryStatusFields({ ...base, columns, ...extra, reserveRight: 0 });
+        expect(withZero).toEqual(withoutKey);
+      }
+    }
+  });
+
+  it('a nonsense reservation cannot produce a negative budget', () => {
+    for (const reserveRight of [-10, Number.NaN]) {
+      const plan = layout.planPrimaryStatusFields({ ...base, columns: 80, reserveRight });
+      expect(plan.cells).toBeGreaterThanOrEqual(0);
+      expect(plan.cells).toBeLessThanOrEqual(79);
+    }
   });
 });

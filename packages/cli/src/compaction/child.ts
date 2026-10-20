@@ -74,6 +74,21 @@ export interface ChildContextManagerRequest {
   role?: ModelRole;
   label: string;
   /**
+   * REQ-LEVEL key resolvers, preferred over the lead's (V-4).
+   *
+   * `wiring.ts::childFactory` injects the LEAD layer's `getApiKey`/`hasKey`,
+   * which cannot see a fast-only key (`role='fast'` only) or a profile's
+   * dedicated key (it exists only inside the entry). `Compactor.resolveSummarizer`
+   * gates its main choice on `hasKey(provider, role)` and reads the call key
+   * through `getApiKey`, so without these a `team.model: fast/profile` child
+   * whose only key lives in one of those places would have its compaction
+   * SILENTLY DISABLED - the summarizer resolves to null and nobody says why.
+   * `subagent.ts` passes the same profile-aware closures the child's own
+   * `Agent` gets; ABSENT keeps today's behavior byte for byte (matrix 24).
+   */
+  getApiKey?: (providerId: string, role?: ModelRole) => string | undefined;
+  hasKey?: (providerId: string, role?: ModelRole) => boolean;
+  /**
    * The model the child actually runs on.
    *
    * CARRIED RATHER THAN READ FROM CONFIG, because a `tier: 'fast'` child runs on
@@ -160,6 +175,10 @@ export function createChildContextManager(
       baseUrl: req.model.baseUrl,
       // The lead's manual limit describes its connection, not every worker.
       contextWindow: sameConnection ? base.contextWindow : null,
+      // THE ORIGIN FOLLOWS THE VALUE through the same gate, honoring the iff
+      // contract (value null => origin undefined): a child on a different
+      // connection inherits neither the number nor its provenance.
+      contextWindowOrigin: sameConnection ? base.contextWindowOrigin : undefined,
       // NO POLICY OVERLAY (main-agent parity): `keepRecentTurns`, `onFailure`,
       // `useFastTier` and `archive` are read LIVE from the base config, so the
       // child compacts under exactly the policy the lead compacts under. A
@@ -177,17 +196,24 @@ export function createChildContextManager(
       return source === undefined ? deps.isPricedModel(req.model) : source !== 'fallback';
     },
     getWindowOverride: () => childConfig().contextWindow,
+    getWindowOverrideOrigin: () => childConfig().contextWindowOrigin,
   });
   let overflowNotified = false;
 
+  // REQ-LEVEL RESOLVERS WIN (V-4), and the fallback is the lead layer - so a
+  // request built without them behaves exactly as before, while one built by
+  // `subagent.ts` under `team.model: fast/profile` lets the summarizer see
+  // the same keys the child itself authenticates with.
+  const hasKey = req.hasKey ?? deps.hasKey;
+  const getApiKey = req.getApiKey ?? deps.getApiKey;
   const compactor = new Compactor(
     {
       getConfig: childConfig,
       meter,
       mainRole: req.role ?? 'main',
-      resolveFastCandidate: () => resolveFastTier(deps.getConfig(), deps.hasKey),
-      hasKey: deps.hasKey,
-      getApiKey: deps.getApiKey,
+      resolveFastCandidate: () => resolveFastTier(deps.getConfig(), hasKey),
+      hasKey,
+      getApiKey,
       getModelInfoFor: deps.getModelInfoFor,
       isPricedModel: deps.isPricedModel,
       getMessages: req.getMessages,

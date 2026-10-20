@@ -9,8 +9,12 @@
  *
  * PURE TYPES AND BUILDERS. No I/O, no process access, no imports outside
  * `node:`-free type space, so a consumer of this module cannot accidentally
- * evaluate the runner.
- *
+ * evaluate the runner. The one import below is a TYPE from `proc/types.ts` for
+ * the same reason: a shape, erased at compile time.
+ */
+import type { ServiceStatus } from '../proc/types.js';
+
+/**
  * `EXEC_SCHEMA_VERSION` appears on `system` and on `result` and NOWHERE ELSE.
  * ADDING A FIELD OR AN EVENT TYPE NEVER BUMPS IT; renaming or removing one does.
  * That rule only holds if consumers keep their side of it, so the README states
@@ -386,6 +390,30 @@ export interface ExecResultEvent {
   error: ExecErrorInfo | null;
 }
 
+/**
+ * A background job's lifecycle (long-task-jobs §4.10).
+ *
+ * A PURE ADDITION to schema v1: a consumer that does not know this `type`
+ * ignores it, which is the forward-compatibility contract this file's header
+ * states. `progress` is emitted only when the extracted text CHANGES and at most
+ * once a second - a 40-minute training run would otherwise write thousands of
+ * lines to a machine consumer's stdout.
+ */
+export interface ExecJobEvent {
+  type: 'job';
+  schemaVersion: number;
+  sessionId: string;
+  subtype: 'started' | 'progress' | 'exited' | 'stalled';
+  /** `t3` / `s1`. */
+  jobId: string;
+  kind: 'service' | 'task';
+  status: ServiceStatus;
+  elapsedMs: number;
+  /** Only on `subtype === 'progress'`, and only when the text changed. */
+  progress?: string;
+  exitCode?: number | null;
+}
+
 export type ExecEvent =
   | ExecSystemInitEvent
   | ExecUserEvent
@@ -402,6 +430,7 @@ export type ExecEvent =
   | ExecFastTierEvent
   | ExecCompactionEvent
   | ExecRetryEvent
+  | ExecJobEvent
   | ExecErrorEvent
   | ExecResultEvent;
 
@@ -456,6 +485,9 @@ export const EXEC_CAPABILITIES: readonly string[] = [
   'session-file',
   'turn-lifecycle',
   'execution-progress',
+  // Background job lifecycle events (long-task-jobs §4.10). A consumer that does
+  // not know the `job` type ignores it; this string is how it asks first.
+  'background-jobs',
 ];
 
 export function buildInitEvent(params: ExecInitParams): ExecSystemInitEvent {

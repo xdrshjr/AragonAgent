@@ -27,12 +27,15 @@ import type { MouseEvent } from '../input/mouse-events.js';
 import type { ScrollIntent } from './layout/scroll.js';
 
 /**
- * Rows a PgUp/PgDn — and a Shift+wheel notch — moves inside a controlled
- * overlay. Declared here rather than in `App.tsx` because both the keyboard
- * branch and the wheel branch need it and `App` imports this module; the other
- * direction would be a cycle.
+ * Page rows used ONLY when the host supplies no `getOverlayPage`.
+ *
+ * `App` always supplies one (defect 11): the step is the overlay's visible window
+ * minus two rows of context, so `PgDn` in `/help` turns a page instead of 42% of
+ * one. This fallback exists so a host that owns no overlay window - this module's
+ * own routing tests are the only such host - still gets a page rather than
+ * silently degrading a Shift+wheel to a three-row notch.
  */
-export const OVERLAY_PAGE = 8;
+const FALLBACK_OVERLAY_PAGE = 8;
 
 /** Transcript rows per notch. The terminal's own convention. */
 const CONTENT_LINES_PER_NOTCH = 3;
@@ -55,6 +58,16 @@ export interface WheelRoutingOptions {
   onScroll: (kind: ScrollIntent, repeat: number) => void;
   /** Signed row delta; the caller clamps at 0 the way the keyboard branch does. */
   onOverlayScroll: (delta: number) => void;
+  /**
+   * Rows one Shift+wheel notch turns inside a controlled overlay (defect 11).
+   *
+   * A GETTER, read at event time for the same reason `getOverlay` is: the window
+   * height changes with the terminal, with `statusExpanded` and with the rail, and
+   * a value captured when the subscription was built is the value that goes stale.
+   * `App` answers with `overlayPageSize(...)`, the same function its keyboard
+   * branch uses, so the wheel and `PgDn` can never disagree.
+   */
+  getOverlayPage?: () => number;
 }
 
 export interface WheelRouting {
@@ -143,13 +156,15 @@ export function useWheelRouting(options: WheelRoutingOptions): WheelRouting {
       if (overlay) {
         // Modes A only. `model` / `confirm` / `question` own their own keys and
         // scrolling them would leave an inconsistent cursor (R-11).
-        const controlled = overlay === 'help' || overlay === 'settings'
-          || overlay === 'plan' || overlay === 'queue';
+        const controlled = overlay === 'help' || overlay === 'settings' || overlay === 'plan'
+          || overlay === 'queue' || overlay === 'kit';
         if (!controlled) return;
         // D-3: the row is not consulted here either. Behind an overlay the
         // composer is inactive and the overlay is the only scrollable thing on
         // screen, so a notch anywhere scrolls it.
-        const step = event.shift ? OVERLAY_PAGE : OVERLAY_LINES_PER_NOTCH;
+        const step = event.shift
+          ? current.getOverlayPage?.() ?? FALLBACK_OVERLAY_PAGE
+          : OVERLAY_LINES_PER_NOTCH;
         current.onOverlayScroll(event.dir === 'up' ? -step : step);
         return;
       }

@@ -3,22 +3,25 @@ import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'ink';
 import { createStdinFilter } from '../input/stdin-filter.js';
-import { SettingsScreen, type SettingsValues } from '../ui/overlays/SettingsScreen.js';
+import { SettingsScreen, readDirtySettings, type SettingsValues }
+  from '../ui/overlays/SettingsScreen.js';
 import { getTheme } from '../ui/theme.js';
 import { createProfileEditor, finishProfileEditor, modelProfileReducer,
-  createModelProfileState, createCustomProfile } from '../ui/overlays/model-profile-state.js';
+  createModelProfileState, createCustomProfile, draftTeam, SUBAGENT_FAST_ROW_ID }
+  from '../ui/overlays/model-profile-state.js';
 import type { ModelSettingsDraft } from '../config/model-profile-store.js';
 
 const profile = { id: 'profile-a', name: 'Shared', provider: 'openai', model: 'custom',
-  baseUrl: null, apiKey: 'disk-secret' };
+  baseUrl: null, apiKey: 'disk-secret', contextWindow: null };
 const draft = () => ({ diskRevision: 'disk', liveRevision: 0, baseline: {}, liveBaseline: {},
   patch: {}, activateRoles: [], profiles: { version: 1, entries: [profile], mainId: 'profile-a',
     fastId: 'profile-a' } }) as unknown as ModelSettingsDraft;
 const initial: SettingsValues = { provider: 'openai', model: 'custom', baseUrl: '',
-  thinkingLevel: 'off', showThinking: 'off', liveToolOutput: 'off', maxTokens: '', apiKey: '',
-  logLevel: 'info', fastEnabled: 'off', fastModel: '', fastProvider: '', fastReview: '5',
-  fastReviewBudget: '40', compactionEnabled: 'off', compactionThreshold: '90',
-  compactionKeepTurns: '3', compactionSubagents: 'off', compactionArchive: 'off' };
+  thinkingLevel: 'off', showThinking: 'off', liveToolOutput: 'off', maxTokens: '',
+  contextWindow: '', apiKey: '', logLevel: 'info', fastEnabled: 'off', fastModel: '',
+  fastProvider: '', fastReview: '5', fastReviewBudget: '40', compactionEnabled: 'off',
+  compactionThreshold: '90', compactionKeepTurns: '3', compactionSubagents: 'off',
+  compactionArchive: 'off' };
 const caps = { colorLevel: 0 as const, unicode: false };
 const cleanups: (() => void)[] = [];
 afterEach(() => { cleanups.splice(0).forEach((cleanup) => cleanup()); });
@@ -69,11 +72,62 @@ describe('profile settings draft', () => {
     expect(state.draft.activateRoles).toEqual(['main']);
     expect(state.draft.profiles?.fastId).toBe(profile.id);
   });
-  it('refuses deletion of a profile referenced by either draft role', () => {
-    const state = modelProfileReducer(createModelProfileState(draft()),
+  it('offers unbind-and-delete for a profile referenced by Main and Fast (D-6)', () => {
+    let state = modelProfileReducer(createModelProfileState(draft()),
       { type: 'delete', id: profile.id });
-    expect(state.draft.profiles?.entries).toHaveLength(1);
-    expect(state.error).toContain('Main + Fast');
+    // Referenced entries are no longer REFUSED: the flow continues to the
+    // confirm page with the references recorded for its disclosure line.
+    expect(state.page).toBe('delete-confirm');
+    expect(state.deleteUsers).toBe('Main + Fast');
+    expect(state.error).toBeUndefined();
+    state = modelProfileReducer(state, { type: 'confirm-delete' });
+    expect(state.draft.profiles?.entries).toHaveLength(0);
+    expect(state.draft.profiles?.mainId).toBeNull();
+    expect(state.draft.profiles?.fastId).toBeNull();
+  });
+  it('confirm-delete also resets the subagent binding when it named the entry (15)', () => {
+    const input = draft();
+    Object.assign(input.baseline, { team: { model: 'profile', modelProfileId: profile.id } });
+    let state = createModelProfileState(input);
+    state = modelProfileReducer(state, { type: 'delete', id: profile.id });
+    expect(state.deleteUsers).toBe('Main + Fast + Subagent');
+    state = modelProfileReducer(state, { type: 'confirm-delete' });
+    expect(state.draft.patch.team).toEqual({ model: 'main', modelProfileId: null });
+  });
+  it('confirm-delete leaves an unrelated subagent binding untouched', () => {
+    const other = { ...profile, id: 'profile-b', name: 'Other' };
+    const input = draft();
+    input.profiles!.entries = [profile, other];
+    Object.assign(input.baseline, { team: { model: 'profile', modelProfileId: other.id } });
+    let state = createModelProfileState(input);
+    state = modelProfileReducer(state, { type: 'delete', id: profile.id });
+    expect(state.deleteUsers).toBe('Main + Fast');
+    state = modelProfileReducer(state, { type: 'confirm-delete' });
+    expect(state.draft.patch.team).toBeUndefined();
+  });
+  it('subagent picker selection writes patch.team in all three branches (14)', () => {
+    const other = { ...profile, id: 'profile-b', name: 'Other' };
+    const input = draft();
+    input.profiles!.entries = [profile, other];
+    let state = createModelProfileState(input);
+    state = modelProfileReducer(state, { type: 'page', page: 'picker', role: 'subagent' });
+    state = modelProfileReducer(state, { type: 'select', role: 'subagent', id: null });
+    expect(state.draft.patch.team).toEqual({ model: 'main', modelProfileId: null });
+    expect(state.draft.activateRoles).toEqual([]);
+    state = modelProfileReducer(state,
+      { type: 'select', role: 'subagent', id: SUBAGENT_FAST_ROW_ID });
+    expect(state.draft.patch.team).toEqual({ model: 'fast', modelProfileId: null });
+    state = modelProfileReducer(state, { type: 'select', role: 'subagent', id: other.id });
+    expect(state.draft.patch.team).toEqual({ model: 'profile', modelProfileId: other.id });
+    expect(state.page).toBe('root');
+    expect(state.dirty).toBe(true);
+  });
+  it('draftTeam prefers an explicit patch null over the baseline value', () => {
+    const input = draft();
+    Object.assign(input.baseline, { team: { model: 'profile', modelProfileId: profile.id } });
+    expect(draftTeam(input)).toEqual({ model: 'profile', modelProfileId: profile.id });
+    input.patch.team = { model: 'main', modelProfileId: null };
+    expect(draftTeam(input)).toEqual({ model: 'main', modelProfileId: null });
   });
   it('copies the merged replacement credential, while child cancellation keeps its parent', () => {
     let state = createModelProfileState(draft());
@@ -100,15 +154,101 @@ describe('profile settings draft', () => {
     expect(state.editor?.apiKey).toBe('');
     expect(state.editor?.credentialMode).toBe('shared');
   });
-  it('deletes the last profile only after both roles are explicitly unbound', () => {
+  it('deletes the last profile directly - unbinding first is history, not a gate (D-6)', () => {
     let state = createModelProfileState(draft());
-    state = modelProfileReducer(state, { type: 'select', role: 'main', id: null });
-    state = modelProfileReducer(state, { type: 'select', role: 'fast', id: null });
     state = modelProfileReducer(state, { type: 'delete', id: profile.id });
     expect(state.page).toBe('delete-confirm');
-    expect(state.draft.profiles?.entries).toHaveLength(1);
+    expect(state.deleteUsers).toBe('Main + Fast');
     state = modelProfileReducer(state, { type: 'confirm-delete' });
     expect(state.draft.profiles?.entries).toHaveLength(0);
+    expect(state.draft.profiles?.mainId).toBeNull();
+    expect(state.draft.profiles?.fastId).toBeNull();
+  });
+});
+
+/**
+ * profile-context-window §6.3/§6.5 behavior: the editor is STRICT (a typo is
+ * refused with an inline error and never reaches the draft), the round-trip
+ * seeds from the entry, clamping goes through the single gate, and the root
+ * row exists only while Main is unbound (AC-11).
+ */
+describe('profile context window editing', () => {
+  it('seeds the editor from the entry and round-trips through auto and numbers (AC-8)', () => {
+    expect(createProfileEditor({ ...profile, contextWindow: 120_000 }).contextWindow)
+      .toBe('120000');
+    expect(createProfileEditor(profile).contextWindow).toBe('');
+    let state = modelProfileReducer(createModelProfileState(draft()),
+      { type: 'edit', profile });
+    state = modelProfileReducer(state, { type: 'editor-field', field: 'contextWindow',
+      value: '120000' });
+    state = modelProfileReducer(state, { type: 'merge-editor' });
+    expect(state.draft.profiles!.entries[0]!.contextWindow).toBe(120_000);
+    state = modelProfileReducer(state, { type: 'edit',
+      profile: state.draft.profiles!.entries[0]! });
+    state = modelProfileReducer(state, { type: 'editor-field', field: 'contextWindow',
+      value: 'auto' });
+    state = modelProfileReducer(state, { type: 'merge-editor' });
+    expect(state.draft.profiles!.entries[0]!.contextWindow).toBeNull();
+  });
+  it('refuses a typo with an inline error and leaves the draft untouched (AC-6)', () => {
+    let state = modelProfileReducer(createModelProfileState(draft()),
+      { type: 'edit', profile });
+    state = modelProfileReducer(state, { type: 'editor-field', field: 'contextWindow',
+      value: '12k' });
+    const refused = finishProfileEditor(state.editor!);
+    expect(refused.error).toBe('Context window: use a number or auto.');
+    expect(refused.field).toBe('contextWindow');
+    state = modelProfileReducer(state, { type: 'merge-editor' });
+    // TYPO CHANGES NOTHING: the merge is refused, the editor stays open, and
+    // the library entry keeps its previous value.
+    expect(state.error).toContain('Context window');
+    expect(state.page).toBe('editor');
+    expect(state.draft.profiles!.entries[0]!.contextWindow).toBeNull();
+  });
+  it('clamps through the single gate, exactly like `config set` (AC-7)', () => {
+    let state = modelProfileReducer(createModelProfileState(draft()),
+      { type: 'edit', profile });
+    state = modelProfileReducer(state, { type: 'editor-field', field: 'contextWindow',
+      value: '99999999' });
+    state = modelProfileReducer(state, { type: 'merge-editor' });
+    expect(state.draft.profiles!.entries[0]!.contextWindow).toBe(5_000_000);
+    state = modelProfileReducer(state, { type: 'edit',
+      profile: state.draft.profiles!.entries[0]! });
+    state = modelProfileReducer(state, { type: 'editor-field', field: 'contextWindow',
+      value: '100' });
+    state = modelProfileReducer(state, { type: 'merge-editor' });
+    expect(state.draft.profiles!.entries[0]!.contextWindow).toBe(8_000);
+  });
+  it('root row: a typo throws, auto maps to null, a number is clamped silently', () => {
+    expect(readDirtySettings(initial, { ...initial })).toEqual({});
+    expect(() => readDirtySettings(initial, { ...initial, contextWindow: 'abc' }))
+      .toThrow('Context window: use a number or auto.');
+    expect(readDirtySettings(initial, { ...initial, contextWindow: 'auto' }))
+      .toEqual({ contextWindow: null });
+    expect(readDirtySettings(initial, { ...initial, contextWindow: '99999999' }))
+      .toEqual({ contextWindow: 5_000_000 });
+    expect(readDirtySettings(initial, { ...initial, contextWindow: '300000' }))
+      .toEqual({ contextWindow: 300_000 });
+  });
+  it('Current custom seeding carries the existing top-level correction (AC-13)', () => {
+    const input = draft();
+    Object.assign(input.baseline, { contextWindow: 300_000 });
+    expect(createCustomProfile(input, 'main').contextWindow).toBe(300_000);
+    Object.assign(input.baseline, { contextWindow: null });
+    expect(createCustomProfile(input, 'main').contextWindow).toBeNull();
+  });
+  it('hides the root row while Main is bound and seeds it from the FILE value when not (AC-11)', async () => {
+    const bound = await mount();
+    expect(bound.frame()).not.toContain('Context window');
+    const input = draft();
+    input.profiles!.mainId = null;
+    input.profiles!.fastId = null;
+    // The FILE value, not the effective one (P2-3): `profileSettingsValues`
+    // seeds from `draft.baseline`, same source as provider/model/baseUrl.
+    Object.assign(input.baseline, { contextWindow: 300_000 });
+    const unbound = await mount({ draft: input });
+    expect(unbound.frame()).toContain('Context window');
+    expect(unbound.frame()).toContain('300000');
   });
 });
 
@@ -127,8 +267,12 @@ describe('profile settings real input', () => {
     const view = await mount({ draft: input });
     await view.send('\r'); await view.send('\r');
     expect(view.frame()).toContain('disk-custom');
-    // Four summary rows precede the legacy provider/model connection fields.
-    for (let index = 0; index < 5; index++) await view.send('\x1b[B');
+    // FIVE fixed rows precede the fields now (Main, Fast, Subagent model, Kit
+    // pack, Manage), plus the `fastEnabled` field row itself: the model field is
+    // row 7. The Kit pack row (agent-model-kits §4.5) moved every offset below
+    // the Subagent row by one, which is exactly the cost `ROOT_ROWS` exists to
+    // make visible in one place.
+    for (let index = 0; index < 7; index++) await view.send('\x1b[B');
     await view.send('-changed'); await view.send('\x13');
     expect(view.onProfileSave.mock.calls[0]?.[0].patch).toEqual({ model: 'disk-custom-changed' });
   });
@@ -208,6 +352,94 @@ describe('profile settings real input', () => {
 });
 
 
+describe('the subagent model row and the delete flow (subagent-model 16/17/17b)', () => {
+  it('17b: row 3 opens the subagent picker; Fast tier selection saves patch.team (AC-2)', async () => {
+    const view = await mount();
+    // Root page summary renders the parity default before anything is chosen.
+    expect(view.frame()).toContain('Subagent model');
+    expect(view.frame()).toContain('Same as main (openai:custom)');
+    await view.send('\x1b[B'); await view.send('\x1b[B');   // row 2 = Subagent model
+    await view.send('\r');
+    // The picker: two built-in rows, the fast one annotated as off.
+    expect(view.frame()).toContain('Same as main');
+    expect(view.frame()).toContain('Fast tier model');
+    expect(view.frame()).toContain('(fast tier off)');
+    await view.send('\x1b[B');   // cursor on `Fast tier model`
+    await view.send('\r');       // select -> back to root, dirty
+    expect(view.frame()).toContain('Fast tier (off - falls back to main)');
+    await view.send('\x13');     // Ctrl+S: the single transaction
+    expect(view.onProfileSave).toHaveBeenCalledTimes(1);
+    expect(view.onProfileSave.mock.calls[0]?.[0].patch.team)
+      .toEqual({ model: 'fast', modelProfileId: null });
+  });
+
+  it('17: a profile selection rides the same save with its id (AC-2)', async () => {
+    const view = await mount();
+    await view.send('\x1b[B'); await view.send('\x1b[B'); await view.send('\r');
+    // rows: Same as main, Fast tier model, Shared, Create profile
+    await view.send('\x1b[B'); await view.send('\x1b[B');   // cursor on `Shared`
+    await view.send('\r');
+    await view.send('\x13');
+    expect(view.onProfileSave.mock.calls[0]?.[0].patch.team)
+      .toEqual({ model: 'profile', modelProfileId: 'profile-a' });
+  });
+
+  it('17b: a validation failure refocuses the FIELD row it names (V-5)', async () => {
+    const view = await mount();
+    // The draft has Main bound, so fields are [fastEnabled, thinkingLevel,
+    // showThinking, liveToolOutput, maxTokens, ...]: maxTokens is row 9 now that
+    // the Kit pack root row sits above the field block.
+    for (let index = 0; index < 9; index++) await view.send('\x1b[B');
+    await view.send('abc');
+    // Move AWAY from the row, so only the error's focus jump can return.
+    await view.send('\x1b[B'); await view.send('\x1b[B');
+    await view.send('\x13');
+    expect(view.frame()).toContain('Max tokens: use a number or auto.');
+    expect(view.onProfileSave).not.toHaveBeenCalled();
+    // Backspace only lands on maxTokens if the jump went to the right row;
+    // clearing it makes the retry valid and the save fires.
+    await view.send('\x7f'); await view.send('\x7f'); await view.send('\x7f');
+    await view.send('\x13');
+    expect(view.onProfileSave).toHaveBeenCalledTimes(1);
+  });
+
+  it('16/AC-6: d deletes the focused entry; an unreferenced one keeps plain Delete', async () => {
+    const two = draft();
+    two.profiles!.entries = [profile, { ...profile, id: 'profile-b', name: 'Other' }];
+    const view = await mount({ draft: two });
+    // Four fixed rows precede `Manage profiles` (Main, Fast, Subagent, Kit pack).
+    await view.send('\x1b[B'); await view.send('\x1b[B'); await view.send('\x1b[B');
+    await view.send('\x1b[B');
+    await view.send('\r');       // Manage profiles
+    expect(view.frame()).toContain('d delete');
+    await view.send('\x1b[B');   // focus the second entry
+    await view.send('d');
+    expect(view.frame()).toContain('Delete Other?');
+    expect(view.frame()).not.toContain('Unbind and delete');
+    expect(view.frame()).not.toContain('The binding(s) will be cleared');
+  });
+
+  it('16/AC-5: a referenced entry offers Unbind and delete and names its users', async () => {
+    const view = await mount();
+    // Four fixed rows precede `Manage profiles` (Main, Fast, Subagent, Kit pack).
+    await view.send('\x1b[B'); await view.send('\x1b[B'); await view.send('\x1b[B');
+    await view.send('\x1b[B');
+    await view.send('\r');       // Manage profiles: `Shared` is Main + Fast
+    await view.send('d');
+    expect(view.frame()).toContain('Unbind and delete');
+    expect(view.frame()).toContain('Used by Main + Fast. The binding(s) will be cleared.');
+    // Confirm (down to the second button, Enter) empties the library, then
+    // the save transaction carries the emptied, unbound draft.
+    await view.send('\x1b[B'); await view.send('\r');
+    await view.send('\x1b');        // manager -> root (the picker owns Esc)
+    await view.send('\x13');        // Ctrl+S
+    expect(view.onProfileSave).toHaveBeenCalledTimes(1);
+    expect(view.onProfileSave.mock.calls[0]?.[0].profiles?.entries).toHaveLength(0);
+    expect(view.onProfileSave.mock.calls[0]?.[0].profiles?.mainId).toBeNull();
+    expect(view.onProfileSave.mock.calls[0]?.[0].profiles?.fastId).toBeNull();
+  });
+});
+
 describe('short inactive settings', () => {
   it('does not save or navigate while hidden', async () => {
     const view = await mount({ maxRows: 3, cols: 40, isActive: false });
@@ -217,7 +449,11 @@ describe('short inactive settings', () => {
   });
   it('retains an action row while focused fields move through the one-row body', async () => {
     const view = await mount({ maxRows: 3, cols: 40 });
-    await view.send('\x1b[B'); await view.send('\x1b[B');
+    // The Subagent model row sits between Fast profile and Kit pack, and the Kit
+    // pack row between that and Manage profiles, so the fixed block is five rows
+    // deep now (V-5 + agent-model-kits §4.5).
+    await view.send('\x1b[B'); await view.send('\x1b[B'); await view.send('\x1b[B');
+    await view.send('\x1b[B');
     expect(view.frame()).toContain('Manage profiles');
     expect(view.frame()).toContain('Esc');
   });

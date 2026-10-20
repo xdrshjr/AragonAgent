@@ -98,6 +98,12 @@ export interface UiState {
    * older file, which is the behaviour wanted here anyway.
    */
   vtInputNoticeVersion: number;
+  /**
+   * Which revision of the "scrolling now uses your terminal" notice this user has
+   * been shown (`0` = none; tui-native-terminal-scroll D12). A scalar beside the
+   * others for the same reasons the two above record, and NOT a schema bump.
+   */
+  scrollModeNoticeVersion: number;
 }
 
 const DEFAULT_UI_STATE: UiState = {
@@ -106,6 +112,7 @@ const DEFAULT_UI_STATE: UiState = {
   mouseNoticeSeen: false,
   mouseNoticeVersion: 0,
   vtInputNoticeVersion: 0,
+  scrollModeNoticeVersion: 0,
 };
 
 let memory: UiState | null = null;
@@ -143,6 +150,10 @@ function readFromDisk(): UiState {
       vtInputNoticeVersion: coerceCount(
         parsed.vtInputNoticeVersion,
         DEFAULT_UI_STATE.vtInputNoticeVersion,
+      ),
+      scrollModeNoticeVersion: coerceCount(
+        parsed.scrollModeNoticeVersion,
+        DEFAULT_UI_STATE.scrollModeNoticeVersion,
       ),
     };
   } catch {
@@ -222,6 +233,15 @@ export function getVtInputNoticeVersion(): number {
 
 export function setVtInputNoticeVersion(version: number): void {
   update({ vtInputNoticeVersion: version });
+}
+
+/** `0` on a file written before the field existed. */
+export function getScrollModeNoticeVersion(): number {
+  return loadUiState().scrollModeNoticeVersion;
+}
+
+export function setScrollModeNoticeVersion(version: number): void {
+  update({ scrollModeNoticeVersion: version });
 }
 
 /**

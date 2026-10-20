@@ -1,6 +1,19 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
-$NpmArgs = @($args)
+$RawNpmArgs = @($args)
+# npm strips the FIRST `--` of `npm run <script> -- <flags>` and forwards the rest, so this
+# fake strips it too: the recorded command is the argument list the SCRIPT sees. Keeping the
+# separator would make the fixture prove a call shape real npm never produces. Dropping it
+# silently would hide the difference between the broken shape (`run <script> --classify <log>`,
+# where npm eats the flag and the gate answers "environment" for every failure) and the
+# correct one (`run <script> -- --classify <log>`). Both lists are logged for that reason.
+$NpmArgs = New-Object System.Collections.Generic.List[string]
+$separatorSeen = $false
+foreach ($argument in $RawNpmArgs) {
+  if (-not $separatorSeen -and $argument -eq '--') { $separatorSeen = $true; continue }
+  $NpmArgs.Add($argument)
+}
+$NpmArgs = [string[]]$NpmArgs.ToArray()
 
 if (-not $env:ARAGON_FAKE_NPM_LOG) {
   throw 'ARAGON_FAKE_NPM_LOG is required'
@@ -11,8 +24,14 @@ if (-not $env:ARAGON_FAKE_NPM_STATE) {
 
 @{
   args = @($NpmArgs)
+  rawArgs = @($RawNpmArgs)
   nodeOptions = $env:NODE_OPTIONS
   otpPresent = Test-Path Env:npm_config_otp
+  # The release sets npm fetch-retry defaults through the environment, so the fixture
+  # records what an npm child actually inherited rather than what it was told on the
+  # command line (where nothing may change).
+  fetchRetries = $env:NPM_CONFIG_FETCH_RETRIES
+  fetchTimeout = $env:NPM_CONFIG_FETCH_TIMEOUT
 } |
   ConvertTo-Json -Compress |
   Add-Content -LiteralPath $env:ARAGON_FAKE_NPM_LOG -Encoding utf8
@@ -106,6 +125,12 @@ switch ($command) {
     Write-Json $packagePath $packageJson
     exit 0
   }
+  'ci' {
+    # The release now installs from the lockfile BEFORE any gate runs. In the fake this
+    # is a no-op on purpose: `ci` by definition does not rewrite the lockfile, and the
+    # assertions that matter here are about WHERE it sits in the command sequence.
+    exit 0
+  }
   'install' {
     $lockPath = Join-Path (Get-Location) 'package-lock.json'
     $lock = Read-Json $lockPath
@@ -124,12 +149,42 @@ switch ($command) {
     if ($env:ARAGON_FAKE_NPM_FAIL_TEST_WORKSPACE -and
         ((-not ($NpmArgs -contains '-w')) -or
          (Get-Workspace $NpmArgs) -eq $env:ARAGON_FAKE_NPM_FAIL_TEST_WORKSPACE)) {
+      # `FAIL_TEST_ONCE` simulates the module-mirror race: the first run fails, the
+      # retry passes. It is counted in the state file so the retry is a real second
+      # run rather than a second branch.
+      if ($env:ARAGON_FAKE_NPM_FAIL_TEST_ONCE -eq '1') {
+        $once = Read-Json $env:ARAGON_FAKE_NPM_STATE
+        $remaining = [int](Get-StateProperty $once 'failTestOnce')
+        if ($remaining -gt 0) {
+          Set-StateProperty $once 'failTestOnce' ($remaining - 1)
+          Write-Json $env:ARAGON_FAKE_NPM_STATE $once
+          [Console]::Error.WriteLine('FAIL src/skills/__tests__/usage.test.ts [ src/skills/__tests__/usage.test.ts ]')
+          [Console]::Error.WriteLine("Error: ENOENT: no such file or directory, open 'C:\Temp\fixture\ssr\.tmp-1-ab'")
+          exit 1
+        }
+        exit 0
+      }
       [Console]::Error.WriteLine("Test failure in $env:ARAGON_FAKE_NPM_FAIL_TEST_WORKSPACE")
       exit 1
     }
     exit 0
   }
   'run' {
+    if ($NpmArgs[1] -eq 'verify:test-gate' -and -not ($NpmArgs -contains '-w')) {
+      # `--classify <log>` is the failure attribution. The default is `real` (non-zero),
+      # because a classifier that can only ever say "environment" would turn every
+      # release failure into a retry; ARAGON_FAKE_NPM_CLASSIFY=environment is the
+      # deliberate opt-in the tests use to exercise the retry path.
+      if ($NpmArgs -contains '--classify') {
+        if ($env:ARAGON_FAKE_NPM_CLASSIFY -eq 'environment') {
+          Write-Output '[test-gate] the failing files are the module-mirror race'
+          exit 0
+        }
+        [Console]::Error.WriteLine('[test-gate] real failure: the log holds a non-mirror error')
+        exit 1
+      }
+      exit 0
+    }
     if ($NpmArgs[1] -eq 'build' -and -not ($NpmArgs -contains '-w')) {
       $cliPackage = Read-Json (Join-Path (Get-Location) 'packages\cli\package.json')
       $distDirectory = Join-Path (Get-Location) 'packages\cli\dist'

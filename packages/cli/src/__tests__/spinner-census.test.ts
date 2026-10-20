@@ -99,8 +99,13 @@ describe('AC-11: the global status owns activity through overlays', () => {
     expect(bottom).not.toMatch(/<ActivityLine|liveSpinner\(/);
   });
 
-  it('passes the widened signal to all three view consumers', () => {
-    expect(count('reducedMotion={viewReducedMotion}')).toBe(3);
+  it('passes the widened signal to every view consumer', () => {
+    // SIX, NOT THREE (release-gate-and-native-panels): the native panel band mounts the
+    // roster, the TODO rail and the real-component tail, and all three animate. Every
+    // one of them must receive the WIDENED signal - a band that kept animating during a
+    // run because it got the raw flag is the same defect this census was written for,
+    // one panel further out.
+    expect(count('reducedMotion={viewReducedMotion}')).toBe(6);
   });
 
   it('suppresses other sites during starting, running and idle compaction regardless of overlay', () => {

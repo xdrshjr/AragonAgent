@@ -40,6 +40,7 @@ import type { ChildReviewProvider } from './child-reviewer.js';
 import { TEAM_LIMITS, TEAM_SUBAGENT_TOOL_NAMES } from './limits.js';
 import { isRetryableStreamError } from './retry.js';
 import { TeamBus } from './bus.js';
+import { resolveSubagentKey, resolveSubagentModel } from './model.js';
 import { makeTeamSend, makeTeamWait, withMailboxTail } from './comm-tools.js';
 import type { TeamHumanQueue, WatchdogPausable } from './human-queue.js';
 import { buildSubagentBlock } from './prompt.js';
@@ -162,6 +163,16 @@ export interface SubagentHooks {
    * so the phase read at fire time is current.
    */
   onActivity?: () => void;
+  /**
+   * THE TURN CAP AS AN INSPECTION TRIGGER (F-8 A'2). Called ONCE, at the turn
+   * that crossed `maxTurnsPerSubagent`, ONLY when the dispatch supervisor is
+   * live - the runtime wires this hook under the same gate as
+   * `overseerActive`, so its presence IS the supervised/legacy branch. The
+   * child is NOT stopped: the supervisor decides wait / nudge / replace /
+   * abandon through the same `inspectAndApply` path every other trigger
+   * uses, and a child it lets run carries no `truncated` flag.
+   */
+  onTurnCapReached?: (label: string) => void;
 }
 
 export interface SubagentHandle {
@@ -353,25 +364,39 @@ export function createSubagent(
 
   const tools = buildSubagentTools(spec, deps, getAgent);
 
-  // THE CHILD'S MODEL IS THE LEAD'S MODEL, READ FROM THE DISPATCH-TIME CONFIG
-  // (main-agent parity). Same provider, same model id, same base URL, same
-  // thinking level: a delegation is never a downgrade, and the only model a
-  // child may surprise its lead with is one a settings-screen edit made live
-  // between two dispatches.
+  // WHICH MODEL A CHILD RUNS IS A USER SETTING, RESOLVED FROM THE
+  // DISPATCH-TIME CONFIG through the one authority (subagent-model §3.4).
+  // `team.model: 'main'` - the default - is the historical main-agent parity
+  // exactly: same provider, model, base URL and thinking level as the lead.
+  // `'fast'` / `'profile'` are the user's explicit, visible, reversible cost
+  // switches, and EVERY failure mode (tier off, profile deleted, profile key
+  // missing) degrades back to the main connection with a disclosed reason
+  // rather than failing the dispatch (D-4). The MODEL itself still cannot
+  // choose: `normalizeSubagentSpecs` drops a stale `model` key (D-1).
   //
   // `maxTokens` inherits `deps.config.maxTokens` below - the same ambition the
-  // lead sends, clamped by the same adapter, so an inherited large value
-  // degrades to the right number rather than to an HTTP 400.
-  const resolved: { ref: ModelRef; thinkingLevel: typeof deps.config.thinkingLevel; role: 'main' } = {
-    ref: {
-      providerId: deps.config.provider,
-      modelId: deps.config.model,
-      ...(deps.config.baseUrl ? { baseUrl: deps.config.baseUrl } : {}),
-    },
-    thinkingLevel: deps.config.thinkingLevel,
-    role: 'main',
-  };
-  const model: ModelRef = resolved.ref;
+  // lead sends, clamped by Core's `resolveOutputTokens` against the CHILD
+  // model's own ceiling, so an inherited large value degrades to the right
+  // number rather than to an HTTP 400.
+  const resolution = resolveSubagentModel(deps.config,
+    (id, role) => Boolean(deps.getApiKey(id, role)));
+  const model: ModelRef = resolution.ref;
+
+  // THE CHILD'S OWN KEY CLOSURE, PROFILE-AWARE (§3.3 / I-4). A bound profile's
+  // dedicated key is visible ONLY inside this closure - never in env, config
+  // `apiKeys` or a log line - while every other provider resolves through the
+  // lead's resolver at `resolution.keyRole`, which is what keeps a fast child
+  // entitled to the fast-role key and a main child to the main one.
+  const childGetApiKey = (id: string): string | undefined =>
+    resolveSubagentKey(deps.config, resolution, id,
+      (providerId, role) => deps.getApiKey(providerId, role));
+  // The boolean twin, for the child's compaction summarizer (V-4): the child's
+  // own resolution first, the lead layer by role second. Forwarding only
+  // `deps.getApiKey` would hide a profile-dedicated key from `resolveSummarizer`
+  // and silently disable the child's compaction - the exact gap the req-level
+  // resolvers on `ChildContextManagerRequest` exist to close.
+  const childHasKey = (id: string, role?: ModelRole): boolean =>
+    Boolean(childGetApiKey(id) ?? deps.getApiKey(id, role));
 
   // HOISTED TO A LOCAL, AND THAT IS WHAT MAKES W3 POSSIBLE AT ALL. This was built
   // INLINE inside the `agentFactory({...})` argument, so there was nothing for the
@@ -410,7 +435,12 @@ export function createSubagent(
   const contextManager = deps.contextManagerFor?.({
     label: spec.label,
     model,
-    role: resolved.role ?? 'main',
+    // keyRole (V-4): a fast child's summarizer resolves its main choice with
+    // role='fast', so a fast-only key is visible to it; profile keys reach it
+    // through the req-level resolvers below instead.
+    role: resolution.keyRole,
+    getApiKey: childGetApiKey,
+    hasKey: childHasKey,
     getMessages: () => agentRef?.state.messages ?? [],
     getSystemPrompt: () => systemPrompt,
     onCompacted: () => {
@@ -422,12 +452,13 @@ export function createSubagent(
     systemPrompt,
     model,
     tools,
-    thinkingLevel: resolved.thinkingLevel,
+    thinkingLevel: resolution.thinkingLevel,
     // The LEAD's registry instance, REUSED (P2-2). It holds adapter state, and
     // constructing five of them per dispatch is pure waste.
     providerRegistry: deps.providerRegistry,
-    // The lead's closure, so a settings-screen key edit reaches children too.
-    getApiKey: (id) => deps.getApiKey(id, resolved.role ?? 'main'),
+    // The child's own profile-aware closure, so a settings-screen key edit
+    // reaches children too and a bound profile's key reaches ONLY them.
+    getApiKey: childGetApiKey,
     ...(deps.config.maxTokens !== undefined ? { maxTokens: deps.config.maxTokens } : {}),
     timeouts: {
       toolTimeout: deps.config.toolTimeoutMs,
@@ -557,12 +588,24 @@ export function createSubagent(
         // not runaway - it is working.
         const turnCap = deps.config.team.maxTurnsPerSubagent;
         if (turnCap > 0 && run.turns >= turnCap) {
-          run.truncated = true;
-          // THE FLAG FIRST, exactly like `handle.abort()`: the child's
-          // reviewer reads `abortRequested` as its guard-1 fact, and a
-          // turn-cap stop must be visible to it in the same tick.
-          abortRequested = true;
-          agent.abort();
+          if (hooks.onTurnCapReached !== undefined) {
+            // A'2, D-4 for the turn cap: SUPERVISED means the ceiling is
+            // an inspection trigger, not a death sentence. ONE look at the
+            // crossing turn (`===`), never a per-turn storm; the child
+            // keeps working unless the supervisor decides replace or
+            // abandon, and a child that keeps running carries NO
+            // `truncated` flag - the report must not call it partial.
+            if (run.turns === turnCap) hooks.onTurnCapReached(spec.label);
+          } else {
+            // LEGACY regime (no supervisor for this dispatch): the hard
+            // stop, byte for byte what it always was.
+            run.truncated = true;
+            // THE FLAG FIRST, exactly like `handle.abort()`: the child's
+            // reviewer reads `abortRequested` as its guard-1 fact, and a
+            // turn-cap stop must be visible to it in the same tick.
+            abortRequested = true;
+            agent.abort();
+          }
         }
         break;
       }

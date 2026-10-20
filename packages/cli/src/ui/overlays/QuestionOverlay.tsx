@@ -63,6 +63,21 @@ export function QuestionOverlay({
   const [phase, setPhase] = useState<'choosing' | 'typingOther' | 'review'>('choosing');
   const [cursors, setCursors] = useState<number[]>(() => initialCursors(questions));
   const [selections, setSelections] = useState<Set<number>[]>(() => initialSelections(questions));
+  /**
+   * THE PER-QUESTION EXPLICIT-MARK BIT (V-1 / D-8).
+   *
+   * `initialSelections` PRE-SELECTS the recommended option on EVERY question
+   * (or the first option when there is none), so "the selection set is empty"
+   * is unreachable and can never be the test for "did the user choose?". The
+   * only reliable discriminator is the fact itself: the user pressed SPACE on
+   * this question. Without it, a user who only MOVES the cursor and presses
+   * Enter would submit the RECOMMENDED option instead of the highlighted one -
+   * a silent regression of the wizard's most common path. The bit survives
+   * Left/Right navigation exactly like `selections` and `cursors` do, and a
+   * single-choice mark is idempotent (no un-mark; Enter always has at least
+   * the marked item to submit).
+   */
+  const [markedSteps, setMarkedSteps] = useState<boolean[]>(() => questions.map(() => false));
   const [customs, setCustoms] = useState<string[]>(() => questions.map(() => ''));
   const [draft, setDraft] = useState('');
   const [offset, setOffset] = useState(0);
@@ -89,6 +104,9 @@ export function QuestionOverlay({
 
   const chooseAt = (index: number, option: number): void =>
     setSelections((prev) => prev.map((set, i) => (i === index ? new Set([option]) : set)));
+
+  const markAt = (index: number): void =>
+    setMarkedSteps((prev) => prev.map((marked, i) => (i === index ? true : marked)));
 
   const buildAnswers = (): Answer[] =>
     questions.map((q, i) => {
@@ -189,8 +207,21 @@ export function QuestionOverlay({
       goBack();
       return;
     }
-    if (input === ' ' && question.allowMultiple) {
-      toggleAt(step, cursor);
+    // SPACE, BY QUESTION SHAPE (D-8). The strict `input === ' '` keeps a
+    // multi-character paste frame from ever matching (R-8); the Other row is
+    // a no-op in both shapes because it needs TEXT, and Enter is its key.
+    if (input === ' ' && !question.options[cursor]?.isOther) {
+      if (question.allowMultiple) {
+        toggleAt(step, cursor);
+        return;
+      }
+      // SINGLE CHOICE: mark the highlighted item and STAY - the terminal
+      // convention of "space selects, enter confirms". The mark is recorded
+      // both in the selection set (so `[x]` renders) and in the explicit
+      // mark bit (so a later Enter submits THIS item even after the cursor
+      // has moved on).
+      chooseAt(step, cursor);
+      markAt(step);
       return;
     }
     if (key.return) {
@@ -200,8 +231,14 @@ export function QuestionOverlay({
         setPhase('typingOther');
         return;
       }
-      if (!question.allowMultiple) chooseAt(step, cursor);
-      else if (!(selections[step] ?? new Set()).has(cursor)) toggleAt(step, cursor);
+      // A single-choice Enter submits the CURSOR item unless the user has
+      // explicitly space-marked this question, in which case the marked item
+      // wins even if the cursor has since moved (V-1's regression guard:
+      // cursor + Enter alone keeps today's behavior, recommended preselect
+      // and all).
+      if (!question.allowMultiple) {
+        if (!markedSteps[step]) chooseAt(step, cursor);
+      } else if (!(selections[step] ?? new Set()).has(cursor)) toggleAt(step, cursor);
       advance();
     }
   });
@@ -213,9 +250,9 @@ export function QuestionOverlay({
       ? `type your answer ${glyphs.midDot} ${glyphs.enterKey} commit ${glyphs.midDot} ${glyphs.arrowLeft} back ${glyphs.midDot} esc cancel`
       : phase === 'review'
       ? `${glyphs.enterKey} submit ${glyphs.midDot} ${glyphs.arrowLeft} back ${glyphs.midDot} esc cancel`
-      : `${glyphs.arrowUp}${glyphs.arrowDown} choose ${glyphs.midDot} ${glyphs.enterKey} next${
-          question.allowMultiple ? ` ${glyphs.midDot} space toggle` : ''
-        } ${glyphs.midDot} ${glyphs.arrowLeft} back ${glyphs.midDot} esc cancel`;
+      : question.options[cursor]?.isOther
+      ? `${glyphs.arrowUp}${glyphs.arrowDown} choose ${glyphs.midDot} ${glyphs.enterKey} to type ${glyphs.midDot} ${glyphs.arrowLeft} back ${glyphs.midDot} esc cancel`
+      : `${glyphs.arrowUp}${glyphs.arrowDown} choose ${glyphs.midDot} space select ${glyphs.midDot} ${glyphs.enterKey} next ${glyphs.midDot} ${glyphs.arrowLeft} back ${glyphs.midDot} esc cancel`;
 
   const rowTexts: string[] = [];
   const optionStarts: number[] = [];
@@ -239,9 +276,12 @@ export function QuestionOverlay({
     setOffset(previous => focus < previous ? focus : focus >= previous + height
       ? focus - height + 1 : previous);
   }, [focus, maxRows, cols, step, phase]);
+  // `space select` shows for BOTH shapes (AC-10) - 42 characters on the
+  // single-choice shape without `cancel`, a deliberate 5-column growth inside
+  // the `cols <= 48` budget this hint exists for (V-12).
   const shortHint = phase === 'typingOther' ? 'Enter commit | Left back | Esc cancel'
     : phase === 'review' ? 'Enter submit | Left back | Esc cancel'
-    : question.allowMultiple ? '^v choose Space toggle Enter next Esc' : 'Up/Down choose Enter next Esc cancel';
+    : '^v choose Space select Enter next Esc';
   return <OverlayFrame title={`${title}${position}`} hint={cols <= 48 ? shortHint : hint}
     maxRows={maxRows} cols={cols} theme={theme} caps={caps}
     rows={rowTexts.map((line, index) => <Text key={index} wrap="truncate">{line || ' '}</Text>)}

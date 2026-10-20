@@ -190,6 +190,23 @@ const ENTRY_FIELDS: Record<Entry['kind'], Fields> = {
     exitCode: (value, path) => { if (value !== null) number(value, path); },
     startedAt: number, readyAt: optional(number), endedAt: optional(number), rows: array(string),
     rowsSeen: number, terminal: optional(boolean), killIncomplete: optional(boolean),
+    // THE FOUR FIELDS long-task-jobs adds (AC-38), and the reason this validator
+    // has to learn them: it is STRICT — an unknown field fails the whole load — so
+    // a session saved with a task in it would refuse to resume, which is a P0 in
+    // R-8's terms.
+    //
+    // ALL FOUR ARE OPTIONAL HERE, DELIBERATELY, and that is a correction to the
+    // design. The reducer always writes `jobKind` and `lastOutputAt` for a NEW
+    // save, so they are required on `ServiceSnapshot` (that is what turns a
+    // forgotten field into a compile error). But a session file written by any
+    // build BEFORE this feature has neither, and a strict validator that demanded
+    // them would make every existing session unresumable — a far worse failure
+    // than a missing progress line. Recorded in the spec's implementation notes.
+    jobKind: optional(enumeration('service', 'task')),
+    progress: optional(string),
+    lastOutputAt: optional(number),
+    stalled: optional(boolean),
+    logPath: optional(string),
   },
 };
 

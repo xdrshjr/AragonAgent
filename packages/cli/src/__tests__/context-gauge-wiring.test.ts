@@ -25,6 +25,7 @@ import {
   type ModelRef,
 } from '@aragon-agent/core';
 import { CompactionWiring } from '../compaction/wiring.js';
+import { Compactor } from '../compaction/compactor.js';
 import { ContextMeter } from '../compaction/meter.js';
 import type { CompactionEvent, CompactionRecord } from '../compaction/types.js';
 import {
@@ -39,6 +40,7 @@ import {
   DEFAULT_TODO_CONFIG,
   DEFAULT_UPDATE_CONFIG,
   type CliConfig,
+  DEFAULT_JOBS_CONFIG,
 } from '../config/schema.js';
 import { AgentController } from '../agent/controller.js';
 import { scriptedProvider, type ScriptStep } from './helpers/scripted-provider.js';
@@ -320,6 +322,10 @@ function controllerConfig(overrides: Partial<CliConfig> = {}): CliConfig {
     team: { ...DEFAULT_TEAM_CONFIG, enabled: false },
     todo: { ...DEFAULT_TODO_CONFIG, enabled: false },
     bash: DEFAULT_BASH_CONFIG,
+    // The ELEVENTH nested section (long-task-jobs). `enabled: true` because a
+    // fixture that says nothing about jobs should behave like a default session;
+    // the subsystems each fixture is about are switched off individually above.
+    jobs: DEFAULT_JOBS_CONFIG,
     retry: DEFAULT_RETRY_CONFIG,
     compaction: { ...DEFAULT_COMPACTION_CONFIG },
     cwd: process.cwd(),
@@ -417,6 +423,63 @@ describe('live model context discovery', () => {
       finish(new Response(JSON.stringify({ data: [{ id: 'custom', context_length: 64000 }] })));
       await vi.waitFor(() => expect(controller.getContextUsage().window).toBe(64000));
     } finally { finish(new Response('{}')); controller.dispose(); }
+  });
+});
+
+/**
+ * profile-context-window AC-9: EVERY fallback meter (wiring's own, the
+ * compactor's own) forwards `contextWindowOrigin` beside the value. A missed
+ * site is a `/context` that says "config" while the denominator actually came
+ * from the bound profile - the dishonesty invariant 5 exists to forbid.
+ */
+describe('override origin reaches every fallback meter (AC-9)', () => {
+  function originConfig(overrides: Partial<CliConfig> = {}): CliConfig {
+    return controllerConfig({ contextWindow: 120_000,
+      contextWindowOrigin: 'profile', ...overrides });
+  }
+
+  it('the lead controller names the profile on its own gauge', () => {
+    const controller = new AgentController(originConfig());
+    try {
+      expect(controller.getContextUsage()).toMatchObject({ window: 120_000,
+        windowOverridden: true, windowOverrideOrigin: 'profile' });
+    } finally { controller.dispose(); }
+  });
+
+  it('the wiring fallback meter carries the same origin', () => {
+    const info = modelInfo(200_000);
+    const wiring = new CompactionWiring({
+      getConfig: () => originConfig(), hasKey: () => true, getApiKey: () => 'k',
+      getModelInfoFor: () => info, isPricedModel: () => true,
+      getMessages: () => [], getSystemPrompt: () => '', notify: () => {},
+    });
+    try {
+      expect(wiring.snapshot().pressure).toMatchObject({ contextWindow: 120_000,
+        windowOverridden: true, windowOverrideOrigin: 'profile' });
+    } finally { wiring.dispose(); }
+  });
+
+  it('the compactor fallback meter carries the same origin', () => {
+    const info = modelInfo(200_000);
+    const pressures: import('../compaction/types.js').Pressure[] = [];
+    const compactor = new Compactor({
+      getConfig: () => originConfig(), hasKey: () => true, getApiKey: () => 'k',
+      getModelInfoFor: () => info, isPricedModel: () => true,
+      getMessages: () => [], getSystemPrompt: () => '',
+      complete: async () => { throw new Error('not reached'); },
+      emit: () => {}, notify: () => {},
+      onPressure: (pressure) => pressures.push(pressure),
+    });
+    compactor.shouldCompact({ messageCount: 0, turnIndex: 1, trigger: 'pressure' });
+    expect(pressures[0]).toMatchObject({ contextWindow: 120_000,
+      windowOverridden: true, windowOverrideOrigin: 'profile' });
+  });
+
+  it('a config without an override never grows the key (invariant 6)', () => {
+    const controller = new AgentController(controllerConfig());
+    try {
+      expect(controller.getContextUsage()).not.toHaveProperty('windowOverrideOrigin');
+    } finally { controller.dispose(); }
   });
 });
 

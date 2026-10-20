@@ -25,6 +25,13 @@ export function resolveActivityLabel(
   activity: RunActivity,
   glyphs: ReturnType<typeof pickGlyphs>,
 ): string {
+  // A WAIT OUTRANKS EVERYTHING BELOW IT, and sits ABOVE `runningTool` on purpose:
+  // "Running job_wait" names the tool, "Waiting on t3 (up to 30s)" names the
+  // situation. It is placed after the phase/outcome branch because a settled run
+  // must never claim to be waiting for anything.
+  if (activity.phase === undefined && activity.outcome === undefined && activity.wait) {
+    return `Waiting on ${activity.wait.jobId} (up to ${activity.wait.upToSeconds}s)`;
+  }
   if (activity.phase !== undefined || activity.activeTool !== undefined || activity.outcome !== undefined) {
     return phaseLabels({
       phase: activity.phase ?? (activity.activeTool ? 'tool' : 'idle'),

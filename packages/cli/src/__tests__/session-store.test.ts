@@ -13,9 +13,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { join, resolve } from 'node:path';
+import { hostname, tmpdir } from 'node:os';
 import process from 'node:process';
 import {
   isValidSessionId,
@@ -32,7 +33,7 @@ import {
   tryAcquireSessionLock,
   writeSession,
 } from '../session/store.js';
-import { loadSession } from '../session/persist.js';
+import { loadSession, saveSession as saveSessionFile } from '../session/persist.js';
 import { runExec } from '../exec/index.js';
 import type { SessionMeta } from '../session/persist.js';
 
@@ -409,5 +410,232 @@ describe('R-7 (second boundary): ids that did not come from --session-id', () =>
     expect(existsSync(sessionPathFor('hand-saved'))).toBe(true);
     expect(existsSync(join(CWD, 'hand-saved.json.json'))).toBe(false);
     rmSync(handSaved, { force: true });
+  });
+});
+
+/**
+ * Tui-session-id-resume 7.1 T-31..T-34, T-40, T-44 (added with the feature).
+ *
+ * TWO OF THESE GUARD AGAINST UNRECOVERABLE LOSS, which is why they are worth
+ * their own block rather than a line in the case above:
+ *
+ *   - T-44: `--all` used to mean "also consider files with no metadata", but once
+ *     the TUI started writing `meta` the same flag reached every live checkpoint.
+ *     It is now scoped to one axis and can never touch an `origin: 'tui'` file.
+ *   - T-40: `aragon exec --resume <tui-id>` used to take `meta.id` and write its
+ *     own result into the parent checkpoint. The rule lives in `resumedSessionId`
+ *     so `exec/**` needs no change (D-20).
+ */
+function tuiMeta(id: string, at: number, extra: Record<string, unknown> = {}): SessionMeta {
+  return { ...meta(id, at), origin: 'tui', ...extra } as SessionMeta;
+}
+
+/** A TUI checkpoint: managed, `origin: 'tui'`, and it does NOT move the pointer. */
+function writeTui(id: string, at: number, extra: Record<string, unknown> = {}): string {
+  const path = sessionPathFor(id);
+  saveSessionFile(path, {
+    model: { providerId: 'anthropic', modelId: 'm' },
+    messages: [{ role: 'user', content: 'a tui turn' }] as never,
+    entries: [],
+    todos: [],
+    meta: tuiMeta(id, at, extra),
+  });
+  return path;
+}
+
+/**
+ * The minimum controller `runExec` needs, as a literal: these tests are about
+ * which FILE a run writes, not about the engine.
+ */
+function stubController(): unknown {
+  const messages = [{ role: 'user', content: 'a tui turn' }];
+  return {
+    preflight: () => ({ ok: true }),
+    subscribe: () => () => {},
+    getModelInfo: () => ({ cost: { input: 0, output: 0 } }),
+    getTodoSnapshot: () => null,
+    getTodoConfig: () => ({ followThrough: 'notify' as const }),
+    getConfig: () => ({ provider: 'anthropic', model: 'm', baseUrl: undefined }),
+    getCwd: () => CWD,
+    getMessages: () => messages,
+    replaceMessages: () => {},
+    restoreTodos: () => {},
+    listTools: () => [],
+    isPricedModel: () => false,
+    abort: () => {},
+    dispose: () => {},
+    prompt: async () => {},
+  };
+}
+
+describe('T-31 / T-32 / T-33 / T-34 / T-44: the two axes of pruning', () => {
+  it('prune skips tui checkpoints by default', () => {
+    write('exec-one', 1000);
+    const tui = writeTui('a4k2m9', 1000);
+    const doomed = pruneSessions({ olderThanDays: 0, now: () => 10_000_000 });
+    expect(doomed.map((entry) => entry.id)).toEqual(['exec-one']);
+    expect(existsSync(tui)).toBe(true);
+  });
+
+  it('prune --origin tui reaches ONLY the checkpoints', () => {
+    write('exec-one', 1000);
+    const tui = writeTui('a4k2m9', 1000);
+    const doomed = pruneSessions({ olderThanDays: 0, origin: 'tui', now: () => 10_000_000 });
+    expect(doomed.map((entry) => entry.id)).toEqual(['a4k2m9']);
+    expect(existsSync(tui)).toBe(false);
+    expect(existsSync(sessionPathFor('exec-one'))).toBe(true);
+  });
+
+  it('--all never reaches a tui checkpoint', () => {
+    const tui = writeTui('a4k2m9', 1000);
+    const foreign = join(sessionsDir(), 'my-notes.json');
+    writeFileSync(
+      foreign,
+      JSON.stringify({
+        version: 1,
+        savedAt: 500,
+        model: { providerId: 'anthropic', modelId: 'm' },
+        messages: [],
+        entries: [],
+      }),
+    );
+    const doomed = pruneSessions({ olderThanDays: 0, all: true, now: () => 10_000_000 });
+    expect(doomed.map((entry) => entry.id)).toEqual(['my-notes']);
+    expect(existsSync(foreign)).toBe(false);
+    expect(existsSync(tui)).toBe(true);
+
+    // The reverse direction: `--origin tui` gets the checkpoints (both of them,
+    // now) and still leaves no-metadata files alone - the two axes really are
+    // independent rather than one flag with three meanings.
+    const second = writeTui('b7n3q2', 1000);
+    const kept = pruneSessions({
+      olderThanDays: 0,
+      all: true,
+      origin: 'tui',
+      now: () => 10_000_000,
+    });
+    expect(kept.map((entry) => entry.id).sort()).toEqual(['a4k2m9', 'b7n3q2']);
+    expect(existsSync(second)).toBe(false);
+  });
+
+  it('prune never deletes a pinned session', () => {
+    const pinned = writeTui('a4k2m9', 1000, { pinned: true });
+    write('exec-one', 1000);
+    const doomed = pruneSessions({ olderThanDays: 0, origin: 'all', now: () => 10_000_000 });
+    expect(doomed.map((entry) => entry.id)).toEqual(['exec-one']);
+    expect(existsSync(pinned)).toBe(true);
+  });
+
+  it('prune never deletes a live session whose owner is alive', () => {
+    const live = writeTui('a4k2m9', 1000, { live: true });
+    const handle = tryAcquireSessionLock('a4k2m9', { isProcessAlive: () => true });
+    expect(handle).not.toBeNull();
+    const alive = pruneSessions({
+      olderThanDays: 0,
+      origin: 'tui',
+      now: () => 10_000_000,
+      isProcessAlive: () => true,
+    });
+    expect(alive).toEqual([]);
+    expect(existsSync(live)).toBe(true);
+    handle?.release();
+
+    // `ESRCH` is the ordinary answer for a process killed in the night, and the
+    // file then IS prunable: a protection that could never expire is a file
+    // nobody can ever clean up.
+    const holder = join(sessionsDir(), 'a4k2m9.lock');
+    writeFileSync(
+      holder,
+      JSON.stringify({ pid: 1, host: hostname(), startedAt: 1, uuid: 'x' }),
+    );
+    const dead = pruneSessions({
+      olderThanDays: 0,
+      origin: 'tui',
+      now: () => 10_000_000,
+      isProcessAlive: () => false,
+    });
+    expect(dead.map((entry) => entry.id)).toEqual(['a4k2m9']);
+  });
+
+  it('--continue ignores tui checkpoints, on BOTH branches', () => {
+    write('exec-one', 1000);
+    writeTui('a4k2m9', 2000);
+    // The scan branch: the newest file in the directory is a TUI checkpoint, and
+    // `--continue` still answers with the exec session.
+    expect(latestSessionForCwd(CWD)?.id).toBe('exec-one');
+
+    // The pointer branch: point `.last.json` at the TUI checkpoint by hand. Only
+    // `writeSession` moves this pointer today, and relying on that would be the
+    // kind of "nobody writes it today" assumption this repository has paid for.
+    const key = createHash('sha256').update(resolve(CWD)).digest('hex').slice(0, 16);
+    writeFileSync(
+      join(sessionsDir(), '.last.json'),
+      JSON.stringify({ [key]: { id: 'a4k2m9', updatedAt: 2000 } }),
+    );
+    expect(latestSessionForCwd(CWD)?.id).toBe('exec-one');
+  });
+});
+
+describe('T-40 / D-20 / I-3: exec never writes back to a tui checkpoint', () => {
+  it('resumedSessionId refuses to name a tui file', () => {
+    const base = { version: 1, savedAt: 0, model: {}, messages: [], entries: [] } as never;
+    const tui = { ...(base as object), meta: tuiMeta('a4k2m9', 1) } as never;
+    const minted = resumedSessionId(sessionPathFor('a4k2m9'), tui);
+    // A fresh id, exactly as a file this CLI has never seen: `exec` writes its own
+    // session instead of overwriting the one a human is still having.
+    expect(minted).not.toBe('a4k2m9');
+    expect(isValidSessionId(minted)).toBe(true);
+  });
+
+  it('aragon exec --resume <tui-id> leaves the parent byte-identical', async () => {
+    const parent = writeTui('a4k2m9', 1000);
+    const before = readFileSync(parent);
+    const beforeMtime = statSync(parent).mtimeMs;
+    let stdout = '';
+    const code = await runExec({}, { outputFormat: 'json', resume: 'a4k2m9' }, 'next', {
+      version: '0.6.0',
+      makeController: () => stubController() as never,
+      stdout: { write: (chunk: string) => ((stdout += chunk), true) } as never,
+      stderr: { write: () => true } as never,
+    });
+
+    expect(code).toBe(0);
+    // THE PARENT IS UNTOUCHED: contents, mtime, and no new file at its id.
+    expect(readFileSync(parent).equals(before)).toBe(true);
+    expect(statSync(parent).mtimeMs).toBe(beforeMtime);
+    // And the run still recorded itself - under the id it minted.
+    const written = JSON.parse(stdout).sessionId as string;
+    expect(written).not.toBe('a4k2m9');
+    expect(existsSync(sessionPathFor(written))).toBe(true);
+    // THE `--continue` POINTER IS THE THIRD THING I-3 NAMES, and it MOVES: this
+    // run created a real exec session for this cwd, so the newest exec session
+    // for this cwd is the one it wrote. What it must never do is name the parent
+    // - that is the value that would send `--continue` at a TUI file.
+    const pointer = join(sessionsDir(), '.last.json');
+    const pointerText = existsSync(pointer) ? readFileSync(pointer, 'utf-8') : '';
+    expect(pointerText).not.toContain('a4k2m9');
+  });
+
+  it('aragon exec --session-id <tui-id> writes its own session too', async () => {
+    // THE FOURTH WRITE-BACK PATH (D-20 / I-3). `--session-id` is the
+    // wrapper-friendly upsert and it returns the typed id verbatim, so before
+    // this guard it replaced a TUI checkpoint and dropped its `pinned` flag.
+    const parent = writeTui('n4t8q2', 1000);
+    const before = readFileSync(parent);
+    const beforeMtime = statSync(parent).mtimeMs;
+    let stdout = '';
+    const code = await runExec({}, { outputFormat: 'json', sessionId: 'n4t8q2' }, 'next', {
+      version: '0.6.0',
+      makeController: () => stubController() as never,
+      stdout: { write: (chunk: string) => ((stdout += chunk), true) } as never,
+      stderr: { write: () => true } as never,
+    });
+
+    expect(code).toBe(0);
+    expect(readFileSync(parent).equals(before)).toBe(true);
+    expect(statSync(parent).mtimeMs).toBe(beforeMtime);
+    const written = JSON.parse(stdout).sessionId as string;
+    expect(written).not.toBe('n4t8q2');
+    expect(existsSync(sessionPathFor(written))).toBe(true);
   });
 });

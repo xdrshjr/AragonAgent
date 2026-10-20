@@ -8,6 +8,7 @@
 
 import { PASTE_CLOSE, PASTE_OPEN } from '../input/limits.js';
 import { sanitisePaste } from '../input/paste-parse.js';
+import { stripControlSequences } from '../input/control-sequences.js';
 
 export interface FrameTextSegment {
   readonly kind: 'text';
@@ -125,10 +126,14 @@ export function hasPasteFrame(input: string): boolean {
  * nothing on screen to explain it.
  *
  * This is strictly better than v0.6.3 for both consumers: a pasted key carrying a
- * stray CR or an ANSI sequence is now cleaned rather than stored raw.
+ * stray CR or an ANSI sequence is now cleaned rather than stored raw. The
+ * unframed branch strips escape SEQUENCES before the control sweep, because
+ * deleting only the introducer left `[0m` in the stored value -- and in a
+ * settings field that residue is invisible behind `maskDot` while the value
+ * handed to `registerSecret()` is silently wrong.
  */
 export function stripPasteFrames(input: string): string {
-  if (!hasPasteFrame(input)) return sanitiseTyped(input);
+  if (!hasPasteFrame(input)) return sanitiseTyped(stripControlSequences(input));
   return splitPasteFrames(input)
     .map((segment) => (segment.kind === 'paste' ? sanitiseTyped(segment.text) : segment.text))
     .join('');

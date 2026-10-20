@@ -3,7 +3,13 @@ import { PassThrough } from 'node:stream';
 import { createStdinFilter, tryCreateStdinFilter } from '../input/stdin-filter.js';
 import type { MouseEvent } from '../input/mouse-events.js';
 import { enterAltScreen } from '../ui/screen.js';
-import { ENTER_NEWLINE_FRAME, PASTE_OPEN, PASTE_CLOSE, PASTE_MAX_BYTES } from '../input/limits.js';
+import {
+  ENTER_NEWLINE_FRAME,
+  PASTE_CLOSE,
+  PASTE_MARKER_RESCAN_TTL_MS,
+  PASTE_MAX_BYTES,
+  PASTE_OPEN,
+} from '../input/limits.js';
 import { ENTER_SEQUENCES } from '../input/enter-sequences.js';
 
 /** Written as an escape, not a raw byte, so an editor that stripped the control
@@ -131,8 +137,11 @@ describe('输入流顺序和结束边界', () => {
       stream.emit('data', raw);
       stream.emit('end');
       const ended = sink.text();
-      const suffix = raw.endsWith('13;') ? '[13;' : '[20';
-      expect(ended).toBe(`${PASTE_OPEN}a\nb${suffix}${PASTE_CLOSE}`);
+      // The torn tail (an unfinished CSI) is a SEQUENCE, so draining it leaves
+      // the text and no parameter bytes. What this case is really about --
+      // draining synchronously, clearing the timers, and staying idempotent
+      // after `end` -- is unchanged.
+      expect(ended).toBe(`${PASTE_OPEN}a\nb${PASTE_CLOSE}`);
       expect(vi.getTimerCount()).toBe(0);
       stream.emit('close');
       stream.emit('data', 'late');
@@ -585,10 +594,11 @@ describe('createStdinFilter — Enter-family rewrite (tui-shift-enter-copy-queue
     (stream as unknown as PassThrough).write(`${BEGIN}${ESC}[13;2u${END}`);
     await tick();
 
-    // The ESC is stripped by `sanitisePaste` like any other C0 byte in a
-    // payload, and nothing is REWRITTEN: a look-alike in pasted text is
-    // content, not a key.
-    expect(sink.text()).toBe(`${OPEN}[13;2u${CLOSE}`);
+    // A look-alike in pasted text is content, not a key: nothing is REWRITTEN
+    // into a newline frame. It is still a control SEQUENCE, so payload cleaning
+    // removes it whole -- which is why the sink gets no frame at all (an empty
+    // payload is not emitted).
+    expect(sink.text()).toBe('');
     filter.dispose();
   });
 
@@ -649,9 +659,11 @@ describe('createStdinFilter — paste framing', () => {
     (stream as unknown as PassThrough).write(`${BEGIN}log ${ESC}[<0;12;5M tail${END}`);
     await tick();
 
-    // The ESC itself is stripped by `sanitisePaste` (G2), but the REPORT is not
-    // consumed as a report: every printable byte of it is still there, in order.
-    expect(sink.text()).toBe(`${OPEN}log [<0;12;5M tail${CLOSE}`);
+    // The REPORT is not consumed as a report -- no `MouseEvent` is emitted, and
+    // the surrounding text keeps its order. The bytes themselves are a control
+    // SEQUENCE, so `sanitisePaste` removes it whole instead of leaving
+    // `[<0;12;5M` behind as visible garbage.
+    expect(sink.text()).toBe(`${OPEN}log  tail${CLOSE}`);
     expect(seen).toHaveLength(0);
     filter.dispose();
   });
@@ -670,7 +682,7 @@ describe('createStdinFilter — paste framing', () => {
     await new Promise((r) => setTimeout(r, 40));
 
     expect(seen).toHaveLength(0);
-    expect(sink.text()).toBe(`${OPEN}first line\nsecond [<0;12;5M line${CLOSE}`);
+    expect(sink.text()).toBe(`${OPEN}first line\nsecond  line${CLOSE}`);
     filter.dispose();
   });
 
@@ -811,5 +823,307 @@ describe('createStdinFilter — paste framing', () => {
 
     expect(sink.text()).toBe('foo\r\nbar');
     filter.dispose();
+  });
+});
+
+/**
+ * Defect 2 / B3 A'' -- THE TORN-MARKER RESCUE.
+ *
+ * A paste whose marker ESC lands in a read event of its own is ordinary on a
+ * Windows console, over SSH and inside tmux under load. The 12 ms pending flush
+ * releases that ESC (the Esc key must not be held hostage) and, before the
+ * rescue, nothing recognised the `[200~hello world` that followed -- `indexOf`
+ * needs the ESC -- so the marker was typed into the draft.
+ */
+describe('createStdinFilter -- torn paste marker rescue (defect 2)', () => {
+  /** Past `PENDING_FLUSH_MS` (12 ms), so the lone ESC is really released first. */
+  const AFTER_FLUSH_MS = 20;
+
+  const tornFilter = () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    return { stream, filter, sink: drain(filter) };
+  };
+
+  it('rescans a late BEGIN fragment instead of typing `[200~` into the draft', () => {
+    vi.useFakeTimers();
+    try {
+      const { stream, filter, sink } = tornFilter();
+      stream.emit('data', ESC);
+      vi.advanceTimersByTime(AFTER_FLUSH_MS); // the lone ESC reaches Ink as a key
+      stream.emit('data', '[200~hello world');
+      stream.emit('data', END);
+      // The marker CHARACTERS never become text. The leading ESC is the key
+      // press this filter had already written and cannot retract (§R-4.1).
+      expect(sink.text()).toBe(`${ESC}${OPEN}hello world${CLOSE}`);
+      expect(sink.text()).not.toContain('[200~');
+      filter.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('rescans a late END fragment instead of typing `[201~` (I-16)', () => {
+    vi.useFakeTimers();
+    try {
+      const { stream, filter, sink } = tornFilter();
+      stream.emit('data', ESC);
+      vi.advanceTimersByTime(AFTER_FLUSH_MS);
+      stream.emit('data', '[201~');
+      expect(sink.text()).toBe(ESC); // the key press, nothing else
+      expect(sink.text()).not.toContain('[201~');
+      filter.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not swallow a fragment the chunk did not complete at the junction', () => {
+    // The rescue fires only when this chunk FINISHES the released head into a
+    // whole marker. A marker further along a chunk is ordinary text: consuming
+    // it would delete characters the user really typed (see the literal case
+    // below), so that fragment keeps its bytes and only its ESC is missing.
+    vi.useFakeTimers();
+    try {
+      const { stream, filter, sink } = tornFilter();
+      stream.emit('data', ESC);
+      vi.advanceTimersByTime(AFTER_FLUSH_MS);
+      stream.emit('data', 'x[201~y');
+      expect(sink.text()).toBe(`${ESC}x[201~y`);
+      filter.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('leaves the fragment alone once the rescue window has expired', () => {
+    vi.useFakeTimers();
+    try {
+      const { stream, filter, sink } = tornFilter();
+      stream.emit('data', ESC);
+      vi.advanceTimersByTime(PASTE_MARKER_RESCAN_TTL_MS + 50);
+      stream.emit('data', '[200~hello world');
+      vi.runAllTimers();
+      // Nothing is swallowed: the released text comes through as typed.
+      expect(sink.text()).toBe(`${ESC}[200~hello world`);
+      filter.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('never rewrites a literal `[200~` typed with no lone ESC before it', () => {
+    vi.useFakeTimers();
+    try {
+      const { stream, filter, sink } = tornFilter();
+      stream.emit('data', 'a[200~b');
+      vi.runAllTimers();
+      expect(sink.text()).toBe('a[200~b');
+      filter.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('still reassembles a marker torn inside itself (`[20` then `1~`)', () => {
+    vi.useFakeTimers();
+    try {
+      const { stream, filter, sink } = tornFilter();
+      stream.emit('data', `${ESC}[20`);
+      stream.emit('data', '1~');
+      // The carried-prefix hold already covers this split; the rescue must not
+      // disturb it (an unconsumed END is a literal `[201~` in the draft).
+      expect(sink.text()).toBe('');
+      filter.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('is disabled entirely with { paste: false }', () => {
+    vi.useFakeTimers();
+    try {
+      const { stream } = fakeStdin();
+      const filter = createStdinFilter(stream, { mouse: false, paste: false });
+      const sink = drain(filter);
+      stream.emit('data', ESC);
+      vi.advanceTimersByTime(AFTER_FLUSH_MS);
+      stream.emit('data', '[200~hello world');
+      // No framing is on, so nothing may be recognised and nothing swallowed.
+      expect(sink.text()).toBe(`${ESC}[200~hello world`);
+      filter.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+/**
+ * R-2 -- THE BYPASS. A single-line paste carrying ESC fails BOTH rules of
+ * `classifyChunk` (no line break; a control byte other than TAB), so it used to
+ * travel the keystroke path with `sanitisePaste` never called. On the real
+ * component that produced either a draft holding `[38;2;18;52;86m` beside a
+ * LIVE ESC or an uncaught TypeError inside Ink's key parser.
+ */
+describe('R-2: an unframed single-line paste still takes the cleaning path', () => {
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 40));
+
+  it.each([
+    ['a truecolour SGR', `${ESC}[38;2;18;52;86mconst x = 1;${ESC}[0m`, 'const x = 1;'],
+    ['a short SGR pair', `${ESC}[32mINFO${ESC}[0m build ok, all 42 checks passed`,
+      'INFO build ok, all 42 checks passed'],
+    ['a bold-red SGR', `${ESC}[1;31mfailed${ESC}[0m at step 7`, 'failed at step 7'],
+    ['an OSC title', `${ESC}]0;a window title${'\u0007'}after`, 'after'],
+  ])('frames and cleans %s', async (_name, wire, expected) => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: true, paste: true });
+    const sink = drain(filter);
+    try {
+      (stream as unknown as PassThrough).write(wire as string);
+      await settle();
+      // Framed, cleaned, and -- the point of the whole fix -- with NO ESC and no
+      // parameter bytes left for Ink or the model to trip over.
+      expect(sink.text()).toBe(`${OPEN}${expected}${CLOSE}`);
+      expect(sink.text()).not.toContain(ESC);
+    } finally { filter.dispose(); }
+  });
+
+  it('leaves a real arrow-key burst on the keystroke path', async () => {
+    // Boundary 2 of R-2: an arrow key never ends in `m`, so nothing is framed.
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true });
+    const sink = drain(filter);
+    try {
+      (stream as unknown as PassThrough).write(`${ESC}[A${ESC}[B`);
+      await settle();
+      expect(sink.text()).toBe(`${ESC}[A${ESC}[B`);
+    } finally { filter.dispose(); }
+  });
+
+  it('is inert with paste OFF, which is the documented opt-out', async () => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: false });
+    const sink = drain(filter);
+    try {
+      const wire = `${ESC}[32mINFO${ESC}[0m build ok`;
+      (stream as unknown as PassThrough).write(wire);
+      await settle();
+      expect(sink.text()).toBe(wire);
+    } finally { filter.dispose(); }
+  });
+});
+
+/**
+ * R-4 -- win32-input-mode records INSIDE a frame. Translating them is data
+ * fidelity: without it each pasted character arrives as 15 visible digits, and
+ * with a whole-sequence stripper but no translation it would silently VANISH.
+ */
+describe('R-4: win32 records inside a frame behave like the ones outside it', () => {
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 40));
+  const down = (vk: number, char: number): string => `${ESC}[${vk};0;${char};1;0;1_`;
+  const up = (vk: number, char: number): string => `${ESC}[${vk};0;${char};0;0;1_`;
+
+  it('in-frame records are translated to their characters', async () => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true, enhancedKeys: true });
+    const sink = drain(filter);
+    try {
+      (stream as unknown as PassThrough).write(
+        `${BEGIN}${down(65, 97)}${up(65, 97)}${down(66, 98)}${up(66, 98)}${END}`,
+      );
+      await settle();
+      expect(sink.text()).toBe(`${OPEN}ab${CLOSE}`);
+      expect(sink.text()).not.toContain('[65;0;');
+    } finally { filter.dispose(); }
+  });
+
+  it('in-frame and out-of-frame records produce the same characters', async () => {
+    const viaFrame = async (wire: string): Promise<string> => {
+      const { stream } = fakeStdin();
+      const filter = createStdinFilter(stream, { mouse: false, paste: true, enhancedKeys: true });
+      const sink = drain(filter);
+      try {
+        (stream as unknown as PassThrough).write(wire);
+        await settle();
+        return sink.text();
+      } finally { filter.dispose(); }
+    };
+    const records = `${down(65, 97)}${up(65, 97)}${down(66, 98)}${up(66, 98)}`;
+    expect(await viaFrame(`${BEGIN}${records}${END}`)).toBe(`${OPEN}ab${CLOSE}`);
+    expect(await viaFrame(records)).toBe('ab');
+  });
+
+  it('leaves ordinary text alone when enhancedKeys is off', async () => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true });
+    const sink = drain(filter);
+    try {
+      (stream as unknown as PassThrough).write(`${BEGIN}a\tb${END}`);
+      await settle();
+      // The TAB survives: it is indentation, and the RENDERERS expand it.
+      expect(sink.text()).toBe(`${OPEN}a\tb${CLOSE}`);
+    } finally { filter.dispose(); }
+  });
+});
+
+describe('cursor position report (native-scroll anchor probe)', () => {
+  const CPR = (row: number): string => `${ESC}[${row};1R`;
+
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 20));
+
+  it('strips_cursor_position_report_in_native_mode', async () => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true, cursorReport: true });
+    const sink = drain(filter);
+    try {
+      (stream as unknown as PassThrough).write(`a${CPR(12)}b`);
+      await settle();
+      expect(sink.text()).toBe('ab');
+    } finally { filter.dispose(); }
+  });
+
+  it('keeps_cursor_report_when_the_feature_is_off', async () => {
+    // `app` mode must stay byte-for-byte identical (I-A8): with the feature off the
+    // report travels exactly as it did before this feature existed.
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true });
+    const sink = drain(filter);
+    try {
+      (stream as unknown as PassThrough).write(CPR(12));
+      await settle();
+      expect(sink.text()).toBe(CPR(12));
+    } finally { filter.dispose(); }
+  });
+
+  it('never lets a pasted report reach the draft either', async () => {
+    // A body is DATA, so the CPR test runs AFTER the paste tests and the paste
+    // path owns the bytes. Measured: `sanitisePaste` strips the sequence, so the
+    // report cannot become `12;1R` in the composer from either direction.
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true, cursorReport: true });
+    const sink = drain(filter);
+    try {
+      (stream as unknown as PassThrough).write(`${PASTE_OPEN}log line${CPR(12)}${PASTE_CLOSE}`);
+      await settle();
+      expect(sink.text()).toContain('log line');
+      expect(sink.text()).not.toContain('12;1R');
+    } finally { filter.dispose(); }
+  });
+
+  it('holds_a_torn_cursor_report_while_expecting', async () => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true, cursorReport: true });
+    const sink = drain(filter);
+    try {
+      filter.setExpectingCursorReport(true);
+      (stream as unknown as PassThrough).write(`${ESC}[12`);
+      // The probe window outlives the 12 ms pending flush on purpose.
+      await settle();
+      expect(sink.text()).toBe('');
+      (stream as unknown as PassThrough).write(';1R');
+      await settle();
+      expect(sink.text()).toBe('');
+    } finally { filter.dispose(); }
+  });
+
+  it('flushes_a_torn_report_once_the_probe_settles', async () => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true, cursorReport: true });
+    const sink = drain(filter);
+    try {
+      filter.setExpectingCursorReport(true);
+      (stream as unknown as PassThrough).write(`${ESC}[12`);
+      await settle();
+      filter.setExpectingCursorReport(false);
+      // A terminal that answered with something else must not cost the keyboard:
+      // the held bytes become ordinary text straight away.
+      expect(sink.text()).toBe(`${ESC}[12`);
+    } finally { filter.dispose(); }
   });
 });

@@ -37,8 +37,11 @@ import {
   DEFAULT_TEAM_CONFIG,
   DEFAULT_COMPACTION_CONFIG,
   DEFAULT_UPDATE_CONFIG,
+  DEFAULT_JOBS_CONFIG,
+  clampJobsConfig,
   type FastConfig,
   type LogConfig,
+  type JobsConfig,
   type PersistedConfig,
   type RetryConfig,
   type TeamConfig,
@@ -77,6 +80,28 @@ export const TEAM_CONFIG_SET_KEYS = [
   'team.maxTurnsPerSubagent',
   'team.overseer',
   'team.overseerIntervalMs',
+  'team.model',
+  'team.modelProfileId',
+] as const;
+
+/**
+ * Config keys under `jobs.` that `aragon config set` accepts
+ * (long-task-jobs §6.5).
+ *
+ * THE FIRST NESTED SECTION WHOSE KEYS ARE ALL WRITABLE, so it is also the first
+ * one where `JOBS_CONFIG_SET_KEYS ⊆ CONFIG_SET_KEYS` needs its own assertion:
+ * `__tests__/config.test.ts`'s static guard matches LITERAL keys in `cli.tsx`, so
+ * a set that is spread in is invisible to it (RV-P2-8).
+ *
+ * Every key is ONE level deep on purpose — `runConfigGet` splits on a single dot,
+ * so `jobs.waitSeconds` resolves and `jobs.mirror.enabled` would not.
+ */
+export const JOBS_CONFIG_SET_KEYS = [
+  'jobs.enabled',
+  'jobs.waitSeconds',
+  'jobs.stallSeconds',
+  'jobs.persistLog',
+  'jobs.noticeSteer',
 ] as const;
 
 /**
@@ -206,6 +231,44 @@ export function applyLogConfigSet(key: string, value: string): Partial<Persisted
 }
 
 /**
+ * Translate a `jobs.*` dotted key into a patch, or `null` for anything else.
+ *
+ * THE TEMPLATE IS `applyTeamConfigSet`, NOT an `applyBashConfigSet` — no such
+ * function exists, and `bash.*` is not `config set`-able to this day (RV-P2-8).
+ * Every numeric key routes through `clampJobsConfig` rather than a local
+ * coercion, so the caller echoes the STORED value and an out-of-range input is
+ * visible: `config set jobs.waitSeconds 1` prints `5`.
+ *
+ * The patch is a PARTIAL section, which is only safe because
+ * `updatePersistedConfig` deep-merges `jobs` — the sixth time that trap is
+ * recorded in `store.ts`.
+ */
+export function applyJobsConfigSet(key: string, value: string): Partial<PersistedConfig> | null {
+  const patch = (jobs: Partial<JobsConfig>): Partial<PersistedConfig> =>
+    ({ jobs } as Partial<PersistedConfig>);
+
+  const clampOne = <K extends keyof JobsConfig>(field: K): Partial<JobsConfig> => {
+    const merged = clampJobsConfig({ ...DEFAULT_JOBS_CONFIG, [field]: value });
+    return { [field]: merged[field] } as Partial<JobsConfig>;
+  };
+
+  switch (key) {
+    case 'jobs.enabled':
+      return patch({ enabled: isTrue(value) });
+    case 'jobs.waitSeconds':
+      return patch(clampOne('waitSeconds'));
+    case 'jobs.stallSeconds':
+      return patch(clampOne('stallSeconds'));
+    case 'jobs.persistLog':
+      return patch({ persistLog: isTrue(value) });
+    case 'jobs.noticeSteer':
+      return patch({ noticeSteer: isTrue(value) });
+    default:
+      return null;
+  }
+}
+
+/**
  * Translate a `team.*` dotted key into a patch, or `null` for anything else.
  *
  * The patch is a PARTIAL `team` section, safe only because
@@ -249,6 +312,16 @@ export function applyTeamConfigSet(key: string, value: string): Partial<Persiste
       return patch({ overseer: isTrue(value) });
     case 'team.overseerIntervalMs':
       return patch(clampOne('overseerIntervalMs'));
+    // The subagent-model keys (subagent-model-and-question-controls V-3):
+    // without these two cases `aragon config set team.model fast` is refused
+    // with "Unknown config key" while `config list` shows the key one command
+    // over - the exact gap COMPACTION_CONFIG_SET_KEYS records at length.
+    // Both route through `clampTeamConfig` like every other key here: a typo'd
+    // mode resolves to 'main' and a bad id is nulled, never rejected.
+    case 'team.model':
+      return patch(clampOne('model'));
+    case 'team.modelProfileId':
+      return patch(clampOne('modelProfileId'));
     default:
       return null;
   }

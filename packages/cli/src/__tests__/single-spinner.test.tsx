@@ -71,6 +71,7 @@ import {
   DEFAULT_UPDATE_CONFIG,
   type CliConfig,
   type TodoConfig,
+  DEFAULT_JOBS_CONFIG,
 } from '../config/schema.js';
 import type { SkillService } from '../skills/service.js';
 import type { AgentMode } from '../agent/agent-mode.js';
@@ -157,6 +158,10 @@ const CONFIG: CliConfig = {
   skillsRuntime: DEFAULT_SKILLS_RUNTIME,
   todo: DEFAULT_TODO_CONFIG,
   bash: DEFAULT_BASH_CONFIG,
+  // The ELEVENTH nested section (long-task-jobs). `enabled: true` because a
+  // fixture that says nothing about jobs should behave like a default session;
+  // the subsystems each fixture is about are switched off individually above.
+  jobs: DEFAULT_JOBS_CONFIG,
   retry: DEFAULT_RETRY_CONFIG,
   // The NINTH nested section, and it is read at CONSTRUCTION by
   // `AgentController` — so a fixture without it crashes before the first
@@ -743,7 +748,7 @@ describe('a mid-run toast keeps the one animation', () => {
     // `Running tool bash` and carries no phrase at all (`ActivityLine`'s L4 branch).
     // A phrase-based predicate would be false in EVERY frame here and the case
     // would pass without ever driving the state it is named for.
-    expect(during).toContain('Notice');
+    expect(during).toContain('Running tool bash');
     // ...and the frame is still alive. Never zero (the bug), never two (round 1).
     expect(brailleCount(during)).toBe(1);
     // The ack keeps its words: the spinner joins the row as a bare glyph.
@@ -772,7 +777,10 @@ describe('a mid-run toast keeps the one animation', () => {
     stdin.write('\x07'); await delay(80);
     stdin.write('\x14');
     const during = await settledFrame(lastFrame, (f) => /Thinking (shown|hidden)/.test(f));
-    expect(during).toContain('Notice'); // the run row is NOT displaced
+    // DEFECT 8 + 9: the notice BODY is a field of its own now, so the run row
+    // keeps its phase word (`Running tool bash`) instead of being displaced by the
+    // bare word `Notice`.
+    expect(during).toContain('Running tool bash'); // the run row is NOT displaced
     expect(brailleCount(during)).toBe(1);
     expect(during).toContain('Thinking shown.');
     // The toast carries no animation of its own while the run row is visible.

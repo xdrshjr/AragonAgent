@@ -7,7 +7,526 @@ were written.
 
 ## Unreleased
 
+### Added
+- **Background jobs, and a bounded wait for them.** A command that finishes on its
+  own but takes far longer than one tool call - `python train.py`,
+  `huggingface-cli download`, `cargo build --release` - can now be started with
+  `bash({ command, background: true })` and comes back as a **`task`** (`t1`,
+  `t2`) rather than a `service`: it is `running` from the spawn instead of
+  spending its first minute as `starting`, and its first-frame result says so.
+  `job_wait({ job, timeoutSeconds?, since? })` blocks at most 60 seconds (default
+  `jobs.waitSeconds`, 30) and returns one status line, one extracted progress
+  line, at most six new output rows and a cursor - so waiting thirty seconds costs
+  one call instead of six `bash_output` polls, six model turns and six 200-row
+  tails. `job_list()` prints one line per job. Progress (`47%`, `epoch 3/10`,
+  `812/1000`, `1.2/3.4 GiB`) is extracted from the tail and not repeated while it
+  is unchanged; `[stalled]` reports silence with three options and kills nothing.
+  A job that ends while the model is busy produces a `<job_notices>` block at the
+  end of the next tool result, delivered exactly once even when the fast tier
+  clears the steering queue mid-run. Full output past the 200-row ring is mirrored
+  to `~/.aragon-agent/jobs/<session>/<id>.log`, and `bash_output`'s truncation
+  note names the path. New `jobs.*` section (5 keys, `aragon config set` and
+  `ARAGON_JOBS_*`), new `job` event and `background-jobs` capability in
+  `aragon exec`, and `/bg` now lists kind, elapsed and progress.
+  **Two defects fixed in passing:** a task that crashed within the settle window
+  was reported as still running (the guard tested `!== 'starting'` instead of
+  terminality), and a stopped job's result said "not ready yet - still coming
+  up". See [Background jobs and bounded waiting](README.md#background-jobs-and-bounded-waiting).
+- **`Ctrl+L` branches this session into a new terminal - and `Ctrl+R` now
+  redraws (KEY BINDING CHANGE).** One keystroke opens a PowerShell (Windows) or
+  bash (macOS/Linux) window in the session's current `/cwd`, running
+  `aragon --resume <id>` there: the child derives its own id and only ever writes
+  its own file, so the TUI you branched from keeps running untouched. The session
+  is force-flushed to disk BEFORE anything is spawned, because the child reads
+  that file first and the normal checkpoint is debounced. Works mid-run too - the
+  child inherits the last settled turn. Platforms: a new Windows Terminal tab
+  (`wt -d <cwd> ... --`), a new console window (`cmd /c start`), a Terminal.app
+  window via `osascript`, or the first available Linux emulator; each rung carries
+  the working directory itself, because `--resume` does not restore one. No
+  terminal (SSH, container) prints a pasteable `aragon --resume <id>` instead of
+  failing silently. `ARAGON_BRANCH_COMMAND` / `ARAGON_BRANCH_SHELL` override what
+  runs and which shell; presses are throttled to one window per two seconds and a
+  failed attempt never starts the cooldown. New `/branch` is the same code path.
+  The header (top right) now shows `^L branch` next to `^I Index` and `^G more`,
+  spending a fixed cell budget: `^I` therefore appears from 52 columns
+  (collapsed) / 62 columns (expanded) instead of 72, and on a very narrow terminal
+  the branch hint degrades to the bare `^L` before it is dropped.
+  **Breaking:** the redraw previously bound to `Ctrl+L` moved to `Ctrl+R` - same
+  behaviour, same overlay guard (the settings screen keeps its own `Ctrl+R`).
+
+- **A TUI session now has an id, and another terminal can continue it.** Every
+  interactive session is written to `~/.aragon-agent/sessions/<id>.json` as it
+  runs and shows that id at the right end of the status bar (`id a4k2m9`, or
+  `a4k2m9` on a narrow terminal - the id itself is never truncated). Checkpoints
+  are written after the first frame, after every settled turn (debounced), on
+  `/session pin`, and once on exit; each one is an atomic replace, because a
+  second terminal may be reading. `aragon --resume <id|path>` continues a saved
+  session under a NEW id and never writes the file it came from, so branching
+  while the original TUI keeps running is safe - including
+  `aragon exec --resume <tui-id>`, which now writes a session of its own instead
+  of overwriting yours. `aragon --save <id>` names this run's id and pins it
+  against `sessions prune`. New `/session [copy|pin]` reports the id, the file and
+  the branch parent, copies the resume command through the same clipboard door as
+  `/copy` (OSC 52 included), and pins the file. A checkpoint taken mid-tool is
+  repaired on the saved copy only, so resuming it cannot produce an illegal
+  history, and a tool card that was still running is settled so nothing spins
+  after a resume. `aragon -p` writes one checkpoint at exit: context only, no
+  transcript, because nothing was displayed.
+
+- **A model profile can be verified where it is written.** The profile editor
+  gains two action rows: **Test connection** (`Ctrl+R`) and **Discover models**
+  (`Ctrl+F`). A test is one real completion against the UNSAVED draft - the
+  provider, model, base URL and the key `keep`/`replace`/`shared` actually
+  resolves to - and it answers with a verdict (`OK 812 ms | 18 in / 4 out`) or a
+  classified failure plus the one thing to fix (`Key rejected by anthropic (HTTP
+  401).` / `Fix: edit API key, or set Credential mode to Shared.`). A discovery
+  lists what the key can really reach, so the model is picked instead of typed.
+  Both run against the draft, cost at most one short request (discovery costs no
+  tokens), never retry, and never write `ModelRegistry`'s five-minute discovery
+  cache. Every result is bound to a target fingerprint, so an `OK` can never
+  describe a model, endpoint or key the user has since edited. The progress line
+  is static text: no new animated site, so `single-spinner` still holds.
+
+### Changed
+
+- **BREAKING DEFAULT: the TUI now scrolls with your terminal (`scrollMode: native`).**
+  Until now the interactive TUI ran in the terminal's alternate screen with its own
+  scrollbar, wheel handling and drag-selection. The default is now **native scroll
+  mode**: finished messages are printed into the host terminal's own scrollback
+  (PowerShell, `cmd`, Windows Terminal, `bash`, `zsh`, `tmux`, iTerm2, ...), above a
+  small live region holding the streaming preview, the input box and the status
+  line. The wheel, the scrollbar, `Shift+PgUp`, text selection, right-click menus
+  and in-terminal search are now the terminal's; `aragon` neither enters the
+  alternate screen nor turns on mouse reporting (so Windows needs no particular
+  Node version for scrolling). Exiting prints a short summary instead of replaying
+  the transcript, which is already in your scrollback (`exitTranscript` is ignored
+  in this mode). Printed rows are final: they keep the width they were printed at,
+  `/clear` prints a separator instead of erasing history, and `Ctrl+O` prints an
+  expanded copy of a tool card. The TODO side panel and team panel are not drawn
+  (status chips and `/queue` carry them). **To get the old behaviour back:**
+  `aragon config set scrollMode app` (or `--scroll-mode app` /
+  `ARAGON_SCROLL_MODE=app` for one run); the full-screen mode is unchanged. A
+  one-time notice explains this on first launch. `--fullscreen` / `ARAGON_FULLSCREEN`
+  stay removed - the new switch is `--scroll-mode`. See README, "Scrolling".
+
+- **`aragon sessions list` gained an `origin` column** and shows TUI checkpoints,
+  which are managed files now. `sessions prune` defaults to `--origin exec`, so it
+  behaves exactly as before for every file that existed before this release; the
+  new `--origin tui|all` selects the other writer. `prune` never deletes a pinned
+  session or one whose owner process is still alive, and `--all` now means only
+  "also consider files with no session metadata" - it can no longer reach a TUI
+  checkpoint. `/resume` inside the TUI moves the session to a new id and restarts
+  the spend counter, because a new id's file must not bill the previous
+  conversation.
+
 ### Fixed
+
+- **A finished reply taller than the screen is complete again - scroll up and it is
+  all there.** In the default (native) scroll mode the live region is the whole screen,
+  so the box that shows the conversation is only 24 rows tall on a 30-row terminal,
+  while the boundary that decides what may be printed into your scrollback was counted
+  in ENTRIES (the last ten). A settled answer taller than that box therefore stayed
+  inside the window for ever, clipped from the top by `justifyContent="flex-end"` - and
+  in a mode whose wheel only scrolls the terminal's own scrollback, the clipped rows
+  existed *nowhere* you could reach: the answer only appeared once ten more entries
+  pushed it out (five more turns, measured) or after you exited the app. It is now
+  printed as it is hidden. A new pure module (`ui/scrollback/overflow-print.ts`) takes
+  the window, each entry's MEASURED height, the rows already printed and the box height,
+  and answers which rows the box is hiding; those rows are rendered and printed, so
+  `scrollback + screen` covers every line of the answer exactly once, in order, with
+  nothing moving on the screen. Five things follow from it:
+  **the head is printed when the answer settles** (a streaming entry is never stable and
+  a printed row can never be rewritten, so the give-way waits for `turn_end`); **printing
+  only happens while the box clips from the TOP** - `tail-anchor.ts::resolveTailAnchor`
+  now lets the measured height decide the anchor, so `flex-end` means the content really
+  did overflow; **the bookkeeping is per row** (`printed` is a `Map<id, {rows, cols,
+  done}>`, replacing `printedIds`), so an entry that leaves the window later prints only
+  its remainder, and the exit/`/clear` flush prints only what was never printed; **the
+  plan stops at the first entry the reducer may still rewrite**, which is what keeps
+  scrollback order equal to conversation order; and **`Ctrl+O` now falls back to the last
+  finished answer** when no tool/team/compaction/service card is asking for the key
+  (two-tier lookup: the existing gesture is byte-identical), which is the escape hatch the
+  native-scroll spec has promised since §13 without ever wiring it up. The copy is rendered
+  one microtask after the key press, because an offscreen render issued from inside the
+  input handler is scheduled rather than flushed and reads back empty - the card path had
+  that hole too, so a `Ctrl+O` copy printed a placeholder instead of the card it promised.
+  `renderer.tsx`
+  can report UNCAPPED rows and keeps a two-slot per-width offscreen instance, so measuring
+  at the box width and printing at the content width no longer rebuilds an Ink root. `/perf`'s
+  `band:` line grew `head=<rows>` - the rows the box could not show - because "visible is
+  not printable" is a structural fact and should never be invisible again. Resizing in the
+  middle of a long answer prints a `[-- reflowed to N columns ... --]` seam and re-prints
+  the rows above it at the new width: row numbers do not survive a re-flow, so the choice
+  is a bounded repetition rather than a hole. Known limit, unchanged: while an answer is
+  still streaming its head is clipped, because those rows can still re-wrap. See README,
+  "Scrolling".
+
+- **The first reply is written downward from under the header instead of appearing at
+  the bottom of the screen.** In the default (native) scroll mode the live region is the
+  whole screen, so the box holding the conversation is 24 rows tall on a 30-row terminal
+  - and that box was bottom-aligned unconditionally. A first turn is four rows, so those
+  four rows sat against the input box and every unused row stayed above them: the reply
+  looked like it started at the bottom of the screen, and a longer answer moved the lines
+  already drawn upward instead of adding new ones below. The alignment is now
+  conditional (`ui/scrollback/tail-anchor.ts`, a pure three-argument function): while the
+  estimated height of the entries on screen fits the box, the content is top-aligned and
+  grows downward, leaving the unused rows *below* it the way a terminal does; once it
+  does not fit, the box falls back to bottom alignment, so the newest line stays visible
+  and the rows that scroll away are the oldest ones. That hand-over is a one-off downward
+  move rather than a blend: the decision comes from the height *estimate*, so it fires a
+  few rows before the block would really have filled the region and the block drops by
+  those rows once (three on a 30-row terminal), after which every new line scrolls it up
+  by exactly one. The threshold carries a two-row margin because the height estimate
+  under-counts a markdown `#` heading and a code block's wrapped lines, and a short
+  estimate must never be the reason a new row is clipped. The window, the print boundary
+  and the scrollback writer are untouched - only the position inside the region changed.
+  Known limit: at the 12-row minimum the box holds six rows, which the first-turn
+  estimate already exceeds, so that frame keeps the bottom alignment (with every row of
+  the answer still on screen).
+
+- **The native-scroll screen is filled edge to edge, with no blank band anywhere.**
+  Three complaints, one cause: the live region was only as tall as the panel band
+  asked for, and every row it did not ask for became the canvas `gap` - blank rows
+  drawn *above* the content. So the app appeared to start halfway down the terminal,
+  a long blank band sat between a finished result and the card that was still running,
+  and the `TODO` rail stopped six rows or so above the input box. The region is now
+  the whole screen (`rows - 1`, the same height the full-screen layout uses): the
+  header is its first row, the input box and status line are its last two, the band
+  takes every row in between (`bandRows = pool`), so the rail spans the full height
+  above the composer and the tail column ends against it. The `gap` is 0 by
+  construction, not by tuning, and the scrollback writer is unchanged - `[gap][held]
+  [region]` collapses to `[region]` at that height. Two consequences worth knowing:
+  the region now shows the last ten entries of the conversation instead of only the
+  unfinished ones, and an entry is printed into your scrollback when it leaves that
+  window (so nothing is ever in both places at once); `/clear`, `--resume` and exit
+  flush the window first, which is why nothing visible is lost. The empty-session card
+  is drawn against the header rather than the input box, and `/perf` grew the three
+  numbers that make this self-checking: `top <n>` on the `mode native` line, plus
+  `pool=` and `window=<start>/<n>` on the `band:` line.
+- **The TODO rail and the subagent roster are back in the default (native) scroll
+  mode.** Printing the conversation into the terminal's own scrollback took the two
+  panels with it: the rail lived in the full-screen layout's middle band and the
+  roster in the viewport footer, and neither of those exists once the live region
+  takes over - so a running plan showed nothing but a `Todo: 2/5` chip and a running
+  dispatch showed `Team: 2/4 running` in plain grey. The live region now owns a
+  PANEL BAND directly above the input box: the `TODO` rail (markers, index,
+  `activeForm`, overflow, gauge) is the band's right-hand column, the `team` roster
+  (header line, one row per subagent with activity and elapsed time, `+N more`, the
+  supervisor line) sits at its top left, and the unfinished tail below them is
+  rendered with the **real** entry components instead of the text projection - a
+  running `team` card and a running `tool` card now look exactly like the ones the
+  full-screen mode draws, gutter included. Row and column allocation has one owner
+  (`ui/scrollback/band.ts`), the printed conversation still uses the full width, and
+  the six ways a panel can be absent (`disabled`, `empty`, `narrow`, `short`,
+  `overlay`, a degraded frame) each name themselves in a new `/perf` `band:` line.
+  `aragon config set scrollMode app` renders byte-identically to before.
+- **The test suite no longer mirrors modules into `%TEMP%`, and the release script
+  pins the runtime and installs from the lockfile.** A release failed with 252
+  "failed" test files whose every first error was
+  `ENOENT ... \Temp\<id>\ssr\.tmp-...`, while each of those files passed when run
+  alone: vitest 4's forks pool writes every transformed module into
+  `%TEMP%/<nanoid>/<environment>/`, creates that directory exactly once and never
+  re-checks it, and its only deleter does not synchronise with in-flight imports. A
+  directory that disappears mid-run therefore turns every not-yet-fetched module into
+  an import error that has nothing to do with the code under test. Both packages now
+  run `pool: 'threads'` (no module mirror is written at all), `vitest` and `vite` are
+  pinned to exact versions in both manifests and in a root `overrides` block,
+  `package-lock.json` is recomputed with them, and the release installs with `npm ci`
+  **before** any gate runs instead of re-resolving the tree after the version bump.
+  `npm run verify:test-gate` adds a version/environment pre-flight, and a failing test
+  run is attributed before anything is retried: only when every failing file's first
+  error is that mirror `ENOENT` does the release retry once, and a real failure is
+  never retried and never worded differently.
+- **The reply no longer floats in the middle of the screen: it sits directly on top of
+  the input box.** The previous release pinned the *composer* to the last two rows by
+  emitting blank rows between the newest printed line and the live region, so a
+  conversation that had not filled the screen left the answer stranded above a band of
+  blank space - the shorter the session, the wider the band. The writer now treats the
+  `rows - 1` rows above the parked cursor as a CANVAS it owns, laid out top-down as
+  `[gap][content][region]`: the blank space lives *above every visible content row*, and
+  the newest content row always touches the top row of the live region. The gap is
+  SKIPPED with `CUD`, never written, so a blank row still cannot reach the scrollback;
+  the content rows still on the canvas are redrawn in place when the layout moves them,
+  and a row that has left the canvas (scrolled away or erased at exit) is never written
+  again. The reflow-estimate chain is gone: a narrower or shorter window now drops the
+  geometry and re-measures (a couple of hundred milliseconds of ordinary appending)
+  instead of guessing an erase distance that could cut a re-flowed line in half. Two
+  self-healing paths the canvas would otherwise lose are explicit: a re-measurement adds
+  the canvas's own height to the reported "rows below the cursor" (reading only the
+  latter collapses the canvas onto the parked row and pushes the visible content into
+  the scrollback a second time), and every batch reconciles its grid with the live
+  terminal height first (a `resize` event arrives a libuv turn late, and on a terminal
+  that never answers CPR the composer would stay mid-screen for the whole session).
+  `/perf`'s `scrollback` line now reports `canvas`/`content`/`gap` rows, `scrolled` rows
+  and `anchor resets` alongside `region` and `anchor bottom via probe|fill|none`.
+  `anchor: unknown` (no TTY, no filter, no answer, or geometry lost after a foreign
+  write) stays byte-identical to the previous release, except for the documented case
+  where a width or a height change arrives while nothing is measured.
+- **In native scroll mode the composer stopped mid-screen after a reply, leaving a
+  screenful of blank rows below it.** The live region was positioned *relative to
+  the last printed line*, so on a conversation that had not filled the screen yet
+  the input box and status line sat wherever the history ended - the shorter the
+  session, the higher they floated - and closing an overlay, `/clear` or a shorter
+  draft moved them again. The writer now carries a measured `gap` ("rows left below
+  the parked cursor") and emits that many blank rows *above* the region, so
+  `pad + region + 1` equals the terminal height and the composer always occupies the
+  last two rows. The measurement is one `ESC[6n` before the first frame (raw mode
+  raised first, or the reply is line-buffered and echoed), with a one-off fill to the
+  bottom row as the fallback for terminals that never answer. The pad belongs to the
+  erasable block and never reaches the scrollback. `anchor: unknown` (no TTY, no
+  filter, no answer, or geometry lost after a foreign write) stays byte-identical to
+  the previous release. Re-probes are debounced 200 ms after a resize, coalesced, and
+  switched off the moment the screen is handed back - a query there would leak
+  `^[[12;1R` onto the shell prompt. `/perf`'s `scrollback` line now also reports
+  `block`/`pad` rows, `anchor bottom via probe|fill|none` and `anchor reprobes`.
+- **A long answer lost two characters at every hard wrap point - silently, in
+  exactly the content a user copies out.** The transcript's content column had no
+  width of its own, so Yoga laid each line out at the width it computed from the
+  parent while `virtual-window` estimated heights against `cols - GUTTER_WIDTH`:
+  two authorities for one number, and the clip kept the difference. A 240-digit
+  run in a 100-column transcript rendered as 97 + 97 + 42 = 236 digits, dropping
+  the characters at column 97 and 194 - URLs, git hashes, base64, paths and code
+  lines broke where nothing looked broken, because a paragraph with spaces re-wraps
+  at word boundaries and hides it. The column now takes `flexBasis={0}
+  flexGrow={1}` and keeps `flexShrink={0}` (invariant I-2: without it
+  `measureElement` can squeeze the column to the viewport and scrolling dies with
+  no error), so the available width is computed once, by yoga, from the parent.
+  Measured on the shipped component: 97 + 97 + 46 = 240/240, first divergence at
+  index -1.
+- **A bracketed paste could type its own markers into the draft as `[200~hello
+  world`.** The startup `ESC[?2004h` is correct, but when a read boundary landed
+  inside the six-byte marker - ordinary on a Windows console, over SSH, or in tmux
+  under load - the 12 ms pending flush released the lone `ESC` as the Esc key (it
+  must never be held hostage), and the `[200~` that followed had nothing left to
+  recognise: `indexOf` needs the ESC. The filter now remembers a marker head it has
+  just released and, on the NEXT chunk only, splices it back in front for one
+  re-scan inside the same `feed()` - so the marker is consumed before its bytes
+  become text, `PENDING_FLUSH_MS` stays at 12 ms, and a new
+  `PASTE_MARKER_RESCAN_TTL_MS` (250 ms, structural, in `input/limits.ts`) bounds
+  when that is still believable. The visible garbage is gone in all three draft
+  measurements (`> hello world_`); the one residual is stated rather than hidden -
+  a write cannot be retracted, so the Esc keypress the release already produced
+  still happens, and a marker torn into three parts still leaves its middle
+  fragment behind (both recorded in `docs/diagnoses/.../analysis.md` §D-2).
+- **A turn that only called a tool left a bare `●` bubble behind - on screen, in
+  the height table and in the saved session.** `turnStart` always appends an
+  assistant entry, so a tool-only turn, or one the user interrupted mid-stream,
+  left a bubble that `AssistantEntry` then refused to draw: the row was estimated
+  anyway (two for an aborted one, of which nothing drew the second), the scroll
+  position counted it, and `/save` exported it, so `/resume` brought it back. The
+  reducer now prunes a settled assistant entry with no text and no thinking, at
+  the three settle points only (`turnEnd`, `runEnd`, `abortMark`) - pruning earlier
+  would delete the live target of every `textDelta`, and the entry a `streamRestart`
+  is still filling in must survive. `abortMark` is the one settle path that does not
+  clear `streamingId` itself, so the helper returns the id and the caller writes it
+  back (I-L1-1); `runEnd` and `turnEnd` clear it anyway. A render-layer guard stays
+  as the second line of defence for a session file that already contains one.
+- **An empty transcript still drew a full-height scrollbar track.** One rail
+  column of track glyphs from the second row down told the user there was more
+  below when there was nothing, and cost a column of width. `thumb === null` now
+  means no cells at all - the one-column BOX is still rendered, because the
+  reserved column (not the glyphs) is what keeps the content width constant; hiding
+  the column instead would re-wrap every line, change the measured height and feed
+  that back into the decision to show it.
+- **Under `--no-color` the command palette's selected row was invisible, and a
+  bare `@` never opened file completion.** The selection was expressed only as
+  `inverse`, which is the identity at colour level 0 - and every `theme.*` colour is
+  `undefined` there too - so six commands looked identical and Enter was a guess
+  (`/clear` sits next to `/cwd`). The selected row now carries the same
+  `glyphs.caret` prefix the `/model` picker uses (`>` in the ASCII tier), with two
+  cells of padding on the unselected rows so no row changes width. Separately,
+  `README` has always promised that `@` opens a file-path completion popup while
+  the code required one more character: the `>= 1` gate and the `< 1` early return
+  are gone, and an empty `@` query lists the shallowest paths first (depth, then
+  length, then alphabetical) instead of the first twenty the filesystem happened to
+  hand back.
+- **The completion menu was pinned at six rows on every terminal.** `App` handed
+  the popup a literal `6` while the frame budget had already computed the slot
+  capacity: a 30-row terminal showed 6 of 57 commands and 14 more hidden, so
+  browsing meant holding an arrow key. The cap is now derived from
+  `frameBudget.popupMaxHeight` through `POPUP_CAPACITY_SHARE` (2) in
+  `layout/budget.ts` - 6 rows at 20 lines, 11 at 30, 16 at 40. Handing over the
+  whole capacity was measured and rejected: `popupCapacity` reserves exactly one
+  message row, so at 20 rows it grants 13, the transcript collapses to a single row
+  and the TODO rail disappears. A divisor keeps the menu derived from the frame
+  budget instead of becoming a second authority beside it, and since it does not
+  depend on `popupRows` it cannot oscillate with it.
+- **A fenced code block's language tag rendered as a body row, indented one cell
+  past the code.** The chip background and its padding spaces drew `  |  ts` above
+  code rows starting `| export ...`, so the fence header read as an extra line of
+  source. It is now a muted bold TITLE on the same rail, aligned with the code, and
+  it deliberately keeps its own row: the height estimator counts raw markdown
+  lines and has no code-block branch, so the fence line must still occupy exactly
+  one. The fence grammar was too narrow as well - `(\w*)` rejected `c++`,
+  `objective-c` and four-backtick fences, degrading the whole block to prose and
+  swallowing the closing fence, and `split('\n')` left a `\r` on every CRLF code
+  line; a block now opens for 3+ backticks with any non-backtick info string, only
+  a run at least as long as its opener closes it, and the document is split
+  CRLF-safe.
+- **A Markdown table rendered as space-separated plain text.** The `|---|` divider
+  was consumed by the parser to read alignment and never drawn, so a table had no
+  header marker, no column boundary and no rule - and under `--no-color`, where
+  bold is dropped too, nothing at all distinguished the header. `formatTable` now
+  returns `[header, divider, ...body]`, draws the rule from the caller's glyph and
+  separates columns with a visible `|` (both injected by `Markdown.tsx` from
+  `pickGlyphs`, so the parser stays ASCII-only and the pure default is `|`/`-`),
+  and pads by DISPLAY columns rather than `String.length`, which misaligned every
+  CJK cell. The separator costs one column per boundary; a table wide enough to
+  exceed the transcript is truncated rather than wrapped, which is the deliberate
+  trade recorded in §D-6.
+- **A command that succeeded said nothing, and its notice then displaced
+  `Idle` / `Running` until the next one.** `/theme light` changed the SGR, `/todo
+  panel on` changed the layout, `/expand 1` with nothing to expand did nothing -
+  and the only feedback was the echoed command, so "it worked", "the argument was
+  wrong" and "the key was never received" looked identical. Worse, the body had
+  been reaching `status-layout` all along but only rendered on the second status
+  row, behind Ctrl+G and off by default, while the phase word was REPLACED by the
+  feedback label: after `/copy` the row said `Copied` and never went back to
+  `Idle`, which is the one thing that row exists to answer. Notification kinds
+  (`notice`, `copied`, `copy-sent`, `copying`) now keep the phase word and add the
+  body as their own field, clipped to 32 display cells; action kinds (`confirm`,
+  `stopping`, `force-stop`, `exit`, `clear-input`, `copy-error`, `copy-cleanup`)
+  still take the phase slot, because "what the next key does" IS the phase. The
+  body is dropped before the phase word would be, and a copy error no longer paints
+  `Idle` red.
+- **`/help` turned 8 rows per PgDn on a 19-row window - 42% of a page.** Reading
+  the 93-row shortcut list took twelve presses and overlapped eleven rows every
+  time, while PgUp/PgDn in the transcript moved a whole page. The step is now
+  `overlayPageSize(overlayBodyRows(...))` - one window minus the two context rows
+  `scroll.pageSize` already keeps - and it reaches BOTH consumers, the keyboard
+  branch and the Shift+wheel notch (`getOverlayPage`), from the one function
+  `OverlayFrame` renders its window with, so the two cannot disagree.
+- **On a narrow terminal the header's right-hand hints collided with the
+  truncated caption.** The left half is `wrap="truncate"` and draws its ellipsis in
+  the last cell it owns, and the hint column started in the very next cell, so 52
+  columns read `aragon...Details off` as one string and 60 columns read
+  `glm-5.^L branch`. The row now spends a new `HEADER_HINT_LIMITS.separatorCells`
+  (2) between the halves, taken out of both the left half's width and the planner's
+  budget - a separate constant from `gapCells`, which spaces two hint clauses
+  inside the right column, because one constant carrying two meanings is how a
+  later spacing change silently re-lays-out the whole row. The `^I Index`
+  thresholds move with it: 54 columns collapsed and 64 expanded, two later than
+  before.
+- **A large paste arrived as runs of digits the moment it was sent - on screen,
+  in the model's input, in the prompt history and in the session file.**
+  `sanitisePaste` deleted the C0/C1 *introducer byte* and kept the parameter
+  bytes, so `ESC[38;2;18;52;86m` reached the transcript as the literal text
+  `[38;2;18;52;86m`. The composer collapses a large paste into
+  `[Pasted text #N +20 lines]`, so nothing was visible until submit expanded
+  it: a measured 20-line coloured log produced 80 runs of digits, and the same
+  string was what `/context`, the ↑ history and the session checkpoint stored.
+  Cleaning is now SEQUENCE-based and has one owner (new
+  `input/control-sequences.ts`, ASCII-only, no new dependency): a complete
+  escape goes as a unit, a truncated one loses its introducer and parameters
+  but never the character after them, an unterminated OSC/DCS/APC/PM/SOS goes
+  to the end of its line and never across it, and bare text that merely looks
+  like a sequence body (`[38;2m` with no ESC) is left exactly as it is.
+  `tools/terminal-output.ts`'s `stripAnsi` becomes a thin wrapper over the same
+  syntax, so a tool row and a paste cannot drift apart (both directions are
+  pinned by a cross-check test, and `terminal-output.test.ts` is unchanged).
+  A **single-line** paste carrying ESC - which `classifyChunk` sent down the
+  keystroke path with no cleaning at all - is now framed and cleaned like any
+  other paste; measured on the real component that path either put a live ESC
+  plus `[38;2;18;52;86m` into the draft or threw an uncaught `TypeError` inside
+  Ink's key parser. win32-input-mode records inside a frame are translated
+  rather than deleted, so a `?9001h` paste yields its characters instead of 15
+  visible digits per key (or, with cleaning but no translation, nothing at all).
+- **A pasted TAB-indented block or TSV table lined up differently before and
+  after sending.** One byte had three readings: the composer painted
+  four-column tab stops, the transcript handed the raw `\t` to the terminal
+  (eight), and the exit replay counted code units. New `ui/display-tab.ts`
+  expands a TAB by DISPLAY column (`string-width`, so a `CJK<TAB>X` line lands
+  where the terminal paints it); the composer's stop is the terminal's eight, and
+  `UserEntry`, `QueuedEntry` and the exit replay expand at paint time only -
+  the stored payload keeps its `\t`, so the model still receives the original
+  indentation. `wrappedRows` counts display columns too (with an ASCII fast
+  path, without which a 10 000-entry transcript timed out), because an estimate
+  that reads a TAB as one column keeps the row short while the painted row
+  grows - the under-estimate that file names as the unsafe direction.
+- **`Ctrl+L` opened a window that failed with a PowerShell `ParserError` on
+  Windows.** The script handed to `-EncodedCommand` was the argv joined with
+  quotes but with no call operator, and PowerShell reads a quoted string in command
+  position as an *expression*: with node installed under `C:\Program Files\...`
+  the child was never created - `UnexpectedToken` at column 36 - while the parent
+  TUI still reported that the window opened. `powerShellScript` now emits
+  `& <argv...>`, which is the only form that runs a word of any shape as a
+  command. The failure fallback follows: it is now two labelled lines
+  (`PowerShell:` / `cmd.exe   :`), because one line cannot be correct for both
+  parsers - and the `PowerShell:` line is byte-for-byte the script the window
+  receives. A leading `@` can no longer be left bare either, since `@name` is
+  PowerShell's splat operator and silently swallows an argument. New
+  `powershell-script-parse.test.ts` hands the generated scripts to the real
+  Windows PowerShell parser (and pins the old shape to its exact error), so this
+  class of defect has a guard instead of a green suite.
+- **A conversation saved mid-tool could be resumed into an illegal history.**
+  A `tool_call` with no matching `tool_result` makes the next request fail. The
+  checkpoint writer closes every dangling call on the copy it writes and re-checks
+  sendability before replacing the file; a history it cannot make sendable is not
+  written at all, so the previous good checkpoint survives.
+- **A checkpoint could carry a tool card that never stopped spinning.** A card
+  saved while its tool was running kept `ToolCard` animated and kept the
+  transcript's settled boundary from ever passing it, which re-rendered the tail
+  on every frame for the rest of the resumed session. Cards are now settled on the
+  saved copy only, which leaves `/save` (an explicit export you are watching) and
+  its documented behaviour untouched.
+- **`aragon exec --resume <tui-id>` overwrote the session it resumed.** The
+  write-back id preferred the file's own metadata, so exec took the TUI's id and
+  replaced the checkpoint - silent, unrecoverable loss of the conversation still
+  running in the other terminal. A TUI file now always yields a fresh id, and the
+  same rule covers `--session-id`, which used to return the typed id verbatim.
+- **`sessions prune --origin tui --yes` could delete a running session's
+  checkpoint.** The `live` marker was written by the TUI but the process lock it
+  is checked against was only ever taken by `exec`, so the liveness guard answered
+  "nobody owns this" for exactly the files it was written for. The TUI checkpoint
+  writer now holds the session lock for as long as it owns the file, releases it
+  on exit, and moves it when `/resume` rotates the id.
+- **`aragon --save <id>` said "already exists" for an id that does not exist.**
+  A session directory that cannot be written (read-only home, full disk) was
+  reported as a name collision, which sends the user to `--resume <id>` and then
+  to "no such session". It now names the directory instead.
+- **A hand-written `/save` file resumed as if it were a branch of itself.**
+  `--resume ./notes.json` recorded `notes` as `meta.branchOf` and announced it as
+  the parent session, though it is not a session id. Lineage is now recorded only
+  for ids this CLI minted, and a collision while deriving a branch id re-mints the
+  suffix instead of dropping the branch shape.
+- **`/session` answered `pinned  no` right after `/session pin`.** The file was
+  marked and the report was not. The identity is now updated with the pin.
+- **An id rotation could write one turn into the old id's file.** For the window
+  between `/resume` claiming a new id and the next render, the writer still aimed
+  at the previous file while recording the new parent. The rotation now republishes
+  the writer's id in the same step.
+- **`/clear` did not clear the context.** It reset the visible transcript and the
+  todo panel and left `agent.state.messages` - the history that is actually sent,
+  billed, measured by `/context` and compacted - completely untouched. A long
+  session looked restarted and behaved like it had never been cleared: the next
+  request still carried every old turn, so the model remembered the previous task
+  and the occupancy gauge did not move. `/clear` now runs the one real
+  new-conversation boundary (`controller.resetConversation()`) in the only safe
+  order: interrupt the running turn (`forceStop`, which also drops the events the
+  unwinding engine keeps emitting), wait for it to settle inside a bounded budget,
+  archive the old conversation, drop both queues, then clear history, compaction
+  identity, context measurement and skill activation frames. A reset that cannot
+  stop the engine clears **nothing** and says so.
+- **`/reset`'s "cancelled N queued messages" notice is preserved.** `/reset` is now
+  an alias of `/clear`, and the count is read **before** the queues are cleared -
+  read afterwards it would always be zero, which is a notice that lies.
+
+### Changed
+
+- **`/clear` means "start a new conversation"; the old behaviour moved to
+  `/clear screen`.** The previous semantics (wipe the transcript and the todo
+  panel, keep the history and the queue) are still available, spelled explicitly,
+  and are byte-identical to what `/clear` used to do. `/clear` no longer refuses
+  while a run is in flight: it interrupts, which removes the dead end where the
+  only command that worked mid-run was the one that kept the context.
+- **`/reset` is an alias of `/clear`, one implementation.** Two bodies could drift
+  back into "one clears the screen, one clears the session"; one body cannot.
+- **The conversation being cleared is archived first**, to
+  `~/.aragon-agent/sessions/cleared/cleared-<yyyyMMdd>-<HHmmss>-<pid>.json`
+  (newest 20 kept, `<ARAGON_HOME>` honoured). The path is reported in the
+  transcript and restores with `/resume <path>`. The file carries no `meta`, so
+  `sessions list` / `sessions prune` and `--continue` are unaffected; a failed
+  archive only logs and never blocks the clear.
 
 - **`Ctrl+I` was dead on Windows.** The win32-input-mode translator only
   recognised the chord when the console reported it as `VK_TAB` (vk 9) with

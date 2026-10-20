@@ -901,3 +901,63 @@ describe('contextWindow: AUTO, precedence, and the single clamp gate', () => {
     expect(updatePersistedConfig({ model: 'other-model' }).contextWindow).toBe(400_000);
   });
 });
+
+/**
+ * profile-context-window AC-4: env > bound profile > legacy top-level key,
+ * and the ORIGIN IFF CONTRACT (§6.1): `contextWindowOrigin !== undefined`
+ * exactly when `contextWindow !== null`. A feature-off load must not even
+ * CARRY the key (invariant 6).
+ */
+describe('contextWindow origin: env > profile > legacy key', () => {
+  const boundProfile = (contextWindow: number | null) => ({
+    version: 1, mainId: 'p', fastId: null, entries: [{ id: 'p', name: 'P',
+      provider: 'openai', model: 'custom', baseUrl: null, apiKey: null, contextWindow }],
+  });
+
+  it('AUTO carries NO origin key at all, on every declaring surface', () => {
+    expect(loadConfig({ cwd: CWD })).not.toHaveProperty('contextWindowOrigin');
+    writeFileSync(getConfigPath(), JSON.stringify({ version: 1, contextWindow: null }), 'utf8');
+    expect(loadConfig({ cwd: CWD }).contextWindowOrigin).toBeUndefined();
+    writeFileSync(getConfigPath(), JSON.stringify({ version: 1,
+      modelProfiles: boundProfile(null) }), 'utf8');
+    expect(loadConfig({ cwd: CWD }).contextWindowOrigin).toBeUndefined();
+    vi.stubEnv('ARAGON_CONTEXT_WINDOW', 'auto');
+    expect(loadConfig({ cwd: CWD }).contextWindowOrigin).toBeUndefined();
+  });
+
+  it('names each override surface: env, profile, and the legacy key', () => {
+    writeFileSync(getConfigPath(), JSON.stringify({ version: 1, contextWindow: 300_000 }), 'utf8');
+    expect(loadConfig({ cwd: CWD })).toMatchObject({ contextWindow: 300_000,
+      contextWindowOrigin: 'config' });
+    writeFileSync(getConfigPath(), JSON.stringify({ version: 1, contextWindow: 300_000,
+      modelProfiles: boundProfile(120_000) }), 'utf8');
+    // The bound profile OWNS the file layer, so the legacy key is projected over
+    // and the origin says 'profile' - profile outranks config (AC-4).
+    expect(loadConfig({ cwd: CWD })).toMatchObject({ contextWindow: 120_000,
+      contextWindowOrigin: 'profile' });
+    vi.stubEnv('ARAGON_CONTEXT_WINDOW', '50000');
+    expect(loadConfig({ cwd: CWD })).toMatchObject({ contextWindow: 50_000,
+      contextWindowOrigin: 'env' });
+  });
+
+  it('an explicit-AUTO profile still outranks the legacy key - tradeoff B', () => {
+    writeFileSync(getConfigPath(), JSON.stringify({ version: 1, contextWindow: 300_000,
+      modelProfiles: boundProfile(null) }), 'utf8');
+    const loaded = loadConfig({ cwd: CWD });
+    expect(loaded.contextWindow).toBeNull();
+    expect(loaded.contextWindowOrigin).toBeUndefined();
+  });
+
+  it('a tolerant disk window survives load and never invalidates the library', () => {
+    writeFileSync(getConfigPath(), JSON.stringify({ version: 1,
+      modelProfiles: boundProfile(99_999_999) }), 'utf8');
+    expect(loadConfig({ cwd: CWD })).toMatchObject({ contextWindow: 5_000_000,
+      contextWindowOrigin: 'profile' });
+    writeFileSync(getConfigPath(), JSON.stringify({ version: 1,
+      modelProfiles: boundProfile('abc' as never) }), 'utf8');
+    const loaded = loadConfig({ cwd: CWD });
+    expect(loaded.contextWindow).toBeNull();
+    expect(loaded.modelProfileState?.main.invalid).toBe(false);
+    expect(loaded.modelProfileState?.main.appliedId).toBe('p');
+  });
+});

@@ -67,7 +67,21 @@ export type LogScope =
   // NEVER THE SUMMARY TEXT AND NEVER MESSAGE CONTENT, which is the same rule
   // `todo-plan-followthrough` states for item text: this scope records what
   // compaction DID, not what the conversation SAID.
-  | 'compaction';
+  | 'compaction'
+  // Session identity and the checkpoint writer (tui-session-id-resume 3.4). Its
+  // own scope because these records are never fatal and never user-facing (I-8):
+  // a support reader filtering on `cli` wants what the human asked for, while
+  // "the checkpoint was skipped because the history was not sendable" is a fact
+  // about a background writer nobody typed a word to start.
+  | 'session'
+  // Branching the session into a NEW terminal window (tui-branch-terminal-shortcut
+  // D-18). Its own scope rather than `session` or `proc` because it is neither: a
+  // `session` record is a checkpoint, a `proc` record is a supervised service, and
+  // "a terminal window was opened" is neither - it is exactly the record a support
+  // reader filters on when told "I pressed Ctrl+L and nothing happened", while the
+  // parallel record is the ONE observable trace of a subsystem whose whole output
+  // goes to a window this process does not own.
+  | 'branch';
 
 export interface LogRecord {
   ts: string;

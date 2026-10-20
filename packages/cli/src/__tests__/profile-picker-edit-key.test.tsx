@@ -41,7 +41,8 @@ async function mount(element: React.ReactElement) {
 }
 
 function profile(id: string, name: string): ModelProfile {
-  return { id, name, provider: 'openai', model: 'custom', baseUrl: null, apiKey: 'disk-secret' };
+  return { id, name, provider: 'openai', model: 'custom', baseUrl: null, apiKey: 'disk-secret',
+    contextWindow: null };
 }
 
 function draft(entries: ModelProfile[]): ModelSettingsDraft {
@@ -51,10 +52,11 @@ function draft(entries: ModelProfile[]): ModelSettingsDraft {
 }
 
 const initial: SettingsValues = { provider: 'openai', model: 'custom', baseUrl: '',
-  thinkingLevel: 'off', showThinking: 'off', liveToolOutput: 'off', maxTokens: '', apiKey: '',
-  logLevel: 'info', fastEnabled: 'off', fastModel: '', fastProvider: '', fastReview: '5',
-  fastReviewBudget: '40', compactionEnabled: 'off', compactionThreshold: '90',
-  compactionKeepTurns: '3', compactionSubagents: 'off', compactionArchive: 'off' };
+  thinkingLevel: 'off', showThinking: 'off', liveToolOutput: 'off', maxTokens: '',
+  contextWindow: '', apiKey: '', logLevel: 'info', fastEnabled: 'off', fastModel: '',
+  fastProvider: '', fastReview: '5', fastReviewBudget: '40', compactionEnabled: 'off',
+  compactionThreshold: '90', compactionKeepTurns: '3', compactionSubagents: 'off',
+  compactionArchive: 'off' };
 
 async function mountSettings(entries: ModelProfile[] = [profile('profile-a', 'Shared')]) {
   return mount(<SettingsScreen initial={initial} apiKeys={{}} cols={80} maxRows={24}
@@ -78,6 +80,8 @@ describe('ModelProfilePicker 的 e 编辑快捷键', () => {
     const view = await mountSettings();
     await view.send('\x1b[B');
     await view.send('\x1b[B');
+    await view.send('\x1b[B');
+    await view.send('\x1b[B');        // Subagent / Kit pack 之后才是 Manage profiles
     await view.send('\r');            // Manage profiles
     await view.send('e');             // 光标默认落在第一条条目上
     expect(view.frame()).toContain('Edit profile');

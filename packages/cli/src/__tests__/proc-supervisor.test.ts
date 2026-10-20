@@ -271,7 +271,7 @@ describe('the registry', () => {
     // longer name or stop, so the cap refuses instead.
     const supervisor = make();
     const command = `${node} -e "setTimeout(()=>{},30000)"`;
-    for (let i = 0; i < PROC_LIMITS.maxServices; i += 1) {
+    for (let i = 0; i < PROC_LIMITS.maxJobs; i += 1) {
       const ok = await supervisor.start({ command, cwd: dir, toolCallId: `c${i}` });
       expect(ok.ok).toBe(true);
     }
@@ -333,6 +333,88 @@ describe('snapshots', () => {
     });
     await until(() => seen.length > 0, 6000, 'a snapshot');
     expect(Object.isFrozen(seen[0])).toBe(true);
+  }, 20_000);
+
+  it('AC-1 / AC-4: a task is `running` from the spawn and opens no readiness watcher', async () => {
+    // A `task` has no address to detect, so `starting` would be a lie for up to
+    // `readyTimeoutMs` (60s by default) - the defect this kind exists to remove.
+    const supervisor = make();
+    const events: string[] = [];
+    supervisor.subscribe((event) => events.push(`${event.type}:${event.service.status}`));
+    const started = await supervisor.start({
+      command: `${node} -e "setTimeout(()=>{},5000)"`,
+      cwd: dir,
+      toolCallId: 't',
+      kind: 'task',
+    });
+    expect(started.ok).toBe(true);
+    expect(started.service?.kind).toBe('task');
+    expect(started.service?.id).toMatch(/^t\d+$/);
+    expect(started.service?.status).toBe('running');
+    // Ten minutes of fake readiness time would flip a SERVICE to `running`; for a
+    // task the only thing that may follow is its own exit.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(events.filter((name) => name.startsWith('ready:'))).toEqual([]);
+    await supervisor.stop('all');
+  }, 20_000);
+
+  it('AC-7: the two id counters are independent', async () => {
+    const supervisor = make();
+    const service = await supervisor.start({
+      command: `${node} -e "setTimeout(()=>{},20000)"`,
+      cwd: dir,
+      toolCallId: 's',
+    });
+    const task = await supervisor.start({
+      command: `${node} -e "setTimeout(()=>{},20000)"`,
+      cwd: dir,
+      toolCallId: 't',
+      kind: 'task',
+    });
+    expect(service.service?.id).toBe('s1');
+    expect(task.service?.id).toBe('t1');
+    const second = await supervisor.start({
+      command: `${node} -e "setTimeout(()=>{},20000)"`,
+      cwd: dir,
+      toolCallId: 't2',
+      kind: 'task',
+    });
+    expect(second.service?.id).toBe('t2');
+    await supervisor.stop('all');
+  }, 30_000);
+
+  it('AC-38: the snapshot carries kind and lastOutputAt for both kinds', async () => {
+    const supervisor = make();
+    const task = await supervisor.start({
+      command: `${node} -e "console.log('epoch 1'); setTimeout(()=>{},20000)"`,
+      cwd: dir,
+      toolCallId: 't',
+      kind: 'task',
+    });
+    const id = task.service!.id;
+    await until(() => (supervisor.get(id)?.rows.length ?? 0) > 0, 6000, 'a row');
+    const snapshot = supervisor.get(id)!;
+    expect(snapshot.kind).toBe('task');
+    expect(typeof snapshot.lastOutputAt).toBe('number');
+    await supervisor.stop(id);
+  }, 20_000);
+
+  it('AC-11: reapSync announces the stop, so a waiter is woken rather than left to time out', async () => {
+    const supervisor = make();
+    const started = await supervisor.start({
+      command: `${node} -e "setTimeout(()=>{},20000)"`,
+      cwd: dir,
+      toolCallId: 'r',
+      kind: 'task',
+    });
+    const id = started.service!.id;
+    const stopped: string[] = [];
+    supervisor.subscribe((event) => {
+      if (event.type === 'stopped') stopped.push(event.service.id);
+    });
+    supervisor.reapSync();
+    expect(stopped).toEqual([id]);
+    expect(supervisor.get(id)?.status).toBe('stopped');
   }, 20_000);
 });
 

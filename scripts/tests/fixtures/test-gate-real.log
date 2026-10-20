@@ -1,0 +1,18 @@
+
+ RUN  v4.1.9 M:/repo/aragon-agent-core/packages/cli
+
+ FAIL  src/skills/__tests__/usage.test.ts [ src/skills/__tests__/usage.test.ts ]
+Error: ENOENT: no such file or directory, open 'C:\Users\dev\AppData\Local\Temp\l9cvG3vXRBN7NkoijzXS8\ssr\.tmp-1792458768098-ng66o9nxhkq'
+ FAIL  src/todo/__tests__/panel-rows.test.ts > selectTodoRows > keeps the running item visible
+AssertionError: expected [ 'a', 'b' ] to equal [ 'a', 'c' ]
+- Expected
++ Received
+
+-   "c",
++   "b",
+
+ Test Files  2 failed (2)
+
+npm error Lifecycle script `test` failed with error:
+npm error code 1
+npm error path M:/repo/aragon-agent-core/packages/cli

@@ -33,12 +33,14 @@ import {
   LOG_CONFIG_SET_KEYS,
   RETRY_CONFIG_SET_KEYS,
   TEAM_CONFIG_SET_KEYS,
+  JOBS_CONFIG_SET_KEYS,
   UPDATE_CONFIG_SET_KEYS,
   applyCompactionConfigSet,
   applyFastConfigSet,
   applyLogConfigSet,
   applyRetryConfigSet,
   applyTeamConfigSet,
+  applyJobsConfigSet,
   applyUpdateConfigSet,
   runConfigEdit,
   runConfigGet,
@@ -67,6 +69,7 @@ import {
   clampSkillsToolPolicy,
   clampContextWindow,
   clampMaxRenderInterval,
+  clampScrollMode,
   clampScrollResumeMs,
   clampTranscriptRetain,
   clampTranscriptWindow,
@@ -78,11 +81,13 @@ import {
   DEFAULT_MAX_TOKENS,
   DEFAULT_PLAN_HUMAN_TIMEOUT_MS,
   DEFAULT_PLAN_MAX_ASK_ROUNDS,
+  DEFAULT_SCROLL_MODE,
   DEFAULT_SCROLL_RESUME_MS,
   DEFAULT_SKILLS_CONFIG,
   DEFAULT_TRANSCRIPT_RETAIN,
   DEFAULT_TRANSCRIPT_WINDOW,
   type PersistedConfig,
+  type ScrollMode,
 } from './config/schema.js';
 import { makeGetApiKey } from './config/load.js';
 import { AgentController, DENY_ALL_APPROVAL } from './agent/controller.js';
@@ -96,10 +101,15 @@ import { registerExecCommand } from './exec/cli-commands.js';
 import { registerSessionsCommand } from './session/cli-commands.js';
 import { registerDoctorCommand, registerInfoCommand } from './diagnostics/cli-commands.js';
 import type { ToolPermission } from './exec/permission.js';
-import { App, type AppProps, type ConfirmBridge } from './ui/App.js';
+import { App, type AppProps, type ConfirmBridge, type SessionBridge } from './ui/App.js';
+import { readSessionView, publishSessionView } from './ui/session-bridge.js';
+import { SessionCheckpointWriter, type LiveSessionView } from './session/checkpoint.js';
+import { resolveStartupSession, rotateToChildOf } from './session/startup-session.js';
+import { createBranchLauncher } from './session/branch-launch.js';
+import { EMPTY_USAGE_TOTAL } from './agent/reducer.js';
 import { createFrameDiffer } from './ui/frame-differ.js';
-import { wrapStdoutForFrames } from './ui/stdout-frame-writer.js';
-import { setFrameStatsProvider } from './commands/perf.js';
+import { wrapStdoutForFrames, type FrameWriterHandle } from './ui/stdout-frame-writer.js';
+import { setFrameStatsProvider, setScrollbackStatsProvider } from './commands/perf.js';
 import { tryCreateStdinFilter } from './input/stdin-filter.js';
 import {
   enableKeyboardEnhancement,
@@ -109,7 +119,18 @@ import type { PasteBridge } from './input/limits.js';
 import { createScrollbarBridge } from './ui/scrollbar-controller.js';
 import { createPointerRouter } from './input/pointer-router.js';
 import { createFrameObserver } from './ui/frame-observer.js';
-import { enterAltScreen, writeExitTranscript, type ScreenHandle } from './ui/screen.js';
+import {
+  enterAltScreen, enterNativeScreen, writeExitTranscript, type ScreenHandle,
+} from './ui/screen.js';
+import { resolveTerminalPlan } from './ui/terminal-plan.js';
+import { createScrollbackDrain } from './ui/scrollback/drain.js';
+import { SCROLLBACK_LIMITS } from './ui/scrollback/limits.js';
+import { createScrollbackWriter } from './ui/scrollback/scrollback-writer.js';
+import { probeAnchorSpaceBelow, setAnchorProbeDisabled } from './ui/scrollback/cursor-probe.js';
+import {
+  createScrollbackBridge,
+  type ScrollbackBridge,
+} from './ui/scrollback/use-scrollback-view.js';
 import { supportsWindowsVtInput } from './ui/win-vt-input.js';
 import { forceWindowsVtInput } from './ui/win-vt-force.js';
 import { readExitSnapshot } from './ui/exit-snapshot.js';
@@ -212,10 +233,28 @@ interface RawOpts {
   renderGovernor?: boolean;
   maxRenderInterval?: string;
   diffRender?: boolean;
+  /** `--scroll-mode <native|app>` (raw string; validated in `toFlags`). */
+  scrollMode?: string;
   syncOutput?: boolean;
   update?: boolean;
   compaction?: boolean;
   compactionThreshold?: string;
+  /** `--resume <id|path>` (tui-session-id-resume 3.12). */
+  resume?: string;
+  /** `--save <id>`. */
+  save?: string;
+}
+
+/**
+ * `--scroll-mode` is the one flag validated at parse time (tui-native-terminal-scroll
+ * §6.1): a typo must be an exit-2 sentence, not a silent fallback to the default.
+ */
+function parseScrollModeFlag(raw: string | undefined): ScrollMode | undefined {
+  if (raw === undefined) return undefined;
+  const mode = clampScrollMode(raw, DEFAULT_SCROLL_MODE);
+  if (mode === raw.trim().toLowerCase()) return mode;
+  process.stderr.write(`Invalid --scroll-mode "${raw}" (expected native or app).\n`);
+  process.exit(2);
 }
 
 function toFlags(opts: RawOpts): CliFlags {
@@ -316,6 +355,8 @@ function toFlags(opts: RawOpts): CliFlags {
     // user whose terminal renders the diffed frame wrongly, and a user who has
     // been told to pass it and sees no change has no next move.
     diffRender: opts.diffRender,
+    // Third site for `--scroll-mode`, the same trap the sentence above records.
+    scrollMode: parseScrollModeFlag(opts.scrollMode),
     syncOutput: opts.syncOutput,
     // Site three of three for `--update` / `--no-update` — SEVEN features, one
     // trap (`mouse` P1-2, `team` P1-4, `todo` C-9, render L4, retry, fast, now
@@ -335,6 +376,13 @@ function toFlags(opts: RawOpts): CliFlags {
     // reports nothing, does nothing, and leaves compaction armed.
     compaction: opts.compaction,
     compactionThreshold: opts.compactionThreshold,
+    // Site three of three for `--resume` / `--save` -- ELEVEN features, one trap
+    // (`mouse` P1-2, `team` P1-4, `todo` C-9, render L4, retry, fast, update,
+    // compaction, now session identity). A flag needs the `.option()`
+    // declaration below, a field on `CliFlags`, AND a line here; miss this one
+    // and `aragon --resume <id>` starts a brand new session with no error at all.
+    resumeSession: opts.resume,
+    saveSessionAs: opts.save,
   };
 }
 
@@ -544,23 +592,59 @@ function forceVtInputForThisConsole(): boolean {
  * "…" > out.txt`, `aragon config set`, and `aragon --version`, because the
  * interactive and headless paths are disjoint branches: `runInteractive()`
  * renders Ink, `runOneShot()` goes to `runHeadless()`, which never does.
+ *
+ * `async` FOR EXACTLY ONE `await` (tui-bottom-anchored-live-region P1-3): the
+ * cursor-position probe before the first frame. Both call sites are inside async
+ * Commander actions and use `void runInteractive(...)` — the session's lifetime is
+ * owned by `waitUntilExit()` and the four idempotent restore paths, never by the
+ * caller, so nothing awaits it. The `await` sits before the FIRST `stdout.write`
+ * and between it and `render()` there is no other suspension point, so making the
+ * function async introduces no new interleaving.
  */
-function runInteractive(
+async function runInteractive(
   flags: CliFlags,
   extras: { initialPrompt?: string; initialOverlay?: Overlay } = {},
-): void {
+): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     process.stderr.write('Interactive UI requires a TTY. Use -p "<prompt>", exec, or config list / config set.\n');
     process.exitCode = 2;
     return;
   }
+  // --- Session identity, resolved BEFORE the controller exists (D-9). ------
+  //
+  // BEFORE, not after, because every failure here is exit 2 with one copyable
+  // sentence and NO writes: a controller that already exists has to be disposed
+  // on a path that never rendered anything. The only write this performs is the
+  // `wx` claim of the new id.
+  const startup = resolveStartupSession({
+    ...(flags.resumeSession === undefined ? {} : { resume: flags.resumeSession }),
+    ...(flags.saveSessionAs === undefined ? {} : { saveAs: flags.saveSessionAs }),
+    cwd: process.cwd(),
+    // An explicit `--model` / `--provider` outranks the model recorded in the
+    // file: the user said what they wanted more recently than the file did.
+    explicitModel: flags.model !== undefined || flags.provider !== undefined,
+  });
+  if (!startup.ok) {
+    process.stderr.write(`${startup.message}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  // MUTABLE BECAUSE `/resume` ROTATES IT (D-15). The chip follows through the
+  // App's `onIdentity`, and the writer reads `parentId` from here on every write.
+  let identity = startup.identity;
   const { controller, confirmBridge, humanInputBridge } = makeController(flags);
+  // THE RESTORE HAPPENS BEFORE THE FIRST FRAME. `initialEntries` seeds the
+  // reducer, so a resumed transcript is complete on frame one instead of filling
+  // in behind the user's eyes.
+  startup.apply(controller);
   void controller.refreshModelMetadata();
   const config = controller.getConfig();
   const caps = resolveTuiCapabilities({}, config.color);
   const logger = getLogger();
+  const scrollMode = config.scrollMode ?? DEFAULT_SCROLL_MODE;
   logger.info('cli', 'run_interactive', {
-    mode: 'fullscreen', provider: config.provider, model: config.model,
+    mode: scrollMode === 'native' ? 'native' : 'fullscreen',
+    provider: config.provider, model: config.model,
     unicode: caps.unicode, colorLevel: caps.colorLevel,
   });
   attachAgentEvents(logger, controller);
@@ -570,8 +654,103 @@ function runInteractive(
   // watch (§3.13 / P1-2 / R-19).
   attachTeamEvents(logger, controller);
 
+  // --- The checkpoint writer (D-2 / D-21 / I-10). --------------------------
+  //
+  // BUILT HERE, BEFORE EVERY EXIT PATH BELOW, because all three of them flush
+  // through it and one of them is a `process.on('exit')` handler that can fire
+  // while the frame is still on screen.
+  //
+  // `readView` reads the module-level slot `App` publishes into; with no frame
+  // yet (or after unmount) it answers `undefined` and the writer reports
+  // `no-identity` instead of writing a guess.
+  const checkpointWriter = createSessionWriter({
+    controller,
+    readView: readSessionView,
+    readParentId: () => identity.parentId,
+    startPinned: identity.pinned === true,
+  });
+  // --- The branch port (D-1 / D-2 / D-5 / D-16). ---------------------------
+  //
+  // BUILT HERE FOR THE SAME REASON THE WRITER IS: it needs the writer (to flush
+  // before spawning) and it needs `process.env` / `process.argv`, both of which
+  // belong to the host rather than to the view. The App only forwards it.
+  //
+  // The `checkpoint` closure is a THIN WRAPPER, not the writer itself: the port
+  // asks for `force: true` and reports `{ok, message}`, while the writer returns
+  // a richer result whose `reason` the launcher must not interpret.
+  const branchLauncher = createBranchLauncher({
+    checkpoint: (opts) => {
+      const result = checkpointWriter.writeNow(opts);
+      return result.ok ? { ok: true } : { ok: false, message: result.reason };
+    },
+    platform: process.platform,
+    env: process.env,
+    argv: process.argv,
+    execPath: process.execPath,
+  });
+  const sessionBridge: SessionBridge = {
+    branch: branchLauncher,
+    checkpoint: (opts) => {
+      const result = checkpointWriter.writeNow(opts ?? {});
+      // A PIN THE REPORT DOES NOT KNOW ABOUT IS A LIE ON SCREEN. `writeNow` sets
+      // the writer's sticky flag, and `/session` afterwards reads
+      // `port.identity()`, which is React state - so without this the file says
+      // `pinned: true` while `/session` still answers `pinned  no`.
+      if (opts?.pin === true && result.ok) {
+        identity = { ...identity, pinned: true };
+        sessionBridge.onIdentity?.(identity);
+      }
+      return result;
+    },
+    rotate: (loadedPath: string) => {
+      // CLAIM THE NEW ID FIRST, THEN TELL THE VIEW (D-15). If the claim fails the
+      // chip keeps the id whose file it is still writing, which is the only safe
+      // half of a failed rotation.
+      const next = rotateToChildOf(loadedPath);
+      if (!next) return undefined;
+      identity = next;
+      // REPUBLISH SYNCHRONOUSLY, because the writer reads the id from the
+      // published slot while it reads `parentId` from `identity` above. Between
+      // this line and the next render those two would disagree, and a flush in
+      // that window (exit, signal, `/session pin`) would write the conversation
+      // into the OLD id's file carrying the NEW `branchOf` - the exact
+      // inconsistency I-5 / I-12 forbid (the view's `onIdentity` below is what
+      // keeps the chip in step; this is what keeps the WRITER in step).
+      const view = readSessionView();
+      if (view) publishSessionView({ ...view, id: next.id });
+      sessionBridge.onIdentity?.(next);
+      return next;
+    },
+  };
+
   let screen: ScreenHandle | null = null;
   let replayed = false;
+  /**
+   * Native-scroll exit, shared by EVERY restore path (normal exit, `process.on
+   * ('exit')`, the signal terminator, the crash handler, `failInteractive`).
+   * Idempotent: the writer's `finalize` returns `''` the second time.
+   *
+   * Order (RV-9): publish the last unsettled entries to the feed, take the summary
+   * (lazily, and a failure only costs the summary), then write the finalize bytes
+   * through the REAL stdout. After `finalize` the writer swallows every Ink write,
+   * so it does not matter whether Ink has unmounted yet; callers must not add an
+   * asynchronous wait for it.
+   */
+  const finalizeNativeScreen = (): void => {
+    // FIRST, before any bytes: the anchor probe must go quiet here (P1-6). A settle
+    // timer that survived this point would write `ESC[6n` at a terminal already handed
+    // back to the shell and nobody would strip the reply.
+    killAnchorProbe();
+    const bridge = scrollbackBridge;
+    if (!bridge) return;
+    try { bridge.settleAllNow(); } catch { /* the feed keeps whatever was queued */ }
+    let summary: readonly string[] = [];
+    try { summary = bridge.getSummaryRows(); } catch { /* degrade to no summary */ }
+    try {
+      const bytes = bridge.writer.finalize(summary);
+      if (bytes.length > 0) process.stdout.write(bytes);
+    } catch { /* a closed stdout must never turn into a crash on the exit path */ }
+  };
 
   // --- Mouse wheel region routing (mouse-wheel-region-routing §4.2). -------
   //
@@ -613,11 +792,23 @@ function runInteractive(
   // a console this process just repaired.
   const vtInputByNode = supportsWindowsVtInput(process.platform, process.versions.node);
   const vtInputSupported = vtInputByNode || forceVtInputForThisConsole();
-  const wantMouse =
-    config.mouse &&
-    !!process.stdout.isTTY &&
-    !!process.stdin.isTTY &&
-    vtInputSupported;
+  // THE ONE DECISION POINT for screen mode, mouse, paste, key enhancement and the
+  // frame writer (tui-native-terminal-scroll D10). In `app` mode every field below
+  // is the pre-feature expression term for term (`terminal-plan.test.ts` pins it).
+  const plan = resolveTerminalPlan({
+    scrollMode,
+    configMouse: config.mouse,
+    configMouseSelect: config.mouseSelect,
+    configPaste: config.paste,
+    configKeyboardEnhancement: config.keyboardEnhancement,
+    configDiffRender: config.diffRender,
+    stdinIsTTY: !!process.stdin.isTTY,
+    stdoutIsTTY: !!process.stdout.isTTY,
+    platform: process.platform,
+    vtInputSupported,
+  });
+  const native = plan.scrollMode === 'native';
+  const wantMouse = plan.mouseReporting;
 
   // --- Paste handling (tui-paste-handling section 5.1.1 / D-13 / D-17). ----
   //
@@ -633,7 +824,7 @@ function runInteractive(
   // would flip true: `?1000h`/`?1006h`/`?1002h` written, terminal selection taken
   // away (the ONLY reason anyone passes `--no-mouse`), and a startup notice
   // advising the user about a mode they just disabled.
-  const wantPaste = config.paste && !!process.stdin.isTTY;
+  const wantPaste = plan.bracketedPaste;
   const pasteBridge: PasteBridge = { notify: null };
   // --- Keyboard enhancement (Shift+Enter newline). --------------------------
   //
@@ -646,15 +837,19 @@ function runInteractive(
   // Elsewhere the push is kitty disambiguate + modifyOtherKeys, which a
   // terminal that implements neither ignores (verified byte-identical on
   // conhost), so no capability gate is possible or needed there.
-  const wantEnhancedKeys =
-    config.keyboardEnhancement &&
-    !!process.stdin.isTTY &&
-    (process.platform !== 'win32' || vtInputSupported);
+  const wantEnhancedKeys = plan.enhancedKeys;
   const filter =
     process.stdin.isTTY
       ? tryCreateStdinFilter(
           process.stdin,
-          { mouse: wantMouse, paste: wantPaste, enhancedKeys: wantEnhancedKeys },
+          {
+            mouse: wantMouse,
+            paste: wantPaste,
+            enhancedKeys: wantEnhancedKeys,
+            // TOLD, never derived (I-A8): a native session strips the terminal's
+            // answer to `ESC[6n`, an `app` session is byte-identical to before.
+            cursorReport: plan.differ === 'scrollback',
+          },
           (reason: string) => logger.warn('cli', 'stdin_filter_failed', { reason }),
           pasteBridge,
         )
@@ -672,12 +867,136 @@ function runInteractive(
   const pasteOn = wantPaste && filter !== null;
   /** Same discipline: the translation runs only when a filter fronts Ink. */
   const enhancedKeysOn = wantEnhancedKeys && filter !== null;
-  const disposeStdinFilter = (): void => filter?.dispose();
+
+  // --- The bottom anchor's measurement pipeline (tui-bottom-anchored-live-region).
+  //
+  // Three pieces of host state, and every one of them exists to close a specific
+  // failure mode the writer cannot close by itself:
+  //
+  //  `anchorProbeDead` — I-A9 / P1-6. After `finalizeNativeScreen()`,
+  //    `disposeFrameWriter()`, `filter.dispose()` and the process `exit` hook, a
+  //    query must never be written again: it would hit a terminal already handed
+  //    back to the shell, where nothing strips the reply and the user's prompt gains
+  //    a literal `^[[12;1R`.
+  //  `anchorReprobeQueued` — P0-3. `invalidate()` is called from inside the writer's
+  //    `transform`, i.e. inside Ink's own `stdout.write`, so the request is pushed out
+  //    with `setImmediate` and everything inside that window is coalesced into one
+  //    query instead of becoming a probe storm on every foreign write.
+  //  `anchorReprobeTimer` — the 200 ms settle window (§4.6). A drag fires dozens of
+  //    resize events; one CPR each would fight the input channel for bandwidth and
+  //    make the region jitter.
+  let anchorProbeDead = false;
+  let anchorReprobeQueued = false;
+  let anchorReprobeTimer: NodeJS.Timeout | null = null;
+
+  /** Stop measuring for the rest of the process. Idempotent; safe from any exit path. */
+  function killAnchorProbe(): void {
+    anchorProbeDead = true;
+    anchorReprobeQueued = false;
+    if (anchorReprobeTimer) {
+      clearTimeout(anchorReprobeTimer);
+      anchorReprobeTimer = null;
+    }
+    // The module-level switch is what makes a probe that is already in flight, or one
+    // whose timer fires during teardown, write zero bytes.
+    setAnchorProbeDisabled(true);
+  }
+
+  /** Ask for one measurement soon; coalesced, deferred out of Ink's write, and dead-safe. */
+  function requestAnchorProbe(): void {
+    if (anchorProbeDead || anchorReprobeQueued) return;
+    anchorReprobeQueued = true;
+    setImmediate(() => {
+      anchorReprobeQueued = false;
+      if (anchorProbeDead) return;
+      if (anchorReprobeTimer) clearTimeout(anchorReprobeTimer);
+      anchorReprobeTimer = setTimeout(() => {
+        anchorReprobeTimer = null;
+        void runAnchorProbe();
+      }, SCROLLBACK_LIMITS.anchorReprobeDelayMs);
+      anchorReprobeTimer.unref?.();
+    });
+  }
+
+  /**
+   * One query, then consume the answer. Never throws and never fails the session: a
+   * terminal that does not answer simply keeps whatever anchor it had.
+   */
+  async function runAnchorProbe(): Promise<void> {
+    const bridge = scrollbackBridge;
+    if (anchorProbeDead || !bridge || !filter) return;
+    filter.setExpectingCursorReport(true);
+    let spaceBelow: number | null = null;
+    try {
+      spaceBelow = await probeAnchorSpaceBelow({
+        stdin: process.stdin,
+        stdout: process.stdout,
+        rows: () => process.stdout.rows,
+      });
+    } catch (error) {
+      logger.warn('cli', 'scroll_anchor_probe_failed', {
+        rows: process.stdout.rows ?? null, reason: String(error),
+      });
+    } finally {
+      filter.setExpectingCursorReport(false);
+    }
+    if (anchorProbeDead || spaceBelow === null) return;
+    // `setAnchorSpaceBelow` records the re-probe count; the repaint is deferred for
+    // the same reason `requestRepaint` is (this can run while Ink is writing).
+    bridge.writer.setAnchorSpaceBelow(spaceBelow, 'probe');
+    logger.info('cli', 'scroll_anchor', {
+      source: 'probe', spaceBelow, rows: process.stdout.rows ?? null,
+    });
+    setImmediate(() => {
+      if (!anchorProbeDead) frameWriter?.repaint();
+    });
+  }
+
+  /**
+   * THE ORDER HERE IS THE MECHANISM (P0-1 / I-A10). In canonical mode a terminal's
+   * reply to `ESC[6n` is line-buffered until a newline AND echoed, so the probe would
+   * time out on every Linux/macOS session while printing `^[[12;1R` on the screen.
+   * Raising raw first is also the direction `forceVtInputForThisConsole()` already
+   * goes (it raises the mode before Ink's own `setRawMode(true)` so libuv does not
+   * rewrite the console mode); a second raise is a no-op on both platforms.
+   *
+   * `false` means "no probe", never "no session": the caller falls back to the fill.
+   */
+  function raiseRawModeForProbe(): boolean {
+    if (typeof process.stdin.setRawMode !== 'function') return false;
+    try {
+      process.stdin.setRawMode(true);
+    } catch (error) {
+      logger.warn('cli', 'scroll_anchor_probe_failed', {
+        rows: process.stdout.rows ?? null, reason: `raw mode: ${String(error)}`,
+      });
+      return false;
+    }
+    // Ink lowers raw mode on unmount, which is the normal restore. A kill, a closed
+    // window or a crash never unmounts, so the same restore `forceVtInputForThisConsole`
+    // registers is registered here too; it is idempotent and cheap.
+    process.on('exit', () => {
+      try {
+        process.stdin.setRawMode(false);
+      } catch {
+        /* Stream already torn down - nothing left to restore. */
+      }
+    });
+    return true;
+  }
+
+  const disposeStdinFilter = (): void => {
+    // Before the filter goes away: a probe settle timer must not fire into a stream
+    // nobody is stripping any more.
+    killAnchorProbe();
+    filter?.dispose();
+  };
 
   // --- Drag-select (tui-selection-and-scroll-follow §4.4). ------------------
   //
   // Selection owns its controller, decoration and notice. Button motion follows
   // mouseOn independently so --no-mouse-select still permits scrollbar dragging.
+  // `mouseOn` is already false in native mode, so this needs no `plan.dragSelect` term.
   const wantSelect = mouseOn && config.mouseSelect;
   let mouseCaptured = mouseOn;
   const scrollbar = createScrollbarBridge(() => mouseCaptured);
@@ -690,8 +1009,35 @@ function runInteractive(
     requestRedraw: null,
   };
 
-  const frameWriter =
-    config.diffRender
+  // Native scroll: a drain + writer pair replaces the full-screen differ. The bridge
+  // is the only object shared with the React tree (tui-native-terminal-scroll §6.2).
+  let scrollbackBridge: ScrollbackBridge | undefined;
+  if (plan.differ === 'scrollback') {
+    const drain = createScrollbackDrain();
+    const writer = createScrollbackWriter({
+      sync: config.syncOutput && process.env.TERM !== 'dumb',
+      rows: () => process.stdout.rows,
+      cols: () => process.stdout.columns,
+      fullEveryFrame: plan.fullEveryFrame,
+      drain,
+      onFirstFallback: () => console.warn(FRAME_FALLBACK_NOTICE),
+      onGuardTrip: () => scrollbackBridge?.onGuardTrip?.(),
+      // Deferred: static rows can be queued from inside a React commit, and the
+      // repaint writes to the stream Ink is in the middle of writing to.
+      requestRepaint: () => { setImmediate(() => frameWriter?.repaint()); },
+      // `invalidate()` calls this from inside `transform` (geometry lost), so the
+      // deferral is not optional here either (P0-3). The host coalesces it into one
+      // query per settle window and stops it for good once the screen is handed back.
+      requestAnchorProbe,
+    });
+    scrollbackBridge = createScrollbackBridge({
+      writer, drain, requestFlush: () => { setImmediate(() => frameWriter?.repaint()); },
+    });
+  }
+
+  const frameWriter: FrameWriterHandle | null = scrollbackBridge
+    ? wrapStdoutForFrames(process.stdout, scrollbackBridge.writer)
+    : plan.differ === 'fullscreen'
       ? wrapStdoutForFrames(
           process.stdout,
           createFrameDiffer({
@@ -732,20 +1078,38 @@ function runInteractive(
   // `null` when no writer was built, so `/perf` can say "diff render off" rather
   // than printing zeroes that read like a writer doing nothing (§5.4).
   if (frameWriter) setFrameStatsProvider(frameWriter.stats);
-  const frameObserver = createFrameObserver({
-    stdout: frameWriter?.stdout ?? process.stdout, terminal: process.stdout, scrollbar,
-  });
+  if (scrollbackBridge) {
+    const { writer } = scrollbackBridge;
+    setScrollbackStatsProvider(() => ({
+      ...writer.scrollbackStats(), regionRows: writer.regionRows(),
+      // The canvas top is already published by `anchorStats()`; `/perf` needs it on the
+      // mode line to explain a region that does not start on row 0 (tui-full-height-
+      // live-region §5.8). Read per call, never cached: `/perf` shows THIS frame.
+      anchorTop: writer.anchorStats().top,
+    }));
+  }
+  // The observer only serves the full-screen scrollbar geometry; native has none.
+  const frameObserver = native
+    ? null
+    : createFrameObserver({
+        stdout: frameWriter?.stdout ?? process.stdout, terminal: process.stdout, scrollbar,
+      });
   const disposeFrameWriter = (): void => {
-    frameObserver.dispose();
+    // Same switch as `finalizeNativeScreen`: this is one of the four teardown paths.
+    killAnchorProbe();
+    frameObserver?.dispose();
     pointerRouter?.dispose();
     scrollbar.controller?.dispose();
     if (!frameWriter) return;
     setFrameStatsProvider(null);
+    setScrollbackStatsProvider(null);
     frameWriter.dispose();
   };
 
   const replayTranscript = (): void => {
-    if (replayed || !config.exitTranscript) return;
+    // Native mode never replays: the conversation is already in the scrollback, and
+    // a replay would print it twice (D9).
+    if (replayed || !config.exitTranscript || native) return;
     replayed = true;
     const snapshot = readExitSnapshot();
     if (!snapshot) return; // Never published (instant exit) — skip, do not throw.
@@ -777,6 +1141,48 @@ function runInteractive(
       })
     : NOOP_KEYBOARD_ENHANCEMENT;
 
+  // --- Measure the bottom of the screen, THEN build the first frame (§4.4 / §8.1).
+  //
+  // ORDER, ALL OF IT LOAD-BEARING:
+  //  1. the filter exists (it is the only thing that strips the reply — D5);
+  //  2. raw mode is raised BEFORE the query (P0-1 / I-A10);
+  //  3. the probe is awaited, and any failure is `null`;
+  //  4. `enterNativeScreen` writes the one-off fill only when the probe failed;
+  //  5. the measurement is handed to the writer before the first batch.
+  //
+  // This is the only `await` in the whole startup path and it is bounded by
+  // `anchorProbeTimeoutMs` (150 ms), which only a terminal that cannot answer pays.
+  let anchorSpaceBelow: number | null = null;
+  if (native && filter && scrollbackBridge) {
+    if (raiseRawModeForProbe()) {
+      filter.setExpectingCursorReport(true);
+      try {
+        anchorSpaceBelow = await probeAnchorSpaceBelow({
+          stdin: process.stdin,
+          stdout: process.stdout,
+          rows: () => process.stdout.rows,
+          // The first frame is waiting on this: hold the event loop, or a session with
+          // nothing else referenced yet can exit before it draws anything.
+          holdProcess: true,
+        });
+      } catch (error) {
+        // The probe never throws by contract; this is the belt to that braces, and it
+        // must not be able to fail the launch.
+        logger.warn('cli', 'scroll_anchor_probe_failed', {
+          rows: process.stdout.rows ?? null, reason: String(error),
+        });
+        anchorSpaceBelow = null;
+      } finally {
+        filter.setExpectingCursorReport(false);
+      }
+    }
+    logger.info('cli', anchorSpaceBelow === null ? 'scroll_anchor_probe_failed' : 'scroll_anchor', {
+      source: anchorSpaceBelow === null ? 'fill' : 'probe',
+      spaceBelow: anchorSpaceBelow,
+      rows: process.stdout.rows ?? null,
+    });
+  }
+
   {
     // `mouse` here means "a mouse-parsing filter is installed", NOT "the user
     // wants mouse support" — see `AltScreenOptions`. `screen.ts` must never
@@ -788,17 +1194,34 @@ function runInteractive(
     // paste at its default `true` still builds a filter, and passing the handle
     // here would write `?1000h` at a user who disabled the mouse precisely to
     // keep their terminal's own selection.
-    screen = enterAltScreen(process.stdout, {
-      mouse: mouseOn,
-      motion: mouseOn,
-      bracketedPaste: pasteOn,
-    });
+    screen = plan.altScreen
+      ? enterAltScreen(process.stdout, {
+          mouse: mouseOn,
+          motion: mouseOn,
+          bracketedPaste: pasteOn,
+        })
+      // Native scroll: no alternate screen, no mouse (D6). DEC 2004, plus the
+      // one-off fill when the cursor could not be measured — before anything else,
+      // so the rows it scrolls away are the shell's, never this session's.
+      : enterNativeScreen(process.stdout, {
+          bracketedPaste: pasteOn,
+          anchorFillRows: anchorSpaceBelow === null && scrollbackBridge
+            ? Math.max(0, (process.stdout.rows ?? 24) - 1)
+            : 0,
+        });
+    // The measurement reaches the writer BEFORE the first batch, so frame one is
+    // already pinned. `fill` says "we know where the bottom is because we went there".
+    scrollbackBridge?.writer.setAnchorSpaceBelow(
+      anchorSpaceBelow ?? 0,
+      anchorSpaceBelow === null ? 'fill' : 'probe',
+    );
     // Input-encoding modes unwind FIRST, for the same reason the mouse
     // reporting does inside `screen.restore()`: the terminal must stop
     // sending enhanced encodings before anything else tears the reader
     // down, or a keystroke taken in that instant survives into the shell.
     const restore = (): void => {
       keyboardEnhancement.restore();
+      finalizeNativeScreen();
       screen?.restore();
     };
 
@@ -811,7 +1234,14 @@ function runInteractive(
     // Without it, `kill <pid>`, closing the terminal window (SIGHUP), or a dying
     // parent all leave the user staring at a blank alternate screen with `reset`
     // as their only way out.
-    process.on('exit', restore);
+    // THE THIRD PATH, AND NOT A REDUNDANT ONE (R-17 / I-10): `waitUntilExit()` is
+    // a microtask that a killed process never reaches, and `failInteractive`
+    // reaches neither it nor the signal hook. `flushSync` is idempotent, so the
+    // three can coexist without writing three times.
+    process.on('exit', () => {
+      checkpointWriter.flushSync('exit');
+      restore();
+    });
 
     // The signal listeners themselves now belong to `installLogging()`, which
     // registered them before this function ever ran — and a second listener per
@@ -821,6 +1251,9 @@ function runInteractive(
     // the alternate screen), and the signal path restores before exiting.
     setScreenRestore(restore);
     setSignalTerminator((signo) => {
+      // BEFORE `restore()`: both are synchronous, but only this one needs the
+      // controller and the published view to still be live.
+      checkpointWriter.flushSync('signal');
       restore(); // Synchronous: stdout.write on a TTY is sync on every platform.
       process.exit(128 + signo);
     });
@@ -910,7 +1343,8 @@ function runInteractive(
     interactiveClosed = true;
     logger.error('cli', 'render_failed', { error: String(error) });
     for (const cleanup of [
-      () => screen?.restore(), disposeSelection, disposeStdinFilter, disposeFrameWriter,
+      finalizeNativeScreen, () => screen?.restore(), disposeSelection, disposeStdinFilter,
+      disposeFrameWriter,
       () => controller.abort(), () => controller.dispose(), () => updateService?.dispose(),
       () => { process.stdin.pause(); process.stdin.unref?.(); },
     ]) {
@@ -950,6 +1384,15 @@ function runInteractive(
       // byte-identical to a build without this feature.
       pasteBridge={pasteOn ? pasteBridge : undefined}
       terminal={terminalBridge}
+      // Absent in `app` mode, which keeps that tree byte-identical (I-S9).
+      {...(scrollbackBridge ? { scrollMode: plan.scrollMode, scrollback: scrollbackBridge } : {})}
+      session={identity}
+      sessionBridge={sessionBridge}
+      // PRESENT ONLY WHEN THERE IS SOMETHING TO SAY (D-13): a branch, or a
+      // `--save` name. An ordinary launch passes neither, and its first frame is
+      // byte-identical to the pre-feature build (I-6).
+      {...(startup.initialEntries.length > 0 ? { initialEntries: startup.initialEntries } : {})}
+      {...(startup.notice ? { sessionNotice: startup.notice } : {})}
     />,
     // Full-screen owns console.* itself (I-4): Ink's patchConsole writes
     // straight to stdout and permanently shifts the fixed frame's accounting.
@@ -959,7 +1402,7 @@ function runInteractive(
       // I-5: with mouse support off the REAL stdin is handed over unwrapped, so
       // every existing path is provably unchanged.
       stdin: filter?.stdin ?? process.stdin,
-      stdout: frameObserver.stdout,
+      stdout: frameObserver?.stdout ?? frameWriter?.stdout ?? process.stdout,
     },
     caps,
   );
@@ -981,6 +1424,19 @@ function runInteractive(
   // never armed it this is one read and one string compare. Gating it would mean
   // a user who switches `mode` to `off` between the install and the next launch
   // leaves the guard armed with nothing able to disarm it.
+  // THE FIRST WRITE, IMMEDIATELY AFTER `render()` (D-2). This is what makes the
+  // id on screen resumable BEFORE the first message: a zero-turn session is a
+  // legal session, and `--resume` of one is a legitimate thing to want.
+  checkpointWriter.start();
+  // ONE SUBSCRIPTION, ON ONE EVENT (I-10). `agent_end` is the only moment a
+  // checkpoint is honest: mid-stream the turn has not settled, and every extra
+  // event subscription is another timer source to reason about.
+  checkpointWriter.attach((onAgentEnd) =>
+    controller.subscribe((event) => {
+      if (event.type === 'agent_end') onAgentEnd();
+    }),
+  );
+
   setImmediate(() => { if (!interactiveClosed) markBootHealthy(VERSION); });
 
   if (updateEligible) {
@@ -1025,9 +1481,16 @@ function runInteractive(
     .waitUntilExit()
     .then(() => {
       interactiveClosed = true;
+      // FIRST LINE, AND BEFORE `controller.dispose()`: this flush needs the live
+      // history, the live todos and the published view, all of which the
+      // disposers below take apart.
+      checkpointWriter.flushSync('exit');
       // Also cover a successful immediate exit when launched via dist/cli.js,
       // which bypasses the launcher's code-zero boot-guard backstop.
       markBootHealthy(VERSION);
+      // Native scroll: finalize BEFORE the screen handle (the writer erases the live
+      // region and prints the summary; the handle then shows the cursor again).
+      finalizeNativeScreen();
       screen?.restore();
       // BEFORE `disposeStdinFilter()`, which clears the listener set it subscribed to,
       // and after `restore()` for the reason that call records: the terminal must
@@ -1059,11 +1522,63 @@ function runInteractive(
     .catch(failInteractive);
 }
 
+/**
+ * Build the checkpoint writer for one process (D-2 / D-21).
+ *
+ * ONE CONSTRUCTION SITE FOR TWO PATHS. The TUI and `-p` differ in exactly one
+ * thing - where `readView` gets its transcript - and in nothing else: the same
+ * `meta` fields, the same live model, the same todos, the same cwd. Writing the
+ * eight deps twice is how `meta.turns` would come to mean two things, which is
+ * the drift class D-9 exists to prevent for `applyRestoredSession`.
+ */
+function createSessionWriter(input: {
+  controller: AgentController;
+  readView: () => LiveSessionView | undefined;
+  readParentId: () => string | undefined;
+  startPinned: boolean;
+}): SessionCheckpointWriter {
+  const { controller } = input;
+  return new SessionCheckpointWriter({
+    readView: input.readView,
+    readHistory: () => controller.getSessionSnapshot(),
+    readTodos: () => controller.getTodoSnapshot()?.items ?? [],
+    // READ AT WRITE TIME: `/model` rebuilds the config, and a checkpoint that
+    // recorded the model from launch would name the wrong one after a switch.
+    readModel: () => {
+      const live = controller.getConfig();
+      return {
+        providerId: live.provider,
+        modelId: live.model,
+        ...(live.baseUrl ? { baseUrl: live.baseUrl } : {}),
+      };
+    },
+    readCwd: () => controller.getCwd(),
+    version: VERSION,
+    readParentId: input.readParentId,
+    startPinned: input.startPinned,
+  });
+}
+
 async function runOneShot(flags: CliFlags, prompt: string, quiet: boolean): Promise<void> {
+  // THE SAME RESOLUTION THE TUI USES (D-9 / D-21). A `-p` run has no Ink, no
+  // `/session` and no `agent_end` subscription, so `--resume` here is one read
+  // and one write - not a different feature.
+  const startup = resolveStartupSession({
+    ...(flags.resumeSession === undefined ? {} : { resume: flags.resumeSession }),
+    ...(flags.saveSessionAs === undefined ? {} : { saveAs: flags.saveSessionAs }),
+    cwd: process.cwd(),
+    explicitModel: flags.model !== undefined || flags.provider !== undefined,
+  });
+  if (!startup.ok) {
+    process.stderr.write(`${startup.message}\n`);
+    process.exitCode = 2;
+    return;
+  }
   // Headless: no App is ever rendered, so there is no human to approve a skill
   // install. The gate must know that up front rather than discovering a null
   // handler and defaulting to "yes" (§7.4 / AC-13).
   const { controller } = makeController(flags, { interactive: false });
+  startup.apply(controller);
   void controller.refreshModelMetadata();
   const logger = getLogger();
   logger.info('cli', 'run_oneshot', { quiet });
@@ -1086,6 +1601,29 @@ async function runOneShot(flags: CliFlags, prompt: string, quiet: boolean): Prom
   // `followThrough` is read off the REAL controller here rather than through
   // `HeadlessController`, which is deliberately the minimal surface a test can
   // satisfy with an object literal (todo-plan-followthrough §3.6).
+  // THE ONE WRITE `-p` MAKES (D-21), and it is a deliberate trade: `entries` is
+  // empty because there is no transcript, while `messages` is authoritative, so a
+  // later `--resume` inherits the full context and replays no scrollback. Faking
+  // entries would put something on screen that was never displayed.
+  const checkpointWriter = createSessionWriter({
+    controller,
+    readView: () => ({
+      id: startup.identity.id,
+      entries: [],
+      usageTotal: EMPTY_USAGE_TOTAL,
+    }),
+    readParentId: () => startup.identity.parentId,
+    startPinned: startup.identity.pinned === true,
+  });
+  // STDERR, NOT STDOUT (D-21): stdout may be a pipe whose consumer expects the
+  // answer and nothing else, while a human running `-p` by hand still gets told
+  // which session they branched into.
+  if (startup.identity.kind === 'branch' && startup.identity.parentId) {
+    process.stderr.write(
+      `[session] Resumed ${startup.identity.parentId} as a new branch: ` +
+        `${startup.identity.id} (headless: context only, no transcript).\n`,
+    );
+  }
   let code: number;
   try {
     code = await runHeadless(controller, prompt, {
@@ -1093,6 +1631,8 @@ async function runOneShot(flags: CliFlags, prompt: string, quiet: boolean): Prom
       followThrough: controller.getTodoConfig().followThrough,
     });
   } finally {
+    // BEFORE `dispose()`: the flush needs the live history and todos.
+    checkpointWriter.flushSync('exit');
     controller.dispose();
   }
   // Flushed HERE and not inside `runHeadless`: that module is deliberately
@@ -1172,6 +1712,8 @@ const CONFIG_SET_KEYS = new Set([
   // tui-input-flicker-fix §5.1. Listed here AND cased in the switch below, for
   // the reason `transcriptRetain` records three lines up.
   'diffRender',
+  // tui-native-terminal-scroll. Listed here AND cased in the switch below.
+  'scrollMode',
   'syncOutput',
   // Without these two, `density` and `hints` would be settable only as one-shot
   // flags and never persist -- inconsistent with every other config field.
@@ -1231,6 +1773,11 @@ const CONFIG_SET_KEYS = new Set([
   // a script at all: `config list` enumerates the section dynamically and so
   // shows these keys whether they are here or not, while `config set` does not.
   ...COMPACTION_CONFIG_SET_KEYS,
+  // `jobs.*` keys are handled by `applyJobsConfigSet`, same reasoning again — and
+  // this spread is exactly why `JOBS_CONFIG_SET_KEYS ⊆ CONFIG_SET_KEYS` needs its
+  // own assertion: the static guard in `config.test.ts` matches LITERAL keys in
+  // this file, so a spread set is invisible to it (RV-P2-8).
+  ...JOBS_CONFIG_SET_KEYS,
 ]);
 
 /**
@@ -1389,6 +1936,18 @@ function runConfigSetValue(key: string, value: string): void {
     return;
   }
 
+  const jobsPatch = applyJobsConfigSet(key, value);
+  if (jobsPatch) {
+    // Echoed from the STORED value, so `config set jobs.waitSeconds 1` prints 5
+    // and `jobs.waitSeconds 9999` prints 60 — the rule every section above
+    // states. It matters here too: `waitSeconds` is ALSO converged against the
+    // tool ceiling by I-4, so the stored value is the only honest answer.
+    const merged = updatePersistedConfig(jobsPatch);
+    const field = key.slice('jobs.'.length) as keyof typeof merged.jobs;
+    process.stdout.write(`Set ${key} = ${String(merged.jobs[field])}\n`);
+    return;
+  }
+
   const patch: Partial<PersistedConfig> = {};
   switch (key) {
     case 'provider':
@@ -1432,6 +1991,9 @@ function runConfigSetValue(key: string, value: string): void {
       break;
     case 'diffRender':
       patch.diffRender = value === 'true' || value === '1';
+      break;
+    case 'scrollMode':
+      patch.scrollMode = clampScrollMode(value, DEFAULT_SCROLL_MODE);
       break;
     case 'syncOutput':
       patch.syncOutput = value === 'true' || value === '1';
@@ -1709,6 +2271,16 @@ function buildProgram(): Command {
     .version(VERSION, '-v, --version', 'Print the version')
     .argument('[prompt]', 'Task prompt (starts the TUI, or a one-shot run with -p / piped stdin)')
     .option('-p, --print', 'Headless: stream the answer to stdout, then exit')
+  // ROOT-LEVEL, AND `exec` KEEPS ITS OWN (commander does not inherit parent
+  // options: `copyInheritedSettings` copies output/help configuration only, not
+  // `.option()` definitions), so the two can coexist. T-39 asserts both option
+  // tables structurally rather than by parsing help text.
+  //
+  // `--resume` ALWAYS BRANCHES. It reads the named session and continues it under
+  // a NEW id, so the session it came from is never written again by this process;
+  // `--save` names THIS run's persistent id and pins it against `sessions prune`.
+  .option('--resume <id|path>', 'Resume a saved session as a new branch (TUI or -p)')
+  .option('--save <id>', 'Persist this session under this id (pinned against prune)')
     .option('--provider <id>', 'anthropic | openai | google')
     .option('--model <id>', 'Model id')
     .option('--base-url <url>', 'Override the provider base URL')
@@ -1848,6 +2420,7 @@ function buildProgram(): Command {
     // one documented escape hatch for a mis-rendering terminal into a no-op.
     .option('--diff-render', 'Repaint only changed rows (default, full-screen only)')
     .option('--no-diff-render', 'Repaint the whole frame every time (pre-fix behavior)')
+    .option('--scroll-mode <mode>', 'Scrolling: native (terminal scrollback, default) or app (full-screen)')
     .option('--sync-output', 'Ask the terminal to present each repaint atomically (the default)')
     .option('--no-sync-output', 'Do not emit DEC 2026 begin/end synchronized update')
     .option('--no-color', 'Disable ANSI color')
@@ -1882,7 +2455,7 @@ function buildProgram(): Command {
         return;
       }
 
-      runInteractive(flags, { initialPrompt: prompt });
+      void runInteractive(flags, { initialPrompt: prompt });
     });
 
   // aragon config [set <key> <value> | path]
@@ -1890,7 +2463,7 @@ function buildProgram(): Command {
     .command('config')
     .description('Open the settings screen')
     .action(() => {
-      runInteractive(toFlags(program.opts()), { initialOverlay: 'settings' });
+      void runInteractive(toFlags(program.opts()), { initialOverlay: 'settings' });
     });
 
   configCmd

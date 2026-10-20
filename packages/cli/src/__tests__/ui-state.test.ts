@@ -55,6 +55,8 @@ describe('reading', () => {
       // (P1-8). A new field simply reads as its default on an older file.
       mouseNoticeVersion: 0,
       vtInputNoticeVersion: 0,
+      // tui-native-terminal-scroll D12: one more scalar, schema still `1`.
+      scrollModeNoticeVersion: 0,
     });
   });
 

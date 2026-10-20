@@ -6,15 +6,24 @@ import { registerProfileSecrets } from '../logging/secret-registry.js';
 import { normalizeModelProfiles, validateModelProfiles, type ModelProfilesConfig,
   type ModelRole, type ProfileValidationIssue } from './model-profiles.js';
 import { normalizeProfileBaseUrl, projectModelProfiles } from './model-profile-resolution.js';
-import type { CliConfig, CompactionConfig, FastConfig, LogConfig, PersistedConfig }
-  from './schema.js';
+// TYPE-ONLY: the store needs the session-kit SHAPE, never a kit at run time, so
+// this line adds no runtime edge from the persistence layer into the resolver.
+import type { SessionKitState } from './model-kits.js';
+import type { CliConfig, CompactionConfig, FastConfig, LogConfig, PersistedConfig,
+  TeamConfig } from './schema.js';
 
+// 'team' joins the Omit list because the patch carries a PARTIAL section (V-6):
+// `Partial<TeamConfig>` is not assignable to the full `TeamConfig` the persisted
+// shape demands, so redeclaring the section without excluding it fails the
+// interface-extension compatibility rule outright.
 export interface ModelSettingsPatch extends Partial<
-  Omit<PersistedConfig, 'modelProfiles' | 'fast' | 'compaction' | 'log'>
+  Omit<PersistedConfig, 'modelProfiles' | 'fast' | 'compaction' | 'log' | 'team'>
 > {
   fast?: Partial<FastConfig>;
   compaction?: Partial<CompactionConfig>;
   log?: Partial<LogConfig>;
+  /** The subagent-model picker writes here (subagent-model D-5/I-5): draft-only until Save. */
+  team?: Partial<TeamConfig>;
 }
 export interface ModelSettingsDraft {
   profiles?: ModelProfilesConfig;
@@ -25,6 +34,30 @@ export interface ModelSettingsDraft {
   baseline: PersistedConfig;
   liveBaseline: CliConfig;
   readError?: string;
+  /**
+   * The session kit this transaction carries (agent-model-kits RV-P0-2 / §4.3).
+   *
+   * THREE-STATE, and every state is reachable: `undefined` = "this draft does
+   * not speak about kits" (a legacy caller, `/model`, `config set`);
+   * an object = "the session kit is still in effect and these slots are still
+   * its"; `null` = "this transaction explicitly RELEASES the session kit"
+   * (`Current setup`, `/kit use current`, or a save that decided all three
+   * slots). `createModelSettingsDraft` seeds it from the LIVE config, without
+   * which the object state would be unreachable and any save made from the
+   * settings screen would silently release the kit.
+   */
+  sessionKit?: SessionKitState | null;
+  /**
+   * Set ONLY by `applySessionKit` (agent-model-kits §4.2 exit B).
+   *
+   * IT MEANS "THIS DRAFT IS THE KIT BEING APPLIED". The release rule
+   * (`releasedSlots`) reads `activateRoles` / `patch.team` / binding changes as
+   * "the user decided that slot", and an apply writes all three of those by
+   * definition - so without this marker every apply would immediately release the
+   * slots it just installed. The marker is per-transaction state, never persisted,
+   * and a save from the settings screen never sets it.
+   */
+  sessionKitFresh?: boolean;
 }
 export interface ModelSettingsSaveResult {
   ok: boolean;

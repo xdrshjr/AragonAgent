@@ -45,6 +45,8 @@ export interface SessionsCliOptions {
   json?: boolean;
   lines?: string;
   all?: boolean;
+  /** `exec` (default) | `tui` | `all`; see the truth table in §3.7. */
+  origin?: string;
   olderThan?: string;
   dryRun?: boolean;
   yes?: boolean;
@@ -58,7 +60,16 @@ export function registerSessionsCommand(program: Command): void {
     .description('Manage `aragon exec` sessions: list | show | rm | prune | path')
     .option('--json', 'Machine-readable output')
     .option('-n, --lines <n>', 'Entries for `sessions list` (default 20)')
-    .option('--all', 'Include sessions this CLI did not create (TUI `/save` files)')
+    // TWO ORTHOGONAL AXES, TWO FLAGS (tui-session-id-resume 3.7 / R-7).
+  // `--all` widens "which rows exist" to files with no metadata at all; it can no
+  // longer reach a TUI checkpoint, because a TUI checkpoint HAS metadata and is
+  // separated by `--origin` instead. One merged axis made `--all` a maintenance
+  // command that deleted the conversation the user was still having.
+  .option(
+    '--all',
+    'Also include files with no session metadata (hand-written /save exports)',
+  )
+  .option('--origin <exec|tui|all>', 'Which writer `prune` may touch (default: exec)')
     .option('--older-than <days>', 'Only prune sessions untouched for this many days')
     .option('--dry-run', 'Print what `sessions prune` would delete, and delete nothing')
     .option('--yes', 'Confirm destructive actions (required by `rm` and `prune`)')
@@ -103,14 +114,19 @@ function runList(opts: SessionsCliOptions): number {
     process.stdout.write(
       opts.all
         ? 'No sessions found.\n'
-        : 'No `aragon exec` sessions found. Pass --all to include TUI /save files.\n',
+        : 'No sessions found. Pass --all to include files with no session metadata.\n',
     );
     return 0;
   }
   for (const entry of entries) {
+    // THE ORIGIN COLUMN IS THE ONE VISIBLE CHANGE TO THIS LINE (I-7), and it is
+    // what makes `prune --origin` comprehensible: without it a user cannot tell
+    // which of these files a sweep would touch. `pin` follows it for the same
+    // reason - a file that can never be pruned should look like one.
+    const tags = `${entry.origin ?? 'exec'}${entry.pinned ? '  pin' : ''}`;
     process.stdout.write(
       `${entry.id}  ${stamp(entry.updatedAt)}  ${entry.turns} turns  ` +
-        `${entry.provider}/${entry.model}  ${entry.cwd}\n`,
+        `${entry.provider}/${entry.model}  ${tags}  ${entry.cwd}\n`,
     );
   }
   return 0;
@@ -152,7 +168,9 @@ function runShow(argument: string | undefined, opts: SessionsCliOptions): number
       }`,
       `messages  ${session.messages.length}`,
       `todos     ${session.todos?.length ?? 0}`,
-      `managed   ${meta?.id ? 'yes (aragon exec)' : 'no (TUI /save)'}`,
+      `origin    ${meta?.origin === 'tui' ? 'tui (session checkpoint)' : 'exec'}`,
+      `pinned    ${meta?.pinned === true ? 'yes' : 'no'}`,
+      `managed   ${meta?.id ? 'yes' : 'no (TUI /save)'}`,
       '',
     ].join('\n'),
   );
@@ -185,6 +203,11 @@ function runRemove(argument: string | undefined, opts: SessionsCliOptions): numb
 }
 
 function runPrune(opts: SessionsCliOptions): number {
+  const originScope = parseOrigin(opts.origin);
+  if (originScope === null && opts.origin !== undefined) {
+    process.stderr.write('--origin takes exec, tui or all.\n');
+    return 2;
+  }
   const days = parseCount(opts.olderThan);
   if (opts.olderThan !== undefined && days === null) {
     process.stderr.write('--older-than takes a non-negative number of days.\n');
@@ -198,6 +221,7 @@ function runPrune(opts: SessionsCliOptions): number {
     ...(days !== null ? { olderThanDays: days } : {}),
     ...(opts.dryRun ? { dryRun: true } : {}),
     ...(opts.all ? { all: true } : {}),
+    ...(originScope !== null ? { origin: originScope } : {}),
   });
   if (opts.json) {
     process.stdout.write(`${JSON.stringify(doomed, null, 2)}\n`);
@@ -205,13 +229,25 @@ function runPrune(opts: SessionsCliOptions): number {
   }
   const verb = opts.dryRun ? 'Would remove' : 'Removed';
   for (const entry of doomed) process.stdout.write(`${verb} ${entry.id}  ${stamp(entry.updatedAt)}\n`);
+  // `foreign` NOW MEANS EXACTLY ONE THING: files with NO metadata, i.e. a
+  // hand-written `/save` export reached only because `--all` was given. TUI
+  // checkpoints are managed and are reported through `--origin tui` instead, so
+  // this sentence can no longer claim something about a file it does not describe
+  // (R-7).
   const foreign = doomed.filter((e) => !e.managed).length;
   process.stdout.write(
     `${verb.toLowerCase()} ${doomed.length} session(s)` +
-      (foreign > 0 ? `, ${foreign} of them saved from the TUI (--all was given).` : '.') +
+      (foreign > 0 ? `, ${foreign} with no session metadata (--all was given).` : '.') +
       '\n',
   );
   return 0;
+}
+
+/** `--origin` accepts the two writers plus `all`; anything else is refused. */
+function parseOrigin(raw: string | undefined): 'exec' | 'tui' | 'all' | null {
+  if (raw === undefined) return null;
+  const value = raw.trim().toLowerCase();
+  return value === 'exec' || value === 'tui' || value === 'all' ? value : null;
 }
 
 function parseCount(raw: string | undefined): number | null {

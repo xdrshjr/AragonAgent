@@ -14,6 +14,12 @@ steer / configure the session — all without leaving the terminal.
 
 Node **≥ 18**, any platform.
 
+**The default scrolling mode (`native`, see [Scrolling](#scrolling)) needs no mouse
+support at all**: the conversation is printed into your terminal's own scrollback,
+so the wheel, scrollbar, selection and search are the terminal's. The Windows
+Node-version notes below therefore only matter for `Shift+Tab` and for the optional
+full-screen mode (`--scroll-mode app`), where the application owns the mouse.
+
 **On Windows with Node < 22.17.0 (or 24.0/24.1), aragon turns the missing
 console flag on itself at startup**, which restores `Shift+Tab` on most
 machines. Where that is blocked — a locked-down PowerShell, an old console
@@ -197,7 +203,7 @@ supplying it is frequently the least trusted input in the pipeline.
 aragon sessions list [--json] [-n 20] [--all]
 aragon sessions show <id> [--json]
 aragon sessions rm <id> --yes
-aragon sessions prune [--older-than 7] [--dry-run] [--all] --yes
+aragon sessions prune [--older-than 7] [--dry-run] [--all] [--origin exec|tui|all] --yes
 aragon sessions path
 ```
 
@@ -312,19 +318,25 @@ section is the one that would be misled by their omission.
    **On Windows only Ctrl-C does** — Node does not deliver the other two to
    listeners, so `taskkill` ends the process outright. Resolve on process exit as
    well as on `result`, or a killed run hangs your parent process.
-3. **A session created by `aragon exec` and resumed with `aragon --resume`
-   carries the model's full memory and shows no scrollback** for the turns that
-   ran headlessly. The reverse direction is fully faithful: a TUI `/save` resumed
-   by `aragon exec --resume <id>` keeps everything.
-4. **`aragon sessions prune` shares a directory with the TUI's `/save`**, so it
-   only ever touches sessions `exec` created — files that carry an exec `meta`
-   block — unless you pass `--all`. `sessions show` and `sessions rm` accept any
-   id, because you named it.
+3. **Resuming carries the model's full context, and only the scrollback that
+   was actually recorded.** `aragon --resume <id>` continues any saved session
+   — a TUI checkpoint, a TUI `/save` export, an `exec` session — under a NEW id,
+   with the whole conversation and no transcript replay for turns that ran
+   headlessly (`aragon -p`). A TUI checkpoint replays its screen faithfully.
+4. **`aragon sessions prune` never deletes what you are still using.** It only
+   touches sessions this CLI wrote (files with a session metadata block), and it
+   defaults to `--origin exec`, so a TUI checkpoint is out of scope unless you
+   ask for it with `--origin tui`. `--all` widens "which rows exist" to
+   hand-written `/save` files and never reaches a TUI checkpoint; `pinned`
+   sessions and files whose owner process is still alive are never deleted.
+   `sessions show` and `sessions rm` accept any id, because you named it.
 
 ## Usage
 
 ```
 aragon [prompt]                 Start the interactive TUI (or one-shot with -p / piped stdin)
+aragon --resume <id|path>       Continue a saved session under a NEW id (TUI or -p)
+aragon --save <id>              Name this session's id and pin it against `sessions prune`
 aragon -p, --print [prompt]     Headless: stream the answer to stdout, then exit
 aragon exec [prompt]            Machine-facing run: JSON events, sessions, permissions, budgets
 aragon sessions <sub> [id]      Manage exec sessions: list | show | rm | prune | path
@@ -337,6 +349,13 @@ aragon models [--provider p]    List builtin + discovered models
 aragon --version | -v           Print the version
 aragon --help  | -h             Print help
 ```
+
+Inside `/settings`, a model profile can be verified before it is saved: **Test connection**
+(`Ctrl+R`) makes one real round trip with the draft's provider, model, base URL and
+resolved key and reports either `OK 812 ms` or a classified failure plus the one thing
+to fix, while **Discover models** (`Ctrl+F`) lists what that key can actually reach so the
+model is picked instead of typed. Both act on the unsaved draft, cost at most one short
+request (discovery costs no tokens), and are never written to disk.
 
 `aragon exec` is documented in full under
 [Use it from another project](#use-it-from-another-project). Every global flag
@@ -354,6 +373,7 @@ below works there too, in either position — `aragon --model m exec "…"` and
 | `--thinking <level>` | `off\|minimal\|low\|medium\|high\|xhigh` |
 | `--max-tokens <n\|auto>` | Output token cap: a number, or `auto` for the model's own ceiling (default `64000`) |
 | `--cwd <dir>` | Working directory for tools |
+| `--scroll-mode <native\|app>` | `native` (default): the terminal scrolls, selects and searches the conversation; `app`: full-screen layout with application-owned scrolling. See [Scrolling](#scrolling) |
 | `--confirm` | Confirm each mutating tool call |
 | `--tool-timeout <ms>` | Per-tool executor ceiling (default 180000) |
 | `--idle-timeout <ms>` | Watchdog idle timeout (auto-raised to ≥ tool-timeout + 30s) |
@@ -390,6 +410,138 @@ Exit codes: `0` success · `1` agent/runtime error · `2` config/usage error ·
 `3` stopped by a caller-set budget (`aragon exec` only) · `128 + signo` when a
 signal ends the run (`130` SIGINT, `143` SIGTERM, `129` SIGHUP).
 
+## Session identity, resume and branching
+
+Every TUI session has a short id - six characters from an alphabet that omits
+`0 o 1 l i`, so it can be read off a screen without a transcription mistake - and
+that id is shown at the right end of the status bar. It is also written to
+`~/.aragon-agent/sessions/<id>.json` as the conversation proceeds, which is what
+lets a second terminal continue the same conversation.
+
+**The chip.** `id a4k2m9` when there is room (72 columns and up), `a4k2m9` below
+that, and nothing at all when even the id would crowd the status fields. An id is
+never truncated: half an id is a `--resume` command that cannot work, which is
+worse than no id, and `/session` reports the full id at any width. In the one
+layout where the status row itself is not drawn (a terminal too short for a single
+status line), the chip is absent by design and `/session` is the way to read it.
+
+**When it is written.** After the first frame (so the id on screen is resumable
+before the first message), after every settled turn (debounced, so a run that
+restarts itself does not write twice), on `/session pin`, and once on the way out.
+`aragon -p` has no screen and no turn events, so it writes exactly once, at exit.
+Every write replaces the file atomically - this is the first session file in this
+CLI that a reader may be looking at while it is rewritten.
+
+**What a checkpoint contains.** The full conversation, the todo list, the model
+and the transcript, plus a `meta` block naming the writer. A turn interrupted
+mid-tool is repaired ON THE COPY: the dangling `tool_call` gets an `isError`
+`tool_result` so the next request is legal, and any tool card still running is
+settled, so a resumed session has nothing left spinning. The live conversation is
+never edited to achieve this.
+
+**Branching.** `aragon --resume <id|path>` reads the named session and continues
+it under a **new** id (`a4k2m9-x7f2`, or a fresh id when the file was a
+hand-written `/save` export). The session it came from is not written again by
+this process - not its contents, not its `savedAt` - and `--continue` never points
+at it. That is what makes it safe to branch while the original TUI keeps running.
+(`aragon exec --resume <id>` follows the same rule: it reads your session and
+writes one of its own. `--continue` then names the newest **exec** session, which
+is the new one - it never names the TUI session it read.)
+
+Three entry points, three different behaviours, on purpose:
+
+| Command | Reads | Writes |
+| --- | --- | --- |
+| `aragon --resume <id\|path>` | the session you name | a NEW branch session; the parent is never touched |
+| `/resume [file]` (inside the TUI) | the file you name | this process moves to a NEW id, and the spend counter restarts |
+| `aragon exec --resume <id\|path>` | the session you name | a new exec session of its own - including when the session you named was written by the TUI |
+
+**Naming a session.** `aragon --save <id>` names this run's persistent id and pins
+it: `sessions prune` will never delete it. The value must be an id, not a path
+(`--save ./notes.json` exits 2 and says so); use `/save` inside the TUI to export
+to a file. `aragon --save <id>` refuses an id that already exists, and refuses the
+id you are resuming - either would mean writing over a session you still have.
+
+**`/session`.** Bare `/session` reports the id, the file it is written to, the
+branch parent (if any), whether it is pinned, and the two commands worth pasting.
+`/session copy` puts `aragon --resume <id>` on the clipboard through the same door
+`/copy` uses (OSC 52 included, so it works over SSH). `/session pin` writes once
+and marks the file as never-prunable.
+
+**Why there is no switch.** Sessions are recorded by default, exactly as
+`aragon exec` already wrote them by default, and there is deliberately no
+"show the id but do not save it" mode: it would leave an id you can copy and
+cannot use. `sessions rm <id> --yes` is the explicit way to delete one, and
+nothing is ever deleted automatically.
+
+**Headless checkpoints carry context, not scrollback.** A session continued with
+`aragon -p` records the conversation but no transcript, because nothing was ever
+displayed. `aragon --resume` of such a file inherits the full context and shows an
+empty screen until the next turn - the alternative, inventing entries, would put
+a conversation the user never saw onto their screen.
+
+## Agent kits
+
+A **kit** is a named preset that pins the three model roles at once: which
+profile runs the main model, which runs the fast tier (or none), and which model
+subagents use. It is a set of *references* to the profiles you already have, so
+editing a profile changes every kit that names it — which is what "preset"
+should mean.
+
+Kits exist in three layers, and only one of them writes a file:
+
+| Layer | Where | Lives until |
+| --- | --- | --- |
+| **Saved** | `/settings` → `Kit pack` → `New kit` / `e` | you delete it |
+| **Default** | `Kit pack` → `s` (*Set default*), then `Ctrl+S` | you change it |
+| **Session** | `Ctrl+K`, or `/kit use <name>` | this process exits |
+
+The first row of the `Ctrl+K` overlay is always `Current setup` — the bindings in
+`config.json` — and choosing it releases a session kit, so the feature has an exit
+as well as an entrance.
+
+```
+Agent kits                     Session only; set a default in /settings
+  [In use] Deep work                                    [Default]
+  Current setup
+  ────────────────────────────────────────────────────────
+  main      anthropic:claude-opus-4-6        default URL
+  subagent  anthropic:claude-haiku-4-5       profile Haiku
+  fast      anthropic:claude-haiku-4-5       tier on
+  ────────────────────────────────────────────────────────
+  Enter use for this session | Esc close
+```
+
+- **`Ctrl+K` never writes the config file.** That is a promise with a test
+  behind it: the session path runs the same prepare chain as a save and skips
+  only the commit, so a failed switch leaves both the file and the session
+  exactly as they were, and a successful one produces no bytes on disk.
+- **A save decides slots, not the whole kit.** Change the subagent model while a
+  session kit is in effect and only the subagent slot leaves the kit; main and
+  fast keep the kit's choices. Rebinding main releases main, and so on.
+- **The status bar names what is running** with a `kit <name>` chip, and appends
+  `~` when the live connections no longer match the preset (for example after
+  `/model`). With no kit in effect the chip is not rendered at all.
+- **`Ctrl+G` reveals `^K switch kit`** in the header row; on terminals narrower
+  than 79 columns it gives way to `^L` and `^I`, and `/help` plus `/kit` are the
+  fallback. (`Alt+K` is where `Ctrl+K`'s old "kill to end of line" went.)
+- **Setting a default applies its three slots**, because "the default" *is* the
+  binding in the config file. A pointer alone would not be in effect at the next
+  launch.
+- **Deleting a profile deletes the kits that name it**, in the same
+  confirmation, and says so: a preset pointing at a deleted profile can neither
+  be applied nor repaired from any screen. Kits that a hand-edited file leaves
+  dangling degrade to `Profile missing` and are refused with a stable message.
+
+Config keys (all inside the existing `modelProfiles` section, so an older build
+ignores them rather than rejecting the library):
+
+| Key | Meaning |
+| --- | --- |
+| `modelProfiles.kits` | The library: id, name, main profile, fast profile (`null` = off), subagent mode + profile |
+| `modelProfiles.defaultKitId` | The default kit, or `null`. A dangling value heals to `null` |
+| `modelProfiles.kitsVersion` | Migration marker, always `1`. **Downgrading drops kits** (the older build's whitelist does not know the keys); profiles and bindings are unaffected, and `New kit` prefills from your current setup so rebuilding is one Save |
+
 ## Slash commands (interactive)
 
 | Command | Action |
@@ -400,20 +552,22 @@ signal ends the run (`130` SIGINT, `143` SIGTERM, `129` SIGHUP).
 | `/thinking <level>` | Set the thinking level |
 | `/max-tokens [<n>\|auto\|default]` | Output token cap; with no argument, reports the setting **and** the effective cap for the live model |
 | `/tools` | List active tools |
-| `/clear` | Clear the visible transcript and the todo panel |
-| `/reset` | New conversation |
+| `/clear` | Start a new conversation: interrupt the run, archive the old session, clear the context, transcript, queues and todo panel. `/clear screen` only clears the screen |
+| `/reset` | Alias of `/clear` - one implementation, so the two cannot drift apart |
 | `/cwd [dir]` | Show / change the tool working directory |
-| `/save [file]` | Save the session to JSON |
-| `/resume [file]` | Load a saved session |
+| `/save [file]` | Export the session to JSON - a file you keep, unchanged by this feature |
+| `/resume [file]` | Load a saved session. This session moves to a NEW id, and the spend counter restarts |
+| `/session [copy\|pin]` | Report this session's id, file and branch parent; `copy` puts `aragon --resume <id>` on the clipboard; `pin` makes `sessions prune` skip the file forever |
 | `/plan [on\|off\|status]` | Toggle plan mode - the keyboard-free equivalent of `Shift+Tab` |
-| `/team [on\|off\|max <n>\|overseer on\|off]` | Team subagents: status and the live roster, the on/off switch, the fan-out width, the dispatch supervisor |
+| `/team [on\|off\|max <n>\|overseer on\|off\|model [main\|fast\|<profile-name>]]` | Team subagents: status and the live roster, the on/off switch, the fan-out width, the dispatch supervisor |
 | `/todo [on\|off\|panel on\|off\|follow <mode>\|clear\|continue]` | Todo planning: status, the on/off switch, the rail, follow-through, and picking an unfinished plan back up |
 | `/retry [show\|on\|off\|max <n>]` | API retry: the effective ladder, the on/off switch, the retry count. Takes effect **in the running session**, children included |
 | `/fast [on\|off\|model <id>\|provider <id>\|same\|review <n\|off>]` | Fast model tier: status and this session's totals, the on/off switch, which model, the review cadence |
 | `/compact [status\|on\|off\|threshold <n>\|keep <n>\|history\|show <n>\|<instructions>]` | Context compaction: occupancy and this session's totals, the on/off switch, when it fires, how much it keeps. With free text, compacts now and tells the summarizer what to pay attention to |
 | `/context` | What the context gauge is showing: occupancy split into measured and estimated, the window and **where it came from**, how stale the measurement is, compaction's actual state, and what the session-spend readout includes |
-| `/bg [list\|logs <id> [n]\|stop <id\|all>\|status]` | Background services: what is running, its log tail, and how to stop it. `list` is the default |
+| `/bg [list\|logs <id> [n]\|stop <id\|all>\|status]` | Background jobs (services and tasks): what is running, its log tail, and how to stop it. `list` is the default |
 | `/update [status\|now\|skip\|off]` | Auto-update: what is running, what is available, where it came from, when it looks again. `now` forces a check past the throttle; `skip` declines the offered version until a newer one appears |
+| `/kit [list\|use <name\|current>]` | Agent kits: what is in effect and where it came from, the whole library with each preset's three connections, or apply one for **this session**. `/kit use current` releases it. Never writes the config file |
 | `/theme <auto\|warm\|cool\|light>` | Switch the color theme live (persisted) |
 | `/expand [n]` | Expand / collapse the n-th-from-last (default last) tool card |
 | `/copy` | Copy the last answer to the clipboard |
@@ -437,25 +591,32 @@ completes, `Up` / `Down` moves the selection, `Esc` closes it.
 | `Shift+Tab` | Toggle **plan mode** (`BUILD` <-> `PLAN`). Equivalent: `/plan`. On Windows this needs a console flag Node < 22.17 does not set; aragon sets it at startup — see [Requirements](#requirements) |
 | `Ctrl+P` | The same toggle, over a channel no Windows console can swallow. Use it if `Shift+Tab` does nothing |
 | `Ctrl+I` | **Build the project index** (bundled `project-indexer` skill). Asks for confirmation, then runs as a normal agent turn that writes `.claude-index/` and updates `CLAUDE.md`. On terminals without keyboard enhancement `Ctrl+I` is the Tab byte and completes input instead |
+| `Ctrl+K` | **Agent kits**: pick a model preset — main / subagent / fast profile in one choice — for **this session only**. Nothing is written to the config file. `Current setup` (the first row) releases the preset and returns to the file's bindings. See [Agent kits](#agent-kits) |
 | `Esc` | Close an overlay or popup; otherwise ask for interruption confirmation. While idle, cancel pending auto-continuation |
 | `Esc` ×2 | Interrupt the run when pressed within 1.5 seconds. Other keys or closing a menu cancel the first press |
 | `Esc` again after interruption | **Force-stop** a run that is still stopping, kill foreground shell commands and return to `idle`; background services remain running |
 | `Ctrl+C` | **Copy the selection** when a drag-selection is waiting (release no longer copies by itself). Otherwise: stop the background **services** the agent started, when there are any. It does not arm exit |
 | `Ctrl+C` ×2 | Exit (first press warns), once no services are running |
-| `Ctrl+L` | Redraw the frame |
+| `Ctrl+L` | **Branch this session into a new terminal**: opens a PowerShell (Windows) or bash (macOS/Linux) window at the current `/cwd` and runs `aragon --resume <id>` there, so the branch gets its own id and the session you branched from is untouched. Works while the agent is running - the child inherits the last settled turn. Same code path as `/branch` |
+| `Ctrl+R` | Redraw the frame (moved here from `Ctrl+L`, which is now the branch key) |
 | `Ctrl+T` | Show / hide thinking (**off by default**) for the entire session |
-| `Ctrl+O` | Expand / collapse the most recent tool, team, compaction or **service** card — including a diff or a service's log tail |
-| `PgUp` / `PgDn` | Scroll the transcript a page (full-screen mode) |
-| `Shift+↑` / `Shift+↓` | Scroll the transcript a line (full-screen mode) |
-| Mouse wheel | Scroll the transcript (or the open overlay). On Windows needs Node ≥ 22.17 — see [Requirements](#requirements) |
-| `Shift`+wheel | Scroll the transcript a page |
+| `Ctrl+O` | Expand / collapse the most recent tool, team, compaction or **service** card — including a diff or a service's log tail. In native scroll mode printed rows cannot change, so it **prints an expanded copy** below instead. When no card is asking for the key it re-prints the **last finished answer** in full — the same escape hatch for a reply taller than the region |
+| Terminal scrolling (native mode, the default) | The wheel, the scrollbar, `Shift+PgUp` / `Shift+PgDn`, text selection and in-terminal search are all your terminal's own — see [Scrolling](#scrolling) |
+| `PgUp` / `PgDn` | Page through an open overlay; in full-screen mode also scroll the transcript a page |
+| `Shift+↑` / `Shift+↓` | Scroll the transcript a line (full-screen mode only) |
+| Mouse wheel | Full-screen mode: scroll the transcript (or the open overlay). On Windows needs Node ≥ 22.17 — see [Requirements](#requirements) |
+| `Shift`+wheel | Full-screen mode: scroll the transcript a page |
 | `Home` / `End`, `Ctrl+A` / `Ctrl+E` | Cursor to line start / end |
 | `Alt/Ctrl+←` / `→` | Word-wise cursor jump |
 | `Ctrl+W`, `Alt+Backspace` | Delete the previous word |
-| `Ctrl+U` / `Ctrl+K` | Kill to line start / end |
+| `Ctrl+U` / `Alt+K` | Kill to line start / end (`Alt+K` was `Ctrl+K`, which now opens the kit picker) |
 | `Up` / `Down` | 按视觉行移动；空草稿或正在浏览历史时，才在边界召回历史，避免覆盖新草稿 |
-| Paste | Inserted as-is up to 6 lines / 400 chars; larger collapses to `[Pasted text #1 +15 lines]`, which deletes as one unit and expands in full when you send. `--no-paste` restores the pre-0.6.3 behaviour |
+| Paste | Inserted up to 6 lines / 400 chars; larger collapses to `[Pasted text #1 +15 lines]`, which deletes as one unit and expands in full when you send. Escape sequences are removed as sequences (so a coloured log arrives as its text, not as `[38;2;18;52;86m`), and a TAB is kept in the payload but laid out at the terminal's 8-column tab stops, so the draft and the echoed message line up. `--no-paste` restores the pre-0.6.3 behaviour |
 | `?` | Open help (empty input) |
+
+Everything from here to the end of this section describes **full-screen mode**
+(`--scroll-mode app`). In the default native mode the application does not capture
+the mouse, so none of it applies.
 
 In **full-screen mode**, PgUp/PgDn, Shift+Up/Down and the right-edge scrollbar
 scroll the transcript and its team/queue panels. The input stays fixed and visible.
@@ -536,10 +697,14 @@ Agent 运行中发送的消息会进入队列。输入框附近的独立 Queue �
 窄屏优先保留运行状态、待处理数量和上下文；其他字段整项隐藏，不截断关键数值。
 快捷键集中在操作提示行，并随覆盖层、补全、选区和中断确认状态变化。
 
-`/clear` 清转录和 TODO，但保留待接收队列。保存和退出会补回被清屏或保留环裁剪的
-未发送全文。恢复存档时，queued 一律成为 `Queued but never sent: ...` 警告，
-不会自动重发；需要发送时请复制正文重新提交。运行尚未退出时 `/reset`、`/resume`
-会拒绝切换，损坏存档在替换当前会话之前报错。
+`/clear` 开启新对话：若任务仍在运行会先中断，把旧会话归档到
+`~/.aragon-agent/sessions/cleared/`（保留最近 20 份，路径会在提示里给出，
+可用 `/resume <路径>` 恢复），然后清除上下文历史、待接收队列、转录与 TODO 面板。
+`/reset` 与 `/clear` 完全等价，两条命令共用同一份实现。只想清屏而不动上下文时
+使用 `/clear screen`，它的行为与旧版 `/clear` 一致。保存和退出会补回被清屏或
+保留环裁剪的未发送全文。恢复存档时，queued 一律成为 `Queued but never sent: ...`
+警告，不会自动重发；需要发送时请复制正文重新提交。运行尚未退出时 `/resume`
+会拒绝切换，`/clear` 则会中断并清除；损坏存档在替换当前会话之前报错。
 
 应用捕获鼠标时，拖选只保留高亮，按 Ctrl+C 才复制；本次按键不会停止服务或退出。
 选中文字改变、滚轮、其他按键或关闭选区会取消高亮。`--no-mouse` 或宿主原生选择的
@@ -673,7 +838,137 @@ multi-region edit it is strictly smaller, because a change at line 40 and one at
 line 900 are now two small hunks instead of 860 removed rows followed by 860
 near-identical added ones.
 
-## Full-screen mode
+## Scrolling
+
+`aragon` has two display modes, chosen by `scrollMode` (`--scroll-mode <native|app>`,
+`ARAGON_SCROLL_MODE`, `aragon config set scrollMode app`; flags > env > file > default).
+
+### Native scroll mode (default)
+
+The conversation lives in **your terminal's own scrollback**, exactly like the output
+of any other command. The *live region* fills the screen - header on the first row,
+input box and status line on the last two, the tail of the conversation in between -
+and an entry is printed into the scrollback once it leaves that region. Scrolling,
+selecting and searching are your terminal's job, on every platform: PowerShell,
+`cmd`, Windows Terminal, VS Code, `bash`, `zsh`, `tmux`, iTerm2, Terminal.app,
+gnome-terminal and friends.
+
+- **Wheel, scrollbar, `Shift+PgUp` / `Shift+PgDn`, touchpad inertia** — the terminal's.
+  `aragon` does not enter the alternate screen and does not turn on mouse reporting,
+  so a Windows console needs no particular Node version for this.
+- **Select and copy with the terminal's own selection** (and its right-click menu,
+  double-click-to-select-word, clickable URLs). `/copy` still copies the last answer
+  through OSC 52.
+- **Search with the terminal's search** (Windows Terminal `Ctrl+Shift+F`, iTerm2 / Terminal.app `Cmd+F`).
+  Under `tmux`, scrolling is tmux's copy mode (`prefix [`).
+- **Your earlier shell output is still above the conversation**, and the conversation
+  is still there after you exit. Exiting prints a short summary (session, model,
+  time, usage, and the `aragon --resume <id>` line) instead of replaying the
+  transcript, because the transcript is already in your scrollback — `exitTranscript`
+  is ignored in this mode.
+- **While a reply streams**, it is drawn in the live region with the real cards (a
+  running `tool` or `team` card looks exactly like the full-screen one). The region
+  holds the last ten entries of the conversation, settled or not, and an entry is
+  printed into your scrollback when it LEAVES that window - so what is on the screen
+  and what you scroll up to are two disjoint halves of one conversation, never the
+  same paragraph twice. Scrolling up to read earlier output while a reply streams is
+  safe; how the viewport behaves when new output arrives is your terminal's own
+  "scroll on output" setting. A message you have just sent is therefore on the screen
+  only while the region can still show it: it reaches the scrollback when the region
+  cannot show it any more, when ten newer entries push it out, or when you exit.
+- **A reply taller than the region is complete, not clipped.** The conversation only has
+  `rows - 6` rows of the screen (24 of them in a 30-row terminal: one header row, the
+  three-row composer slot and the status line are not conversation), so a long answer cannot
+  fit. The rows the region hides above its own top edge are printed into your scrollback as
+  they become hidden, so **`scrollback + screen` covers the whole answer exactly once and in
+  order** - scroll up and the beginning is there, the way it would be for `cat`. Three
+  consequences worth knowing:
+  - **A finished answer is complete immediately.** The rows are given back the moment the
+    answer stops streaming, not after five more turns and not only after you exit. While it
+    is still streaming the head keeps being clipped, because a printed row can never be
+    rewritten and a streaming line can still re-wrap (a code fence closing, a heading
+    gaining its rule); the rest is printed the instant it settles.
+  - **Nothing on the screen moves.** The rows leave through the top of the box exactly as
+    they did before, so the visible frame is unchanged - the head simply exists one wheel
+    turn up instead of nowhere.
+  - **`Ctrl+O` gives you a second copy on demand.** With no expandable card in the
+    conversation it re-prints the last finished answer in full below, which is also the way
+    to re-read one that has a window resize behind it.
+- **Printed rows are final once they leave the screen.** A row that has scrolled into
+  your scrollback is never rewritten, and it is wrapped to the width at which it was
+  printed, so a later window resize does not re-wrap it. The rows still *on* the screen
+  are redrawn in place when the layout has to move them (a reply landing, a draft
+  getting taller, the conversation outgrowing the region), at the same width, without
+  duplicating anything. So `Ctrl+T` (thinking) and `/theme` affect only *new* messages,
+  and `Ctrl+O` prints an expanded copy of a tool card instead of expanding the old one.
+  `/clear` prints a `---- conversation cleared ----` separator; it cannot erase
+  scrollback. Resizing in the middle of a long answer is the one case where rows can be
+  printed twice: the rows above the seam keep the width they were measured at and the rest
+  are printed again at the new width behind a `[-- reflowed to N columns ... --]` marker,
+  because row numbers do not survive a re-flow. Nothing is lost in that case, which is the
+  property that matters.
+- **The interface fills the terminal.** The header is the first row of the screen, the
+  input box and status line are the last two, and everything between them belongs to
+  the conversation. A reply is written **downward from under the header**, the way a
+  terminal prints: while the conversation is shorter than the region the unused rows
+  stay *below* it, and once it is taller the newest line takes the row above the input
+  box and the block moves up one row per new line. The hand-over between those two
+  layouts is a one-off downward move, not a smooth blend while an answer is streaming:
+  the height the switch is decided from is then an estimate, so the block changes over a
+  few rows before it would really have filled the region (three rows on a 30-row
+  terminal), and only then starts scrolling. It happens once per crossing, never
+  repeatedly. A settled conversation is measured instead (the same measurement the rows
+  above are printed from), so the switch lands exactly where the content stops fitting.
+  Three things are still
+  true. A terminal that cannot be measured (`/perf` shows `anchor bottom via fill`, or
+  `none` when the probe is unavailable) is filled to the bottom once at startup, which
+  scrolls your screen up by a page — that one-off flip is the price of pinning without a
+  cursor query. Making the window narrower or shorter drops
+  the geometry until the next measurement (a couple of hundred milliseconds) instead of
+  guessing: new output parks under the last printed line until the composer pins itself
+  again, and old content is neither re-wrapped nor redrawn. `Ctrl+G`, `/help` and the
+  model picker open as overlays inside the live region, and they take the whole top of
+  it (the panel band yields to them).
+- **The plan rail and the subagent roster live in the live region.** An active plan
+  puts a `TODO d/t` column on the right of the band - markers, index, the running
+  item's `activeForm`, an overflow marker and the gauge - and a running dispatch puts
+  the `team` roster above the reply, one row per subagent with its activity and
+  elapsed time. The tail underneath them is drawn with the same cards the full-screen
+  mode uses, so a running tool or team card looks identical in both modes. The band
+  takes **every row between the header and the composer**: the rail spans the full
+  height above the input box instead of stopping partway down, the tail column owns
+  every row between the roster and the composer (a tail that fits is drawn from its top
+  row down, a taller one keeps its newest row against the input box), and the printed
+  conversation above always keeps the full width.
+  Below 76 columns there is no room for the rail and the status line's `todo` chip
+  takes over; `/perf`'s `band:` line says which of the six reasons applied.
+- **If something looks wrong**, `/perf` has a `scrollback` line (`guardHits`,
+  `clippedRows`, `fallbacks`, and the geometry: `region`/`canvas`/`content`/`gap` rows,
+  `anchor bottom via probe|fill|none`, `scrolled` rows, `anchor resets`, `reprobes`).
+  The `mode native` line carries `top <n>`, the canvas's first screen row. A `band:`
+  line reports the panel band - `rail=<rows>x<cols> team=<rows> tail=<rows>
+  pool=<rows> cols=<contentCols>/<previewCols> reason=<visible|empty|disabled|`
+  `narrow|short|overlay> held=<rail>/<team> window=<start>/<n> head=<rows>` - which is the
+  only place that says why a panel is not on screen.
+  `gap` is the blank space above the content and is **always 0** now (the region is the
+  whole screen), `canvas` is the canvas height including the live region, `pool` is the
+  band's height (the rows between the header and the composer) and `window=<start>/<n>`
+  is the tail window: the first entry on screen and how many entries it holds. That
+  number is the honest answer to "why is a message I can see not in my scrollback yet"
+  - the region shows ten entries, and an entry is printed when it leaves them.
+  `head=<rows>` counts the rows the region could not show and handed back to your
+  scrollback instead, so a wide `window=` with a rising `head=` is the healthy state of a
+  long answer and not a leak.
+  `scrolled` counts the rows that have moved into your scrollback.
+  The one-step escape hatch is `aragon config set scrollMode app`, or `--scroll-mode
+  app` for a single run.
+
+Requirements are minimal: a terminal that honours cursor-up, erase-down and SGR
+(every terminal from the last 20 years, including the Windows console host).
+`aragon` writes no absolute cursor addressing, no scroll regions, and never the
+sequences that clear scrollback.
+
+### Full-screen mode (`--scroll-mode app`)
 
 `aragon` takes over the terminal's **alternate screen buffer** — the mechanism
 `vim`, `htop`, and `lazygit` use. Two consequences worth knowing:
@@ -687,13 +982,14 @@ On exit the session is replayed into the normal buffer as plain text so the
 conversation survives leaving the screen (`--no-exit-transcript` opts out;
 `/save` still exports the full JSON).
 
-Interactive sessions always use the full-screen TUI, including under `TERM=dumb`
-or CI. Windows smaller than 40 columns or 12 rows show a size notice and recover
-when enlarged, preserving the session and draft.
+Interactive sessions use the TUI in either mode, including under `TERM=dumb` or CI.
+Windows smaller than 40 columns or 12 rows show a size notice and recover when
+enlarged, preserving the session and draft, in both modes.
 
-The layout switches `--fullscreen`, `--no-fullscreen`, `ARAGON_FULLSCREEN` and
-`fullscreen` configuration have been removed. Old command-line flags are errors;
-old config fields and environment variables are ignored.
+The old layout switches `--fullscreen`, `--no-fullscreen`, `ARAGON_FULLSCREEN` and
+`fullscreen` configuration have been removed and stay removed: old command-line
+flags are errors; old config fields and environment variables are ignored. Use
+`--scroll-mode` / `scrollMode` instead.
 
 Interactive screens require both stdin and stdout to be TTYs. `aragon config`
 without a TTY exits with code 2; use `aragon config list` or `aragon config set`.
@@ -792,6 +1088,11 @@ questions.
 - **`ask_user`** renders a keyboard-driven wizard: 1–5 questions, 2–4 options
   each, exactly one marked `RECOMMENDED`, plus an `Other…` free-text option.
   `↑`/`↓` choose, `Enter` confirms and advances, `←` goes back, `Esc` cancels.
+  **`Space` selects**: on a multi-choice question it toggles the highlighted
+  option; on a single-choice question it marks the highlighted option without
+  advancing, and `Enter` then submits the marked item — while a plain `Enter`
+  without `Space` still takes the highlighted option, recommended preselect
+  and all. `Space` does nothing on the `Other…` row (`Enter` opens its editor).
   Pressing `Enter` through the whole wizard accepts every recommendation, which
   is a deliberate "use your judgement" path rather than an accident. A last
   screen lets you review before submitting.
@@ -888,10 +1189,11 @@ byte-identical layout to a build without this feature.
 **The list shows the current task's plan.** Starting a new task or explicitly
 clearing the list removes this live view while preserving conversation history:
 
-- `/clear` and `/todo clear` take the plan off the screen. Neither touches the
+- `/clear screen` and `/todo clear` take the plan off the screen. Neither touches the
   conversation, so the model still knows what it was doing and its next update
   brings the panel straight back.
-- `/reset` clears the conversation, so the plan goes with it.
+- `/clear` (and therefore its alias `/reset`) clears the conversation, so the plan
+  goes with it. `/clear` also archives the conversation it is about to drop.
 - `/save` writes the list and `/resume` restores it. Resuming a session that has
   no list clears the current one, rather than leaving a plan on screen whose
   conversation has just been replaced.
@@ -901,7 +1203,8 @@ clearing the list removes this live view while preserving conversation history:
   ordinary text such as "continue" starts a new task. Steering keeps the current
   plan. Until a valid new `todo_write`, the rail and count stay hidden.
   Startup failure or cancellation keeps the old plan. History cards remain available.
-- During a live run, interrupt before `/reset` or `/resume`. A conversation switch
+- During a live run, `/resume` refuses until you interrupt; `/clear` (and therefore
+  `/reset`) interrupts for you. A conversation switch
   while startup is waiting cancels that pending request and returns the view to idle.
 
 ### When a run ends with steps left
@@ -1085,6 +1388,10 @@ all reap the tree on a best-effort basis; there is no daemon, no PID file and no
 reattach across launches. A `SIGKILL` of aragon itself is unrecoverable by
 construction, and if a stop cannot confirm the process is gone it says
 `may have left a detached child` rather than claiming success.
+**A branch window is the deliberate exception.** `Ctrl+L` (see [Branch into a
+new terminal](#branch-into-a-new-terminal---ctrll)) starts a process that is
+not registered with the supervisor, so it is not a service: it is another
+session the user opened, and it keeps running after this window exits.
 
 From your side there are two keys and one command: `Ctrl+C` stops every live
 service (and does *not* arm exit), `/bg` lists them, and `/bg logs s1` prints a
@@ -1111,12 +1418,127 @@ closed stdin so a command that prompts fails instead of blocking on a read
 nobody will answer. Two `Esc` presses request interruption; another press force-stops a stuck run,
 whatever the flag says.
 
+## Background jobs and bounded waiting
+
+A second kind of long-running command sits between "returns in a moment" and
+"never exits": the training run, the model download, `cargo build --release`,
+`npx playwright install`. It finishes on its own, but it takes twenty minutes,
+and the tool ceiling is 180 seconds.
+
+Ask for one with the same parameter, on a command the classifier does not
+recognise, and you get a **task** instead of a service:
+
+```jsonc
+{ "command": "python train.py", "background": true }
+```
+
+```
+$ python train.py
+[background] task t1 started (pid 24188)
+[running] still running after 4.0s - it has not finished yet
+[progress] epoch 3/10
+[log tail]
+  step 812/1000  loss 0.4182
+[note] wait for it with job_wait({ job: "t1" }) - a bounded wait returns its status and only the output since your cursor.
+Read more with bash_output({ service: "t1" }); stop it with bash_kill({ service: "t1" }).
+```
+
+The difference that matters is the id: `service s1` never exits on its own,
+`task t1` does. The status is `running` from the spawn rather than `starting`,
+because there is no readiness to wait for — that correction is why a task no
+longer reads "not ready yet, still coming up" for its first minute.
+
+Two tools manage them:
+
+- `job_wait({ job, timeoutSeconds?, since? })` — block up to a bound (default 30s,
+  at most 60s) and return one status line, one progress line, at most six new
+  output rows and a cursor. It returns immediately if the job already finished.
+  This is the point of the feature: waiting 30 seconds used to cost six
+  `bash_output` calls, six model turns and six 200-row tails; it now costs one
+  call and about 150 tokens.
+- `job_list()` — one line per job: id, kind, status, elapsed, progress.
+
+Nothing else tells the model a job finished. When one ends while it is busy, a
+`<job_notices>` block appears at the end of the next tool result:
+
+```
+<job_notices>
+task t7 failed code 1 after 2m02s
+  last: ModuleNotFoundError: No module named 'torch'
+</job_notices>
+```
+
+Progress is *extracted*, not transported: one line (`47%`, `epoch 3/10`,
+`812/1000`, `1.2/3.4 GiB`) read from the last few rows, and it is not repeated
+when it has not changed. `[stalled]` means the job has printed nothing for
+`jobs.stallSeconds` — it is a report with three options, never an automatic kill.
+
+### The four levels of detail
+
+| Level | What you get | Roughly |
+|---|---|---|
+| while it runs | the card, the activity line, `/bg list` | 0 tokens |
+| `job_wait` | status + progress + <=6 rows + cursor | 60–200 tokens |
+| `bash_output` | the 200-row ring, paginated by `since` | 1k–8k tokens |
+| the file | `<home>/jobs/<session>/<id>.log`, read with `grep`/`read_file` | your choice |
+
+The last level is the escape hatch: past 200 rows the ring forgets, and the
+truncation note in `bash_output` names the file. Nothing new needs to be learned
+to use it — `grep` and `read_file` already exist.
+
+### Configuration
+
+```jsonc
+// ~/.aragon/config.json
+{ "jobs": { "enabled": true, "waitSeconds": 30, "stallSeconds": 300,
+            "persistLog": true, "noticeSteer": true } }
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `jobs.enabled` | `true` | Register `job_wait`/`job_list`, splice the prompt block. `false` restores the pre-feature build byte for byte. |
+| `jobs.waitSeconds` | `30` | Default bound for one wait, 5–60. Also lowered automatically so a wait always fits inside the tool ceiling. |
+| `jobs.stallSeconds` | `300` | Silence before `[stalled]`, 30–3600. |
+| `jobs.persistLog` | `true` | Mirror each job's output to disk. `false` creates no directory at all. |
+| `jobs.noticeSteer` | `true` | Whether a completion notice may interrupt a running turn. `false` keeps the notice for the next tool result or the next user turn — it is **not** a notification off switch. |
+
+`aragon config set jobs.waitSeconds 45` writes and echoes the stored value.
+`ARAGON_JOBS_ENABLED`, `ARAGON_JOBS_WAIT_SECONDS`, `ARAGON_JOBS_STALL_SECONDS`,
+`ARAGON_JOBS_PERSIST_LOG` and `ARAGON_JOBS_NOTICE_STEER` do the same per run.
+
+### What it does not do
+
+- **Jobs do not survive the CLI.** Closing the window reaps them, exactly like
+  services. The log file is the only thing that outlives the session.
+- **One wait is bounded.** Waiting forty minutes means waiting eighty times —
+  and that is the design: the decision point between two waits is the value.
+- **A foreground timeout does not promote itself.** You get the error, the output
+  that was captured, and the exact `background: true` command to re-run.
+- **No output means no progress.** A command that prints nothing shows its
+  elapsed time and, eventually, `[stalled]`.
+- **`aragon exec` reaps jobs when the run ends.** Machine consumers should read
+  the `job` event (`started` / `progress` / `stalled` / `exited`) rather than
+  assume the job is still there; `system/init.capabilities` lists
+  `background-jobs`.
+
+
 ## Team subagents
 
 The agent can hand parts of a job to short-lived **subagents** that run in
 parallel, then read one combined report of what they each found. It decides for
 itself whether to delegate; a session that never calls `task` is the session
 that existed before this feature.
+
+**Which model a subagent runs on is your setting, not the model's.** The
+default (`team.model: 'main'`) keeps main-agent parity: every child runs the
+lead's own connection. Switch it to the **fast tier** or a **saved profile**
+from the settings screen's *Subagent model* row or with
+`/team model main|fast|<profile-name>` — useful when a fan-out of read-only
+scouts does not need the main model. The choice is re-resolved on every
+dispatch, and an unusable one (tier off, profile deleted, key missing) falls
+back to the main model with a disclosed line in the dispatch report instead of
+failing the dispatch. The model itself still cannot downgrade its own
+delegation: a stale `model` key in a `task` call is ignored, exactly as before.
 
 ```
 > read the auth middleware, map the route table, and check the migration
@@ -1691,6 +2113,99 @@ running, `Ctrl+I` warns instead of queueing. `/skill:project-indexer` and
 > is distinguishable and the binding works. On a terminal that implements
 > neither, `Ctrl+I` simply behaves as `Tab`.
 
+### Branch into a new terminal - `Ctrl+L`
+
+Handing a conversation to a second window used to mean reading six characters off
+the status bar, switching windows, opening a shell and typing the command - and
+copying the id by hand is the one step of that chain which reliably goes wrong.
+`Ctrl+L` replaces it with one keystroke:
+
+1. The session is **flushed to disk first**. A child process reads that file as its
+   first act, and the parent's checkpoint is debounced, so the write is forced
+   before anything is spawned (`--resume` reads the file, never the running process).
+2. A new terminal opens **in the current `/cwd`** - not in `$HOME` and not in the
+   directory aragon was launched from: `/cwd` can change during a session, and
+   `--resume` does not restore a working directory. Each platform carries the path
+   itself: `wt -d <cwd>` for a Windows Terminal tab, `cmd /c start` for a plain
+   console (which inherits it), and a script that begins with `cd '<cwd>' &&` for
+   macOS Terminal and the Linux emulators.
+3. It runs `aragon --resume <id>` there. The child derives its own id, prints
+   `Resumed <id> as a new branch: session <new-id>`, and writes only its own file.
+
+Both windows are independent from that point: closing either one does not touch the
+other, `Ctrl+C` in the parent does not stop the branch, and the two transcripts
+never meet. **A branch window is another session and does not close when this one
+exits** (the reverse of the rule for supervised services below).
+
+The platform ladder, in order:
+
+| Platform | What is tried | Window |
+| --- | --- | --- |
+| Windows, inside Windows Terminal (`WT_SESSION` is set) | `wt -w 0 nt -d <cwd> --title "aragon <id>" -- <shell> -NoExit -EncodedCommand <base64>` | a new tab |
+| Windows, anywhere else | `cmd /d /s /c start "aragon <id>" <shell> -NoExit -EncodedCommand <base64>` | a new console window |
+| macOS | `osascript` driving Terminal.app | a new Terminal window |
+| Linux / other POSIX | the first of `$TERMINAL`, `x-terminal-emulator`, `gnome-terminal`, `konsole`, `xfce4-terminal`, `kitty`, `wezterm`, `alacritty`, `xterm` that exists | a new window |
+
+The shell is `pwsh.exe` then `powershell.exe` on Windows, and `$SHELL` then `bash`
+then `/bin/sh` elsewhere. Windows receives the command as `-EncodedCommand` (base64
+of UTF-16LE), because that alphabet has no spaces, quotes or `cmd` metacharacters -
+it survives `cmd` -> `start` -> PowerShell without a quoting argument. The payload
+that gets encoded is `& <argv...>`, and **the leading `&` is load-bearing**: in
+command position PowerShell reads a quoted string as an *expression*, so with a node
+install under `C:\Program Files\...` the script `'C:\Program Files\nodejs\node.exe'
+<script>` is a `ParserError ... UnexpectedToken` and no child is ever created - while
+the parent still reports that the window opened. `&` is PowerShell's call operator:
+it takes the next word as a command name whatever its shape.
+
+When no terminal can be opened - an SSH session, a container, a machine with no
+graphical session - the command opens nothing and prints the fallback instead. On
+Windows that fallback is **two labelled lines**, because one line cannot be correct
+for both parsers (`& 'x'` is right for PowerShell and wrong for `cmd.exe`, which
+keeps the single quotes; `"x"` is right for `cmd.exe` and an expression to
+PowerShell):
+
+```
+No terminal window could be opened here. Run this in another terminal:
+PowerShell: & aragon --resume a4k2m9
+cmd.exe   : aragon --resume a4k2m9
+```
+
+Copy the line that matches the terminal you opened. macOS and Linux keep the single
+line they have always printed:
+
+```
+No terminal window could be opened here. Run this in another terminal:
+aragon --resume a4k2m9
+```
+
+A `node <dist/cli.js>` build prints the same two lines with the full paths, quoted:
+
+```
+PowerShell: & 'C:\Program Files\nodejs\node.exe' C:\Users\me\AppData\Roaming\npm\node_modules\@aragon-agent\cli\dist\launcher.js --resume a4k2m9
+cmd.exe   : "C:\Program Files\nodejs\node.exe" C:\Users\me\AppData\Roaming\npm\node_modules\@aragon-agent\cli\dist\launcher.js --resume a4k2m9
+```
+
+The `PowerShell:` line is byte-for-byte the script the new window receives, so the
+fallback can never drift from what the feature actually runs.
+
+Two environment variables exist because neither belongs in a config file:
+
+| Variable | Effect |
+| --- | --- |
+| `ARAGON_BRANCH_COMMAND` | What the new window executes, as **one executable path** (no arguments - wrap a script in a `.cmd` / `.sh` if you need some). Defaults to the running build: `node <dist/cli.js>`, or `aragon` from `PATH` |
+| `ARAGON_BRANCH_SHELL` | The shell the new window runs. `C:\Program Files\PowerShell\7\pwsh.exe`, `/usr/bin/fish`, ... |
+
+Notes worth knowing:
+
+- The key leaves **one** line in the transcript, `Command: /branch`, and it joins
+  the prompt history. That is the same behaviour as `Ctrl+I` and it is what makes
+  the gesture a real command: `Esc` never has to cancel it, `/help` lists it, and
+  `/branch` typed by hand is byte-for-byte the same path (cooldown included).
+- Repeated presses are throttled to one window every two seconds; a press that
+  **failed** does not start the cooldown, so the retry is immediate.
+- `/session copy` is still there for the case this key cannot cover: copying the
+  command for a machine that is not this one.
+
 ### Progressive disclosure
 
 This is the part that makes skills cheap enough to install a lot of:
@@ -1990,7 +2505,7 @@ env / `.env` → CLI flags**.
   `ARAGON_SKILLS_DISABLED` (comma-separated names), `ARAGON_LOG_LEVEL`,
   `ARAGON_LOG_FILE` (`0` disables), `ARAGON_LOG_DIR`,
   `ARAGON_TRANSCRIPT_RETAIN`, `ARAGON_RENDER_GOVERNOR` (`0` disables),
-  `ARAGON_MAX_RENDER_INTERVAL_MS`.
+  `ARAGON_MAX_RENDER_INTERVAL_MS`, `ARAGON_SCROLL_MODE` (`native` / `app`).
   `ARAGON_HOME` is the exception that **cannot** come from `.env`: it is read
   before any `.env` is loaded. See [Files & logs](#files--logs).
 - **User config file** (`aragon config path`): JSON, written `0600` on POSIX.
@@ -2007,7 +2522,8 @@ env / `.env` → CLI flags**.
 | `contextWindow` | `null` | The window the context gauge measures against, clamped to `[8000, 5000000]`. `null` means **auto** — API metadata, then the built-in catalog. Unknown windows show `?`; the internal fallback is 128000. See [The context gauge](#the-context-gauge). |
 | `showThinking` | `false` | Draw the reasoning the model returns. `thinkingLevel` is the effort the provider is asked to **spend**; this is whether the terminal **shows** it. Off by default: a settled turn that thought leaves one muted `thought for 12s` row in its place, so nothing is hidden silently. |
 | `liveToolOutput` | `true` | Draw up to eight sanitised rows of a **running** tool's output on its card, plus a `no output for Ns` row when the child goes quiet. On by default, unlike `showThinking`: this ADDS the information a long `bash` call otherwise hides, and its cost is bounded by construction — eight rows per call, sixteen calls, whatever the command emits. Turn it off and the card is a single `running` row again, with no store allocated and no recorder attached. |
-| `exitTranscript` | `true` | Replay a plain-text session summary after exiting (full-screen only). |
+| `scrollMode` | `native` | `native` prints the conversation into your terminal's own scrollback and keeps a small live region at the bottom (the terminal scrolls, selects and searches); `app` is the full-screen layout with application-owned scrolling. `--scroll-mode <native\|app>` or `ARAGON_SCROLL_MODE` overrides it for one run (an invalid flag value exits with code 2; an invalid env value is ignored). See [Scrolling](#scrolling). |
+| `exitTranscript` | `true` | Replay a plain-text session summary after exiting (full-screen mode only; native mode prints a short summary and ignores it). |
 | `transcriptWindow` | `1000` | How far back you can scroll, clamped to `[50, 20000]`. Entries beyond it collapse into one line. It is no longer a rendering budget: the viewport is virtualised, so off-screen entries are not laid out at all. |
 | `transcriptRetain` | `1000` | Entries kept in memory, clamped to `[200, 20000]` and raised to `transcriptWindow` if the two conflict — with a startup notice saying so, because retaining less than you can scroll to would otherwise make part of the horizon quietly unreachable. Older entries are dropped, counted, and reported by `/perf` and by the exit replay. |
 | `renderGovernor` | `true` | Widen the streaming frame interval when a frame is genuinely expensive. See [Render performance](#render-performance). |
@@ -2015,7 +2531,7 @@ env / `.env` → CLI flags**.
 | `planModeDefault` | `false` | Start every session in plan mode. `--no-plan` still overrides it for a single run. |
 | `planModeMaxAskRounds` | `4` | `ask_user` rounds allowed per user message, clamped to `[1, 10]`. The counter resets on your next message; steering does **not** reset it. |
 | `planModeHumanTimeoutMs` | `1800000` | Ceiling on a single question / plan wait, clamped to `[60000, 7200000]`. Thirty minutes is far outside "went to get coffee", but a ceiling has to exist so an unattended terminal cannot wedge a CI job forever. |
-| `paste` | `true` | Recognise pasted text before Ink's key parser sees it: line breaks become buffer newlines instead of fifteen separate messages, control bytes are stripped instead of overwriting the row they land on, and a paste above 6 lines or 400 characters collapses to a one-line placeholder that expands when you send. `false` treats pasted bytes as keystrokes, which is what 0.6.2 did. |
+| `paste` | `true` | Recognise pasted text before Ink's key parser sees it: line breaks become buffer newlines instead of fifteen separate messages, escape SEQUENCES are removed whole (deleting only the introducer byte is what put `[38;2;18;52;86m` on screen and in the model's input) as are stray control bytes, and a paste above 6 lines or 400 characters collapses to a one-line placeholder that expands when you send. `false` treats pasted bytes as keystrokes, which is what 0.6.2 did. |
 | `historyEnabled` | `true` | Record submitted prompts to `prompt-history.jsonl` for `↑` recall. Setting it to `false` stops new writes; it does not delete what is already stored (that is `aragon history clear --yes`) and does not stop reading. See [Prompt history](#prompt-history). |
 | `team.enabled` | `true` | Master switch for team subagents. `false` means the `task` tool is never registered — `/team on` in such a session saves the setting for next launch and says so, rather than advertising a tool that is not there. |
 | `team.maxSubagents` | `5` | Subagents per dispatch, clamped to `[1, 10]`. The 10 is the hard ceiling and is enforced twice — on the config value and again on what the model asks for — so hand-editing this file cannot raise it. |
@@ -2025,6 +2541,8 @@ env / `.env` → CLI flags**.
 | `team.maxTurnsPerSubagent` | `0` | Runaway-loop cap, clamped to `[0, 100]`. `0` (the default) = no cap, matching the lead. A subagent stopped at a positive cap is reported as `stopped: turn cap reached`, with whatever it had produced. |
 | `team.overseer` | `true` | The dispatch supervisor: one per dispatch on the fast model, ticking on a geometric cadence over every live subagent and deciding wait / nudge / replace / abandon. With the fast tier missing a tick degrades to an announced unassisted wait — never a kill; with this `false`, children run under the legacy hard ceilings exactly. `/team overseer on\|off` flips it live, and it is read per dispatch. |
 | `team.overseerIntervalMs` | `0` | Supervisor cadence base, clamped to `[0, 3600000]`. `0` (the default) = the structural 300 s; a positive `team.subagentTimeoutMs` is honoured first when this is `0` (compat). Later checks grow ×1.6, clamped to `[60 s, 900 s]`; any nudge/replace/abandon resets that child's cadence to the base. Only meaningful while `team.overseer` is true. |
+| `team.model` | `"main"` | Which model every subagent runs on: `'main'` (the default - the lead's own connection), `'fast'` (the fast tier, re-resolved per dispatch), or `'profile'` (the entry named by `team.modelProfileId`). A **user-owned setting** — the model itself still cannot downgrade its own delegation, and an unusable choice falls back to the main model with a disclosed line in the dispatch report. Also settable via `/team model main\|fast\|<profile-name>` and the settings screen's **Subagent model** row. |
+| `team.modelProfileId` | `null` | The profile entry `team.model: 'profile'` binds to. Reference existence is not validated here — a dangling id degrades to the main model at resolution time, so deleting a profile never breaks a dispatch. |
 | `todo.enabled` | `true` | Master switch for todo planning. `false` means the `todo_write` tool is never registered — `/todo on` in such a session saves the setting for next launch and says so, rather than advertising a tool that is not there. |
 | `todo.panel` | `true` | Render the right-hand rail. Independent of `todo.enabled` on purpose: a screen-reader user wants the planning discipline without the column, and the system prompt varies one sentence accordingly. |
 | `todo.followThrough` | `"notify"` | What happens when a run ends with steps left. `notify` says so and stops; `auto` continues the plan after a 3-second grace window, bounded by two structural limits (one fruitless attempt, 25 continuations per plan) that are deliberately **not** settings; `off` is silent. An unrecognized value falls back to `notify`. |
@@ -2258,7 +2776,7 @@ Everything AragonAgent keeps for you lives under one directory in your home:
 ├── logs/
 │   ├── aragon-2026-07-27.log       today, JSON Lines
 │   └── aragon-2026-07-27.1.log     rotated at log.maxFileBytes
-├── sessions/                       /save and /resume
+├── sessions/                       session checkpoints, /save exports, exec sessions
 ├── skills/                         aragon skills install
 └── skill-usage.json
 ```
@@ -2480,13 +2998,20 @@ Shift+拖动或 `/mouse off` 后的选区由宿主管理，应用无法关闭宿
 
 Queue 面板逐条显示待处理消息，数量在展开状态详情中按空间显示。只有 Core 已把消息纳入会话并发回接收凭据，
 该条提示才会消失。中断时未接收消息显示暂停；`/queue` 可分页查看全部原文，Esc 关闭。
-`/clear` 不丢待处理消息；`/reset`、切换会话会明确报告取消数量；恢复保存的未发送历史不会自动重发。
+`/clear`（及其等价别名 `/reset`）会先中断当前任务再清除，待处理消息不能保留，取消数量会明确报告；
+`/clear screen` 只清屏、不丢待处理消息；恢复保存的未发送历史不会自动重发。
 
 底部依次为固定输入框和一行核心状态；Ctrl+G 展开或收起第二行详情。五个核心字段按显示宽度缩写，始终保留。
 核心上下文显示当前主 Agent 的百分比；展开详情或 /context 可查看已用/上限 tokens；`~` 表示含估算，`?` 表示上限未知。
 费用是含子代理、快速模型及压缩的会话估算 USD，恢复会话沿用累计，缺价格按零计，零值不保证免费。
 本轮均速只累计主 Agent 已报告的 output tokens，再除以本轮总耗时（含工具与等待）；排除辅助调用，并非瞬时生成速度。结束后保留耗时，速度显示 --。
 `/context` 提供统计范围和完整值。
+Ctrl+L 把当前会话分支到一个新终端：先强制落盘，再在父 TUI 的 `/cwd` 下打开 PowerShell（Windows）
+或 bash（macOS/Linux）窗口，在其中执行 `aragon --resume <id>`，子会话派生自己的新 id，原会话的 id、
+历史与文件都不受影响；运行中同样可用，子会话继承到上一个已落定的轮次。重绘迁到 Ctrl+R，
+右上角常驻 `^L branch` 提示（窄终端先丢 `^I`、再只留 `^L`）。每次按键会在转录里留下一行
+`Command: /branch`，并进入提示历史，与 Ctrl+I 完全同构。没有可用终端时只打印一条可粘贴的
+`aragon --resume <id>`，不会静默失败。
 
 Windows Terminal：在设置 JSON **根级**添加 `"copyOnSelect": false`，把以下条目合并到已有数组：
 
@@ -2521,9 +3046,11 @@ VS Code 用户设置添加 `"terminal.integrated.copyOnSelection": false`，快�
 
 在 `/settings` 中使用 **Main profile** 和 **Fast profile**，可以分别为主任务与快速模型选择已保存的方案。两种角色共享配置库，但各自选择互不影响，也可以选择同一个方案。**Manage profiles** 提供新建、编辑、复制和删除；名称留空时采用模型名。同名方案通过地址主机和唯一 ID 区分。超过八条时按 `/` 搜索名称、模型或服务商。
 
-上下方向键或 Tab 移动，Enter 选择或编辑，根设置页 Ctrl+S 保存。普通文本字段的 Enter 仍保存设置。选择和子表单的修改先进入草稿；Esc 返回或确认丢弃。被主模型或快速模型引用的方案必须先解除绑定才能删除。复制包含本轮已经编辑的凭据，并产生新的 ID。
+上下方向键或 Tab 移动，Enter 选择或编辑，根设置页 Ctrl+S 保存。普通文本字段的 Enter 仍保存设置。选择和子表单的修改先进入草稿；Esc 返回或确认丢弃。列表页（角色选择页与管理页）聚焦在方案条目上时按 `e` 直接编辑、按 `d` 直接进入删除确认。删除被引用的方案（主模型 / 快速模型 / 子代理）走“解除绑定并删除”单次流程：确认页会列出引用方，确认后绑定同步清空；未被引用的方案仍显示普通的 Delete。复制包含本轮已经编辑的凭据，并产生新的 ID。
 
 方案保存服务商、模型、地址和凭据，不改变思考级别、token 上限、快速评审频率或预算。选择快速模型方案不会自动启用快速层。若本次启动时快速层未注册，首次启用会提示“已保存，待重启”；缺少模型或凭据时也需要先补齐。
+
+编辑方案时可以当场验证：**Test connection**（Ctrl+R）用草稿里的服务商、模型、地址和解析后的密钥做一次真实往返，成功显示 `OK 812 ms` 与用量，失败给出分类结论和第二行“怎么办”；**Discover models**（Ctrl+F）列出该密钥实际可访问的模型供选择，只写回模型字段，不动上下文窗口与凭据。两者都作用于未保存的草稿，`Discover` 零 token；探测期间 Esc 只取消探测而不丢弃表单，修改服务商、模型或密钥后旧结论立刻回到未测试。
 
 **Current custom** 保留旧式连接，可继续编辑原连接字段。创建方案时从磁盘上的旧式配置预填，不复制环境变量或 `--api-key` 的运行时密钥。专属密钥可保持、替换或切换为共享/环境凭据；修改服务商或地址后，必须明确选择保留原密钥，或重新输入。空地址在方案中表示服务商默认地址，快速方案不会继承主网关。
 

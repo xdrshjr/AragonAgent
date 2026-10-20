@@ -24,6 +24,7 @@ registerBuiltinCommands(registry);
 function snapshot(over: Partial<ServiceSnapshot> = {}): ServiceSnapshot {
   return {
     id: 's1',
+    kind: 'service',
     toolCallId: 'c1',
     command: 'npm run dev',
     cwd: '/tmp',
@@ -37,6 +38,7 @@ function snapshot(over: Partial<ServiceSnapshot> = {}): ServiceSnapshot {
     rows: ['> next dev', '  - Local: http://localhost:3000'],
     rowsSeen: 2,
     truncated: false,
+    lastOutputAt: Date.now() - 1000,
     ...over,
   };
 }
@@ -112,7 +114,39 @@ describe('/bg', () => {
 
     h.notices.length = 0;
     await runSlashInput(registry, '/bg status', h.ctx);
-    expect(h.notices.join('\n')).toContain('No background services running');
+    expect(h.notices.join('\n')).toContain('No background jobs running');
+  });
+
+  it('AC-29: `/bg status` splits the live count by kind', async () => {
+    // "2 jobs running" is not the same information as "1 task, 1 service": a task
+    // ends on its own, a service does not.
+    const h = harness({
+      services: [
+        snapshot({ id: 's1' }),
+        snapshot({ id: 't1', kind: 'task', status: 'running', url: undefined }),
+      ],
+    });
+    await runSlashInput(registry, '/bg status', h.ctx);
+    expect(h.notices.join('\n')).toContain('2 background jobs running');
+    expect(h.notices.join('\n')).toContain('1 task, 1 service');
+  });
+
+  it('the list row carries kind, elapsed and progress', async () => {
+    const h = harness({
+      services: [
+        snapshot({
+          id: 't3',
+          kind: 'task',
+          status: 'running',
+          url: undefined,
+          progress: { text: '47%', kind: 'percent' },
+        }),
+      ],
+    });
+    await runSlashInput(registry, '/bg list', h.ctx);
+    const text = h.notices.join('\n');
+    expect(text).toContain('t3  task  running');
+    expect(text).toContain('47%');
   });
 
   it('`logs` prints the tail without going through the model', async () => {
@@ -124,7 +158,10 @@ describe('/bg', () => {
   it('`logs` on an unknown id says so rather than printing nothing', async () => {
     const h = harness({ services: [snapshot()] });
     await runSlashInput(registry, '/bg logs s9', h.ctx);
-    expect(h.notices.join('\n')).toContain('No service "s9"');
+    // The noun moved to "job" with long-task-jobs (a `t3` is not a service), and
+    // this assertion is the one the design named as the regression surface for
+    // that rename.
+    expect(h.notices.join('\n')).toContain('No job "s9"');
   });
 
   it('reports honestly when a stop may have left a detached child (R-2 / P2-6)', async () => {

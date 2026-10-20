@@ -8,7 +8,9 @@ import type { CopyRequest, CopyRequestResult } from '../ui/clipboard-task.js';
 
 import type { AgentController } from '../agent/controller.js';
 import type { AgentMode } from '../agent/agent-mode.js';
-import type { NoticeLevel, Overlay, ToastLevel, ViewAction, ViewState } from '../agent/reducer.js';
+import type {
+  Entry, NoticeLevel, Overlay, ToastLevel, ViewAction, ViewState,
+} from '../agent/reducer.js';
 import type { PersistedConfig } from '../config/schema.js';
 import type { FollowThroughBudget } from '../todo/follow-through.js';
 // `import type`, so tsc ERASES the specifier and `dist/commands/registry.js`
@@ -16,6 +18,11 @@ import type { FollowThroughBudget } from '../todo/follow-through.js';
 // rule 1 / P1-7). A value import here would put the updater in the graph of
 // every command, including under `aragon -p`.
 import type { UpdateCommandPort } from '../update/types.js';
+// TYPE-ONLY, for the reason the `update/types.js` import above records: `/session`
+// needs the shape of the port and of its result, never a value at run time.
+import type { SessionCommandPort } from './session-command.js';
+// TYPE-ONLY for the same reason: `/branch` needs the port shape, never a value.
+import type { BranchCommandPort } from './branch-command.js';
 
 export interface CommandContext {
   /** App-owned shared lock and single feedback path for command and selection copies. */
@@ -103,6 +110,12 @@ export interface CommandContext {
    */
   mouse?: MouseCommandPort;
   /**
+   * True in native-scroll mode (tui-native-terminal-scroll): the terminal owns
+   * scrolling and selection, so there is no capture to toggle. Lets `/mouse` say so
+   * instead of the generic "not captured" answer.
+   */
+  nativeScroll?: boolean;
+  /**
    * The foreign-write door, for `/copy`'s OSC 52 half (§4.4.5).
    *
    * NOT `process.stdout.write`. In full-screen mode stdout is a `Proxy` in front
@@ -112,6 +125,51 @@ export interface CommandContext {
    * stream is handed over directly.
    */
   writeForeign?: (text: string) => void;
+  /**
+   * The LIVE transcript rows, for `/clear`'s archive (clear-command-context-reset
+   * P0-1 / §3.5).
+   *
+   * A THUNK, AND THAT IS THE WHOLE POINT. The `state` field above is a snapshot
+   * of `ViewState` taken when the command started; `/clear` interrupts a run and
+   * then waits for the engine to unwind, so the last tool cards of that run are
+   * written to the transcript AFTER `state` was captured. Reading `state.entries`
+   * would archive everything except the part the user was just looking at.
+   *
+   * OPTIONAL, like `followBudget` / `update` / `mouse`: every existing
+   * `CommandContext` fixture in this package builds the object by literal, and a
+   * required field would break all of them at compile time for a feature none of
+   * them are about. Absent means the archive degrades to history-only.
+   *
+   * `Entry` arrives as a TYPE-ONLY import so this module keeps its runtime shape
+   * (the same rule the `update/types.js` import above follows).
+   */
+  transcriptEntries?: () => Entry[];
+  /**
+   * The session's read-only identity plus the two actions `/session` and
+   * `/resume` need (tui-session-id-resume 3.11 / D-14 / D-15).
+   *
+   * OPTIONAL, like `followBudget` / `update` / `mouse` / `transcriptEntries`
+   * above: every existing `CommandContext` fixture in this package builds this
+   * object by literal, and a required field would break all of them at compile
+   * time for a feature none of them is about. Absent means the build has no
+   * session identity, and `/session` says exactly that rather than pretending.
+   */
+  session?: SessionCommandPort;
+  /**
+   * The `/branch` port: open a new terminal on this session (tui-branch-terminal-
+   * shortcut 3.11 / #8).
+   *
+   * OPTIONAL for the same reason `session` above is: every existing
+   * `CommandContext` fixture in this package builds this object by literal, and a
+   * required field would break all of them at compile time for a feature none of
+   * them is about. Absent means `/branch` says "not available in this build"
+   * rather than failing silently.
+   *
+   * TYPE-ONLY import, following the rule the `session-command.js` import above
+   * records: the command needs the SHAPE of the port and of its result, never a
+   * value at run time.
+   */
+  branch?: BranchCommandPort;
 }
 
 /** What `/mouse` can see and do. Read at command time, never captured. */

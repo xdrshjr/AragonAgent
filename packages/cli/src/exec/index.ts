@@ -556,7 +556,16 @@ function planSession(
   if (options.sessionId !== undefined) {
     // THE UPSERT. A wrapper that mints its own id must not have to ask whether
     // this is the first turn; that is the whole reason this form exists.
-    return { id: options.sessionId, saved: readSessionFile(sessionPathFor(options.sessionId)), saving, cwd };
+    //
+    // AND IT IS A RESUME FORM, so the same write-back rule applies (tui-session-
+    // id-resume D-20 / I-3). When a file already exists under that id,
+    // `resumedSessionId` decides which id this run writes - and for a TUI
+    // checkpoint that answer is a NEW uuid. Without this line the wrapper-friendly
+    // upsert was the one remaining way to reach a TUI checkpoint and replace it,
+    // which is silent, unrecoverable loss of the user's live conversation.
+    const path = sessionPathFor(options.sessionId);
+    const saved = readSessionFile(path);
+    return { id: saved ? resumedSessionId(path, saved) : options.sessionId, saved, saving, cwd };
   }
   return { id: randomUUID(), saved: null, saving, cwd };
 }

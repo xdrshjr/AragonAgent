@@ -19,6 +19,7 @@ import {
   ADAPTER_PROVIDERS,
   THINKING_LEVELS,
   maskSecret,
+  parseContextWindowInput,
   parseMaxTokensInput,
   parseThresholdInput,
   type CompactionConfig,
@@ -37,8 +38,41 @@ import { emptyModelProfiles } from '../../config/model-profiles.js';
 import { registerSecret } from '../../logging/secret-registry.js';
 import { ModelProfilePicker, useProfileScroll } from './ModelProfilePicker.js';
 import { ModelProfileEditor } from './ModelProfileEditor.js';
+import { ModelDiscoveryList } from './ModelDiscoveryList.js';
+import { useModelProbe } from './use-model-probe.js';
+import { canProbe, editorProbeTarget, visibleProbeViews } from './model-probe-view.js';
+import type { ModelProbe, ProbeTarget } from '../../agent/model-probe.js';
 import { createModelProfileState, createCustomProfile, modelProfileReducer,
-  profileUsers } from './model-profile-state.js';
+  profileUsers, draftTeam, draftSubagentProfileId, subagentModelSummary,
+  subagentSelectedId, SUBAGENT_FAST_ROW_ID, type ModelProfileAction,
+  type ModelProfileState } from './model-profile-state.js';
+import { KitEditor } from './KitEditor.js';
+import { KitManager } from './KitManager.js';
+import { heldSlots, kitManagerRows, kitPackRow, kitReducer, type KitAction, type KitDraft }
+  from './kit-settings-state.js';
+
+/**
+ * THE ROOT PAGE'S ROW INDEXES, AS NAMES (subagent-model V-5).
+ *
+ * Five offset sites used to agree by accident on the number 3; the Subagent
+ * model row moves every one of them. Each site below now cites its constant,
+ * so adding a row later is a one-line change instead of a silent regression
+ * that focuses an error message on the wrong field.
+ *
+ * DERIVED FROM ONE LIST (agent-model-kits §4.5), because the kit row is the
+ * fifth of these and the "five offsets agreed by accident" defect does not need
+ * a sequel. Order here IS the render order.
+ */
+const ROOT_ROWS = ['main', 'fast', 'subagent', 'kit', 'manage'] as const;
+const ROOT_MAIN = ROOT_ROWS.indexOf('main');
+const ROOT_FAST = ROOT_ROWS.indexOf('fast');
+const ROOT_SUBAGENT = ROOT_ROWS.indexOf('subagent');
+const ROOT_KIT = ROOT_ROWS.indexOf('kit');
+const ROOT_MANAGE = ROOT_ROWS.indexOf('manage');
+const ROOT_FIRST_FIELD = ROOT_ROWS.length;
+/** Stand-in target while no editor exists; no probe row is rendered then. */
+const NO_PROFILE_TARGET: ProbeTarget = { provider: '', model: '', baseUrl: null,
+  apiKey: null };
 
 export interface SettingsValues {
   provider: string;
@@ -62,6 +96,15 @@ export interface SettingsValues {
    */
   liveToolOutput: 'on' | 'off';
   maxTokens: string;
+  /**
+   * The top-level context-window override, as text (profile-context-window
+   * §6.3). EDITED ONLY WHILE MAIN IS UNBOUND: once a profile is bound as Main
+   * the profile owns the denominator, this row hides, and the editor becomes
+   * the only surface that writes the key - two entries on one key can only
+   * drift. Empty renders as `auto` because an empty field IS AUTO here, the
+   * reading `maxTokens` established.
+   */
+  contextWindow: string;
   apiKey: string;
   /**
    * Only the LEVEL is editable here. The rest of `LogConfig` — and above all
@@ -131,6 +174,13 @@ interface SettingsScreenProps {
   onProfileSave?: (draft: ModelSettingsDraft) => ModelSettingsSaveResult;
   onClose?: () => void;
   onReload?: () => ModelSettingsDraft;
+  /**
+   * The connection probe port (model-profile-connection-test 6.1). Absent in an
+   * embedded or test mount, where the two probe rows read `(unavailable)` - an
+   * EXPLICIT degradation this feature adds, not the silent no-op of the
+   * optional callbacks above.
+   */
+  probe?: ModelProbe;
   /**
    * `API retries` READ-ONLY row (llm-api-retry-backoff §6.9), e.g. `10` or `off`.
    *
@@ -340,6 +390,11 @@ const FIELDS: FieldDef[] = [
   // `.padEnd(18)` enforces below and that IF-H7 records as silently overflowing.
   { key: 'liveToolOutput', label: 'Live output', kind: 'enum', options: LIVE_OUTPUT_OPTIONS },
   { key: 'maxTokens', label: 'Max tokens', kind: 'text' },
+  // DIRECTLY UNDER `Max tokens`: the two token rows read together. `Context
+  // window` is 14 characters, inside the 18-column label budget `.padEnd(18)`
+  // enforces below (IF-H7). Only ever RENDERED while Main is unbound - see
+  // `SettingsValues.contextWindow` and the unbound-group filter below.
+  { key: 'contextWindow', label: 'Context window', kind: 'text' },
   // The fast tier sits AFTER `Max tokens` and BEFORE `API key`, because the key
   // row is the one a user scrolls to deliberately and putting five rows past it
   // would bury it (fast-model-tier §4.5). The rationale survives a fifth row;
@@ -527,6 +582,10 @@ function LegacySettingsScreen({
     // An empty cap field is AUTO, not "unset". `(none)` would read as a missing
     // setting, which is the one thing this field can never be.
     if (f.key === 'maxTokens' && raw.length === 0) return 'auto';
+    // An empty window field is AUTO, not "unset" - the same reading, and the
+    // second of the TWO render points that must agree (P2-1: the profile
+    // screen's row fallback below is the other).
+    if (f.key === 'contextWindow' && raw.length === 0) return 'auto';
     // `(not set)` and NOT `(same as main)`, which is the honest reading of §3.2
     // rule 3: an empty `fast.model` does not inherit, it means the tier is
     // unconfigured. `(same as main)` is a fact the derived line below states
@@ -613,8 +672,12 @@ function LegacySettingsScreen({
   );
 }
 
+// `contextWindow` joins the exclusion list so a bound Main can never leak a
+// SECOND copy of the row through PROFILE_FIELDS - the root row belongs to the
+// unbound group below, exclusively (AC-11).
 const PROFILE_FIELDS = FIELDS.filter((field) => ![
   'provider', 'model', 'baseUrl', 'apiKey', 'fastProvider', 'fastModel', 'fastEnabled',
+  'contextWindow',
 ].includes(field.key));
 
 function profileSettingsValues(initial: SettingsValues,
@@ -623,7 +686,11 @@ function profileSettingsValues(initial: SettingsValues,
   return { ...initial, provider: file.provider ?? initial.provider,
     model: file.model ?? initial.model,
     baseUrl: file.baseUrl ?? '', apiKey: '', fastModel: file.fast?.model ?? '',
-    fastProvider: file.fast?.provider || FAST_INHERIT_PROVIDER };
+    fastProvider: file.fast?.provider || FAST_INHERIT_PROVIDER,
+    // SEEDED FROM THE FILE VALUE, like its provider/model/baseUrl siblings
+    // (AC-11 / P2-3): when env holds an override the file value is not the
+    // effective one, and this screen edits the FILE.
+    contextWindow: file.contextWindow == null ? 'auto' : String(file.contextWindow) };
 }
 
 /** Only fields changed by the user belong in a settings transaction. */
@@ -645,6 +712,14 @@ export function readDirtySettings(initial: SettingsValues,
     const parsed = parseMaxTokensInput(values.maxTokens);
     if (parsed.kind === 'invalid') throw new Error('Max tokens: use a number or auto.');
     patch.maxTokens = parsed.kind === 'auto' ? null : parsed.value;
+  }
+  if (dirty('contextWindow')) {
+    // TYPO CHANGES NOTHING: the message's `Context window:` prefix is what
+    // `saveProfileSettings`'s focus logic matches to jump to this row. The
+    // silent clamp on a value mirrors `config set contextWindow`.
+    const parsed = parseContextWindowInput(values.contextWindow);
+    if (parsed.kind === 'invalid') throw new Error('Context window: use a number or auto.');
+    patch.contextWindow = parsed.kind === 'auto' ? null : parsed.value;
   }
   const fast: Partial<FastConfig> = {};
   const parsedFast = readFastSettings(values);
@@ -697,8 +772,28 @@ function saveError(result: ModelSettingsSaveResult): string {
 
 type ProfileSettingsProps = SettingsScreenProps & { draft: ModelSettingsDraft };
 
+/** The screen's action union: profile pagination plus the kit pages' intents. */
+type SettingsAction = ModelProfileAction | KitAction;
+
+function isKitAction(action: SettingsAction): action is KitAction {
+  return action.type.startsWith('kit-');
+}
+
+/**
+ * ONE REDUCER FOR THE WHOLE SCREEN, TWO OWNERS INSIDE IT (agent-model-kits §4.5).
+ *
+ * The kit pages need their own data mutations (create, duplicate, delete, apply)
+ * but must not introduce a second state object: `Save`, `Esc` and the dirty
+ * badge are shared, and a second store is how a settings screen starts
+ * disagreeing with itself. `kitReducer` returns the SAME state shape, so the
+ * split is invisible from the outside.
+ */
+function settingsReducer(state: ModelProfileState, action: SettingsAction): ModelProfileState {
+  return isKitAction(action) ? kitReducer(state, action) : modelProfileReducer(state, action);
+}
+
 function useProfileSettingsState(props: ProfileSettingsProps) {
-  const [state, dispatch] = useReducer(modelProfileReducer, props.draft, createModelProfileState);
+  const [state, dispatch] = useReducer(settingsReducer, props.draft, createModelProfileState);
   const [initial, setInitial] = useState(() => profileSettingsValues(props.initial, props.draft));
   const [values, setValues] = useState(initial);
   const [index, setIndex] = useState(0);
@@ -707,6 +802,16 @@ function useProfileSettingsState(props: ProfileSettingsProps) {
   const [confirmIndex, setConfirmIndex] = useState(0);
   const [reloadPending, setReloadPending] = useState(false);
   const offset = useProfileScroll(props, index);
+  // THE PROBE LIVES HERE, NOT IN THE EDITOR (RV-P0-1): this component survives a
+  // page switch, the editor does not, and a hook inside the editor would abort its
+  // own discovery the moment `Discover models` opens the list page.
+  const probe = useModelProbe(props.probe);
+  const probeTarget = state.editor
+    ? editorProbeTarget(state.editor, props.apiKeys) : undefined;
+  // TWO SLOTS: a verdict and a discovered list answer different questions, and
+  // opening the list must not erase a verdict the user still wants to read.
+  const probeViews = visibleProbeViews(probe.test, probe.discovery,
+    probeTarget ?? NO_PROFILE_TARGET, props.probe);
   const previousPage = useRef(state.page);
   useEffect(() => {
     const previous = previousPage.current;
@@ -721,17 +826,23 @@ function useProfileSettingsState(props: ProfileSettingsProps) {
     values[key as FieldKey] !== initial[key as FieldKey]);
   const fields = [FIELDS.find((item) => item.key === 'fastEnabled')!,
     ...FIELDS.filter((item) => library.mainId === null
-      && ['provider', 'model', 'baseUrl', 'apiKey'].includes(item.key)),
+      && ['provider', 'model', 'baseUrl', 'contextWindow', 'apiKey'].includes(item.key)),
     ...FIELDS.filter((item) => library.fastId === null
       && ['fastModel', 'fastProvider'].includes(item.key)), ...PROFILE_FIELDS];
-  const count = fields.length + 5;
-  const field = fields[index - 3];
+  // SEVEN FIXED ROWS now (Main, Fast, SUBAGENT, Kit pack, Manage, Save, Reload)
+  // around the `fields` block - derived from ROOT_ROWS so the count and the
+  // offsets cannot drift apart (see those constants).
+  const count = fields.length + ROOT_ROWS.length + 2;
+  const field = fields[index - ROOT_FIRST_FIELD];
   const readError = state.draft.readError;
-  const confirming = state.page === 'delete-confirm' || state.page === 'discard-confirm';
+  // THREE CONFIRMATIONS SHARE ONE PAGE, which is why the page name - not a
+  // boolean - is what the renderer and the input hook both branch on.
+  const confirming = state.page === 'delete-confirm' || state.page === 'discard-confirm'
+    || state.page === 'kit-delete';
   return { state, dispatch, initial, setInitial, values, setValues, index, setIndex,
     error, setError, persisted, setPersisted, confirmIndex, setConfirmIndex,
     reloadPending, setReloadPending, offset, library, glyphs, dirty, fields, count,
-    field, readError, confirming };
+    field, readError, confirming, probe, probeTarget, probeViews };
 }
 
 type ProfileSettingsState = ReturnType<typeof useProfileSettingsState>;
@@ -746,7 +857,7 @@ function saveProfileSettings(props: ProfileSettingsProps, view: ProfileSettingsS
     const message = (failure as Error).message;
     setError(message);
     const at = fields.findIndex((item) => message.startsWith(`${item.label}:`));
-    if (at >= 0) setIndex(at + 3);
+    if (at >= 0) setIndex(at + ROOT_FIRST_FIELD);
     return;
   }
   const result = props.onProfileSave({
@@ -766,6 +877,7 @@ function reloadProfileSettings(props: ProfileSettingsProps, view: ProfileSetting
     showThinking: live.showThinking ? 'on' : 'off',
     liveToolOutput: live.liveToolOutput ? 'on' : 'off',
     maxTokens: live.maxTokens === undefined ? '' : String(live.maxTokens),
+    contextWindow: live.contextWindow == null ? 'auto' : String(live.contextWindow),
     logLevel: live.log?.level ?? props.initial.logLevel,
     ...(live.fast ? fastSettingsFrom(live.fast) : {}),
     ...(live.compaction ? compactionSettingsFrom(live.compaction) : {}),
@@ -792,8 +904,17 @@ function activateRootSetting(props: ProfileSettingsProps, view: ProfileSettingsS
   const { index, count, readError, persisted, dispatch } = view;
   if (index === count - 1) { cancelProfileSettings(props, view, true); return; }
   if (readError || persisted) return;
-  if (index < 2) dispatch({ type: 'page', page: 'picker', role: index === 0 ? 'main' : 'fast' });
-  else if (index === 2) dispatch({ type: 'page', page: 'manager' });
+  if (index === ROOT_MAIN || index === ROOT_FAST) {
+    dispatch({ type: 'page', page: 'picker', role: index === ROOT_MAIN ? 'main' : 'fast' });
+  } else if (index === ROOT_SUBAGENT) {
+    // The user-owned cost switch (D-5): its own picker mode, writing
+    // `draft.patch.team` rather than a `${role}Id` library key.
+    dispatch({ type: 'page', page: 'picker', role: 'subagent' });
+  } else if (index === ROOT_KIT) {
+    // The fourth root row opens the manager, not a picker: kits are data the user
+    // owns here, and `ctrl+K` is where they are CONSUMED (agent-model-kits §4.5).
+    dispatch({ type: 'page', page: 'kits' });
+  } else if (index === ROOT_MANAGE) dispatch({ type: 'page', page: 'manager' });
   else saveProfileSettings(props, view);
 }
 
@@ -834,6 +955,11 @@ function useSettingsConfirmationInput(props: ProfileSettingsProps,
       setConfirmIndex((confirmIndex + 1) % 2); return;
     }
     if (!key.return) return;
+    if (state.page === 'kit-delete') {
+      dispatch(confirmIndex === 1 ? { type: 'kit-confirm-delete' }
+        : { type: 'page', page: 'kits' });
+      return;
+    }
     if (state.page === 'delete-confirm') {
       dispatch(confirmIndex === 1 ? { type: 'confirm-delete' }
         : { type: 'page', page: 'manager' });
@@ -843,38 +969,181 @@ function useSettingsConfirmationInput(props: ProfileSettingsProps,
   }, { isActive: confirming });
 }
 
+/**
+ * The kit deletion confirmation (agent-model-kits D-9 / AC-30).
+ *
+ * `Cancel` IS THE DEFAULT FOCUS, like the profile confirmation next door: the
+ * `Enter` key that opened this page must not be the one that deletes. The second
+ * line names what the user loses - a kit, and with it the default pointer and any
+ * session binding that named it.
+ */
+function renderKitDeleteConfirmation(props: ProfileSettingsProps,
+  view: ProfileSettingsState): React.ReactElement {
+  const { state, confirmIndex, glyphs } = view;
+  const kit = (state.draft.profiles?.kits ?? []).find((item) => item.id === state.kitDraft?.id);
+  const rows = ['Cancel', 'Delete'].map((label, at) => (
+    <Text key={label} wrap="truncate" color={props.theme.primary}>
+      {confirmIndex === at ? `${glyphs.caret} ` : '  '}{label}
+    </Text>));
+  rows.push(<Text key="consequence" wrap="truncate" color={props.theme.muted}>
+    {`Deletes kit "${kit?.name ?? ''}". Its three slots stay as they are; only the preset goes.`}
+  </Text>);
+  return <OverlayFrame {...props} title={`Delete kit ${kit?.name ?? ''}?`}
+    hint="Enter choose | Esc continue" rows={rows} scrollOffset={confirmIndex} />;
+}
+
 function renderSettingsConfirmation(props: ProfileSettingsProps,
   view: ProfileSettingsState): React.ReactElement {
   const { state, library, confirmIndex, glyphs } = view;
+  const deletingKit = state.page === 'kit-delete';
+  if (deletingKit) return renderKitDeleteConfirmation(props, view);
   const deleting = state.page === 'delete-confirm';
   const name = library.entries.find((entry) => entry.id === state.deleteId)?.name ?? '';
-  const labels = deleting ? ['Cancel', 'Delete'] : ['Continue', 'Discard'];
+  // UNBIND-AND-DELETE (D-6): a referenced entry stays deletable in ONE flow,
+  // and the button names what will happen.
+  const labels = deleting
+    ? ['Cancel', state.deleteUsers ? 'Unbind and delete' : 'Delete']
+    : ['Continue', 'Discard'];
+  const rows = labels
+    .map((label, at) => <Text key={label} wrap="truncate" color={props.theme.primary}>
+      {confirmIndex === at ? `${glyphs.caret} ` : '  '}{label}
+    </Text>);
+  // V-8: A RENDER-ONLY ROW, pushed AFTER the buttons. `confirmIndex` stays a
+  // 0..1 index over the two buttons and `scrollOffset` follows it, so this
+  // line must never sit between them or take an array slot of its own.
+  if (deleting && state.deleteUsers) {
+    rows.push(<Text key="users" wrap="truncate" color={props.theme.muted}>
+      Used by {state.deleteUsers}. The binding(s) will be cleared.
+    </Text>);
+  }
   return <OverlayFrame {...props}
     title={deleting ? `Delete ${name}?` : 'Discard unsaved changes?'}
-    hint="Enter choose | Esc continue" rows={labels
-      .map((label, at) => <Text key={label} wrap="truncate" color={props.theme.primary}>
-        {confirmIndex === at ? `${glyphs.caret} ` : '  '}{label}
-      </Text>)} scrollOffset={confirmIndex} />;
+    hint="Enter choose | Esc continue" rows={rows} scrollOffset={confirmIndex} />;
+}
+
+/** Zero-network guard: no key (or no probe port) means no request at all. */
+function startTest(view: ProfileSettingsState): void {
+  if (view.probeTarget && canProbe(view.probeViews.test)) {
+    view.probe.startTest(view.probeTarget);
+  }
+}
+
+/** Discover from the draft, then show the list page: the state stays here. */
+function startDiscovery(view: ProfileSettingsState,
+  dispatch: React.Dispatch<ModelProfileAction>): void {
+  if (!view.probeTarget || !canProbe(view.probeViews.test)) return;
+  view.probe.startDiscovery(view.probeTarget);
+  dispatch({ type: 'page', page: 'models' });
+}
+
+/**
+ * Whether the fast tier resolves FOR DISPLAY while the subagent picker is
+ * open (D-5): the built-in `Fast tier model` row then annotates itself with
+ * `(fast tier off)`, so choosing it is never a surprise fallback. The same
+ * enabled + model + config-file-key approximation `fastTierLine` uses - and
+ * the same env-key blindness (V-10), accepted for consistency with it.
+ */
+function fastTierUnavailable(props: ProfileSettingsProps, view: ProfileSettingsState): boolean {
+  const { values } = view;
+  if (values.fastEnabled !== 'on') return true;
+  if (values.fastModel.trim().length === 0) return true;
+  const provider = values.fastProvider === FAST_INHERIT_PROVIDER
+    || values.fastProvider.trim().length === 0 ? values.provider : values.fastProvider;
+  return (props.apiKeys[provider] ?? '').length === 0;
 }
 
 function renderProfileSubpage(props: ProfileSettingsProps,
   view: ProfileSettingsState): React.ReactElement | null {
   const { state, library, dispatch, setConfirmIndex } = view;
+  // THE KIT PAGES (agent-model-kits §4.5). They are dispatched BEFORE the profile
+  // pages because `'kit-slot'` RENDERS a profile picker while belonging to the
+  // kit editor - the page name, not the component, decides where the user is.
+  if (state.page === 'kits') return <KitManager {...props} rows={kitManagerRows(state)}
+    error={state.error} dispatch={dispatch}
+    onBack={() => dispatch({ type: 'page', page: 'root' })} />;
+  if (state.page === 'kit-edit' && state.kitDraft) return <KitEditor {...props}
+    draft={state.kitDraft} state={state} dispatch={dispatch} />;
+  if (state.page === 'kit-slot' && state.kitDraft) {
+    return renderKitSlotPicker(props, view, state.kitDraft);
+  }
   if (state.page === 'editor' && state.editor) return <ModelProfileEditor {...props}
-    editor={state.editor} users={profileUsers(library, state.editor.original.id)}
-    error={state.error} dispatch={dispatch} />;
+    editor={state.editor}
+    users={profileUsers(library, state.editor.original.id, draftSubagentProfileId(state.draft))}
+    error={state.error} dispatch={dispatch} probeView={view.probeViews.test}
+    probeBusy={view.probe.busy} probeTarget={view.probeTarget}
+    onTest={() => startTest(view)}
+    onDiscover={() => startDiscovery(view, dispatch)}
+    onCancelProbe={view.probe.cancel} />;
+  // A DISCOVERY IS A PAGE, NOT A POPUP: the list is where the answer belongs, and
+  // the probe state it renders keeps running because it lives one level up.
+  if (state.page === 'models' && state.editor) return <ModelDiscoveryList {...props}
+    provider={state.editor.provider} currentModel={state.editor.model}
+    view={view.probeViews.discovery} busy={view.probe.discovery.phase === 'discovering'}
+    onChoose={(model) => dispatch({ type: 'choose-model', model })}
+    onRetry={() => startDiscovery(view, dispatch)}
+    onBack={() => dispatch({ type: 'page', page: 'editor' })}
+    onCancelProbe={view.probe.cancel} />;
+  // A NEW PROFILE SEEDED FROM THE MAIN CONNECTION while the subagent picker is
+  // open: 'subagent' is picker-only (6.2), so the seed role falls back to
+  // 'main' while `state.role` keeps driving the select that binds it. 'binding'
+  // is the kit slot's chooser and seeds the same way.
+  const createRole = state.role === 'subagent' || state.role === 'binding'
+    ? 'main' : state.role;
   if (state.page === 'picker' || state.page === 'manager') return <ModelProfilePicker {...props}
     profiles={library} savedProfiles={state.draft.baseline.modelProfiles} role={state.role}
-    customProfile={createCustomProfile(state.draft, state.role)}
+    customProfile={createCustomProfile(state.draft, createRole)}
     manager={state.page === 'manager'} error={state.error}
+    selectedIdOverride={state.role === 'subagent' ? subagentSelectedId(state.draft) : undefined}
+    subagentProfileId={draftSubagentProfileId(state.draft)}
+    fastTierOff={state.role === 'subagent' && fastTierUnavailable(props, view)}
     onSelect={(id) => dispatch({ type: 'select', role: state.role, id })}
-    onCreate={() => dispatch({ type: 'edit', profile: createCustomProfile(state.draft, state.role),
+    onCreate={() => dispatch({ type: 'edit', profile: createCustomProfile(state.draft, createRole),
       bindNew: state.page === 'picker' })}
     onEdit={(profile) => dispatch({ type: 'edit', profile })}
     onDuplicate={(id) => dispatch({ type: 'duplicate', id })}
     onDelete={(id) => { setConfirmIndex(0); dispatch({ type: 'delete', id }); }}
     onCancel={() => dispatch({ type: 'page', page: 'root' })} />;
   return null;
+}
+
+/** Which slot value the kit picker should mark `[Selected]`. */
+function kitSlotSelection(kitDraft: KitDraft): string | null {
+  if (kitDraft.slot === 'main') return kitDraft.mainProfileId || null;
+  if (kitDraft.slot === 'fast') return kitDraft.fastProfileId;
+  if (kitDraft.subagent.model === 'profile') return kitDraft.subagent.modelProfileId;
+  return kitDraft.subagent.model === 'fast' ? SUBAGENT_FAST_ROW_ID : null;
+}
+
+/**
+ * The slot chooser: the SAME profile picker, in its `binding` role.
+ *
+ * A kit slot can only name a profile, so there is no `Current custom` row and no
+ * `Same as main` (those are the subagent slot's own three-state vocabulary). The
+ * subagent slot keeps the `subagent` role, which is why `Fast tier (off - falls
+ * back to main)` needs no new wording anywhere (RV-P2-6).
+ */
+function renderKitSlotPicker(props: ProfileSettingsProps, view: ProfileSettingsState,
+  kitDraft: KitDraft): React.ReactElement {
+  const { state, library, dispatch } = view;
+  const role = kitDraft.slot === 'subagent' ? 'subagent' : 'binding';
+  return <ModelProfilePicker {...props} profiles={library}
+    savedProfiles={state.draft.baseline.modelProfiles} role={role}
+    customProfile={createCustomProfile(state.draft, 'main')}
+    error={state.error} selectedIdOverride={kitSlotSelection(kitDraft)}
+    subagentProfileId={draftSubagentProfileId(state.draft)}
+    fastTierOff={kitDraft.slot === 'subagent' && fastTierUnavailable(props, view)}
+    onSelect={(id) => {
+      if (kitDraft.slot === 'main') { dispatch({ type: 'kit-main', id }); return; }
+      if (kitDraft.slot === 'fast') { dispatch({ type: 'kit-fast', id }); return; }
+      dispatch({ type: 'kit-subagent',
+        model: id === null ? 'main' : id === SUBAGENT_FAST_ROW_ID ? 'fast' : 'profile',
+        modelProfileId: id === null || id === SUBAGENT_FAST_ROW_ID ? null : id });
+    }}
+    onCreate={() => dispatch({ type: 'edit', profile: createCustomProfile(state.draft, 'main') })}
+    onEdit={(profile) => dispatch({ type: 'edit', profile })}
+    onDuplicate={(id) => dispatch({ type: 'duplicate', id })}
+    onDelete={(id) => dispatch({ type: 'delete', id })}
+    onCancel={() => dispatch({ type: 'kit-cancel' })} />;
 }
 
 function buildRootSettingsRows(props: ProfileSettingsProps,
@@ -886,13 +1155,54 @@ function buildRootSettingsRows(props: ProfileSettingsProps,
     const missing = !entry.apiKey && !props.apiKeys[entry.provider];
     return `${entry.name}  ${entry.provider}:${entry.model}${missing ? ' [Missing API key]' : ''}`;
   };
-  const lines = [`Main profile      ${name(library.mainId)}`,
-    `Fast profile      ${name(library.fastId)}`,
-    `Manage profiles   ${library.entries.length} saved`,
+  // THE SUBAGENT MODEL ROW (D-5), third on the page, summarized from the
+  // same draft/baseline sources every other derived row here reads. The fast
+  // tier check mirrors `fastTierLine`'s approximation (enabled + model + a
+  // config-file key) so the two derived lines can never disagree.
+  const team = draftTeam(state.draft);
+  const mainBound = library.entries.find((entry) => entry.id === library.mainId);
+  const mainConnection = mainBound
+    ? `${mainBound.provider}:${mainBound.model}`
+    : `${values.provider}:${values.model}`;
+  const fastModel = values.fastModel.trim();
+  const fastProvider = values.fastProvider === FAST_INHERIT_PROVIDER
+    || values.fastProvider.trim().length === 0 ? values.provider : values.fastProvider;
+  const fastConnection = values.fastEnabled === 'on' && fastModel.length > 0
+    && (props.apiKeys[fastProvider] ?? '').length > 0
+    ? `${fastProvider}:${fastModel}` : null;
+  const subagentLine = subagentModelSummary({ mode: team.model,
+    modelProfileId: team.modelProfileId, mainConnection, fastConnection,
+    profiles: state.draft.profiles,
+    hasKey: (id) => (props.apiKeys[id] ?? '').length > 0 });
+    // HELD SLOTS SHOW THE KIT'S EFFECTIVE VALUES (RV-P0-2 / AC-38). Three rows on
+    // this page read the FILE's bindings while the header reads the live ones, so
+    // without this the screen says `Main profile  Opus` over a header that says
+    // `haiku` - and the only available conclusion is that the app is broken.
+    // `Enter` on any of these rows writes an explicit choice, which releases that
+    // slot (§4.3), so what the user sees is what they are about to change.
+    const held = heldSlots(state);
+    const kitTag = held.kitName ? `  (kit ${held.kitName})` : '';
+    const mainValue = `${name(held.mainId ?? library.mainId)}${held.held.includes('main')
+      ? kitTag : ''}`;
+    const fastValue = held.held.includes('fast')
+      ? `${held.fastId ? name(held.fastId) : 'Off (this kit turns the tier off)'}${kitTag}`
+      : name(library.fastId);
+    const subagentValue = held.subagent
+      ? `${subagentModelSummary({ mode: held.subagent.model,
+        modelProfileId: held.subagent.modelProfileId, mainConnection, fastConnection,
+        profiles: state.draft.profiles,
+        hasKey: (id) => (props.apiKeys[id] ?? '').length > 0 })}${kitTag}`
+      : subagentLine;
+    const lines = [`Main profile      ${mainValue}`,
+      `Fast profile      ${fastValue}`,
+      `Subagent model    ${subagentValue}`,
+      `Kit pack          ${kitPackRow(state)}`,
+      `Manage profiles   ${library.entries.length} saved`,
     ...fields.map((item) => `${item.label.padEnd(18)}${item.key === 'apiKey'
       ? values.apiKey ? 'Configured (replacement)' : props.apiKeys[values.provider]
         ? 'Configured (type to replace)' : '(type to set)'
-      : values[item.key] || (item.key === 'maxTokens' ? 'auto' : '(not set)')}`),
+      : values[item.key] || (item.key === 'maxTokens' || item.key === 'contextWindow'
+        ? 'auto' : '(not set)')}`),
     persisted || readError ? 'Save (disabled)' : 'Save settings', 'Reload settings'];
   const rows = lines.map((line, at) => <Text key={at} wrap="truncate"
     color={at === index ? props.theme.accent : props.theme.muted}>
@@ -924,7 +1234,7 @@ function ProfileSettingsScreen(props: ProfileSettingsProps): React.ReactElement 
   return <OverlayFrame {...props} rows={buildRootSettingsRows(props, view)} scrollOffset={offset}
     title={error ?? (readError ? 'Cannot read config. Repair with aragon config edit; Reload.'
       : dirty ? 'Settings | Unsaved changes' : 'Settings')}
-    hint={persisted ? 'Esc close; restart to apply' : index < 3
+    hint={persisted ? 'Esc close; restart to apply' : index < ROOT_FIRST_FIELD
       ? 'Enter select/edit | Ctrl+S save | Esc cancel'
       : 'Enter save/action | Ctrl+S save | Esc cancel'} />;
 }

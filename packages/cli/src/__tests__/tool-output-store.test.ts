@@ -19,6 +19,7 @@ import {
   DEFAULT_TEAM_CONFIG,
   DEFAULT_TODO_CONFIG,
   type CliConfig,
+  DEFAULT_JOBS_CONFIG,
 } from '../config/schema.js';
 import type { ToolExecutionContext, ToolResult } from '@aragon-agent/core';
 
@@ -34,6 +35,10 @@ function config(overrides: Partial<CliConfig> = {}): CliConfig {
     fast: DEFAULT_FAST_CONFIG,
     update: DEFAULT_UPDATE_CONFIG,
     bash: DEFAULT_BASH_CONFIG,
+    // The ELEVENTH nested section (long-task-jobs). `enabled: true` because a
+    // fixture that says nothing about jobs should behave like a default session;
+    // the subsystems each fixture is about are switched off individually above.
+    jobs: DEFAULT_JOBS_CONFIG,
     provider: 'anthropic',
     model: 'claude-sonnet-4-5-20250929',
     thinkingLevel: 'off',

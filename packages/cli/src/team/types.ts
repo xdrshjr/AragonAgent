@@ -225,13 +225,14 @@ export interface OverseerIntervention {
   action: OverseerAction;
   reason: string;
   /**
-   * What the trigger was: event stall, wall-clock check, post-mortem, or
-   * the supervisor going QUIET (subagent-overseer-v2 D-10) - the look
+   * What the trigger was: event stall, wall-clock check, the child's turn
+   * cap (F-8 A'2 - an inspection the supervisor then ruled on), post-mortem,
+   * or the supervisor going QUIET (subagent-overseer-v2 D-10) - the look
    * budget ran out and supervision stopped waking this child. A VALUE OF
    * THE UNION, never a reason prefix: a human-readable sentence is not a
    * machine contract (the `run.error` rule).
    */
-  trigger: 'silence' | 'clock' | 'postmortem' | 'quiet';
+  trigger: 'silence' | 'clock' | 'turncap' | 'postmortem' | 'quiet';
 }
 
 /**

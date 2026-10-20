@@ -95,7 +95,10 @@ describe('EXEC_CAPABILITIES', () => {
     expect(EXEC_CAPABILITIES.slice(0, 4)).toEqual([
       'interrupt', 'fast-policy', 'fast-tier-events', 'session-file',
     ]);
-    expect(EXEC_CAPABILITIES.at(-2)).toBe('turn-lifecycle');
-    expect(EXEC_CAPABILITIES.at(-1)).toBe('execution-progress');
+    // The LAST TWO moved when `background-jobs` was appended (long-task-jobs
+    // §6.4). What this assertion protects is unchanged: nothing was INSERTED
+    // ahead of an existing token.
+    expect(EXEC_CAPABILITIES.at(-2)).toBe('execution-progress');
+    expect(EXEC_CAPABILITIES.at(-1)).toBe('background-jobs');
   });
 });

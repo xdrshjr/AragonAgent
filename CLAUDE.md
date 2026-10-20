@@ -3,30 +3,18 @@
 This project has a pre-generated index for quick codebase understanding.
 
 - **Location:** `.claude-index/index.md`
-- **Last Updated:** 2026-10-07
-- **Contents:** Project overview, feature map, file index, exported symbols, module dependencies
+- **Last Updated:** 2026-10-19
+- **Contents:** Project overview, feature map covering 39 feature areas (agent engine, context compaction, LLM/retry/output limits, tools, skills, sandbox, CLI runtime, plan mode, team, todo, fast tier, model profiles, self-update, exec/diagnostics, native terminal scroll, background jobs, session identity, conversation reset, release gate), file index for 365 indexed filenames, exported symbols, module dependencies
+- **Configuration:** `.claude-index/config.md` (exclusions, priority directories, clean-code limits, documented oversize-file exceptions)
+- **Code graph:** `.claude-index/graph.json` (schemaVersion 2) — modules, components and relations for the desktop app's architecture view, built with `python .agentmesh/.index-graph-tools.py`
 
-**Usage:** Read `.claude-index/index.md` to quickly understand the project structure before making changes. The index provides a navigation map of the codebase without needing to explore every file.
+**Usage:** Read `.claude-index/index.md` to quickly understand the project structure before making changes. The index provides a navigation map of the codebase without needing to explore every file. Follow the project-guidance discovery rules first (`AGENTS.md`, `CLAUDE.md`, then the index), and read source files only for the area you are changing.
 
 **Regenerate:** Say "regenerate index" or "更新索引" to update the index after major changes.
 
 ## Clean Code Guidelines
 
 <!-- project-indexer:cleancode:begin v1.2.0 -->
-<!--
-  cleancode-template.md — rendered into CLAUDE.md by project-indexer (Step 5b).
-  Authoring rules:
-    - Chinese character body must measure 1,400–1,700 characters
-      (matched by regex `[一-鿿]`).
-    - Verify after editing with:
-        python -c "import re,pathlib; b=pathlib.Path('project-indexer/templates/cleancode-template.md').read_text(encoding='utf-8'); print(len(re.findall(r'[一-鿿]', b)))"
-    - Placeholders: 1000 60
-      5 10 100
-      4 TypeScript - TypeScript: Prefer `interface` over `type` for public APIs.
-    - At runtime the skill must ensure no `{{...}}` placeholder leaks into
-      the rendered output. Numeric character counting at runtime is NOT
-      required.
--->
 
 > 本节由 `project-indexer` 自动维护，灵感取自谷歌风格，并按本项目主要语言收敛阈值。请勿手工编辑 markers 之间的内容，需要刷新时请运行「regenerate index」。
 

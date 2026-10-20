@@ -162,7 +162,12 @@ export function wrapStdoutForFrames(
     return writeReal(out, encoding, cb);
   };
 
-  const onResize = (): void => differ.invalidate();
+  // Optional differ hooks keep the full-screen path byte-identical: a differ that
+  // does not implement them is invalidated exactly as before.
+  const onResize = (): void => {
+    if (differ.onResize) differ.onResize();
+    else differ.invalidate();
+  };
   stdout.on('resize', onResize);
   let disposed = false;
 
@@ -193,7 +198,8 @@ export function wrapStdoutForFrames(
       return true;
     },
     writeForeign(text: string): void {
-      differ.invalidate();
+      if (differ.cursorNeutralWrite) differ.cursorNeutralWrite();
+      else differ.invalidate();
       if (disposed || text.length === 0) return;
       writeReal(text);
     },
