@@ -8,6 +8,11 @@ terminal. Private: it ships as an installer, never to npm.
 The design notes, review record and acceptance criteria of the original iteration are not part
 of this repository; the packaging guide that does ship here is `docs/packaging-desktop.md`.
 
+<p align="center">
+  <img src="./public/image/screen-shot-01.png" width="880"
+       alt="The AragonAgent desktop app: a dark Electron window with the icon rail and session list on the left, a running conversation with live tool cards in the centre, and the message composer at the bottom." />
+</p>
+
 ## What "shares the terminal's configuration" means
 
 - A model, key, theme or profile you set in the terminal is there when the app opens (no onboarding).

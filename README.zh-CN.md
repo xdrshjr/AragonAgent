@@ -48,8 +48,17 @@ UI 通过 CLI 的 `host/` facade 与引擎通信，那是一条有文档、有�
 一句话：**开源 UI，闭源引擎，一层你可以阅读、fork、构建和打包的 MIT 前端。**
 
 <p align="center">
+  <img src="./packages/desktop/public/image/screen-shot-01.png" width="880"
+       alt="AragonAgent 桌面端（Electron）：深色窗口中，左侧是图标导航栏与会话列表，中间是带实时工具卡片的对话，底部是消息输入框。" />
+  <br />
+  <em>桌面端（Electron）——与终端共用同一个会话、引擎与配置。</em>
+</p>
+
+<p align="center">
   <img src="./logo/screenshot.png" width="880"
        alt="AragonAgent 终端界面：ARAGON 横幅下的全屏 Ink 界面，头部显示当前模型与工作目录，底部是消息输入框，状态栏显示空闲状态、思考等级、上下文占用、token 数与本次会话花费。" />
+  <br />
+  <em>终端界面（TUI）——全屏 Ink 会话，带实时工具卡片和花费/上下文状态栏。</em>
 </p>
 
 ## 为什么选择 AragonAgent

@@ -53,8 +53,17 @@ So: **open-source UI, closed-source engine, one MIT-licensed front-end layer you
 and package.**
 
 <p align="center">
+  <img src="./packages/desktop/public/image/screen-shot-01.png" width="880"
+       alt="The AragonAgent desktop app: a dark Electron window with the icon rail and session list on the left, a running conversation with live tool cards in the centre, and the message composer at the bottom." />
+  <br />
+  <em>The desktop app (Electron) — the same session, engine and configuration as the terminal.</em>
+</p>
+
+<p align="center">
   <img src="./logo/screenshot.png" width="880"
        alt="The AragonAgent terminal UI: the ARAGON banner over a full-screen Ink interface with the active model and working directory in the header, a message composer at the bottom, and a status bar showing idle state, thinking level, context usage, token counts and session cost." />
+  <br />
+  <em>The terminal UI (TUI) — full-screen Ink session with live tool cards and a cost/context status bar.</em>
 </p>
 
 ## Why AragonAgent

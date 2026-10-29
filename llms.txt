@@ -10,6 +10,8 @@ This repository contains the UI layer of AragonAgent: `packages/tui` (the termin
 - [README (Chinese)](./README.zh-CN.md): 简体中文版本，结构相同。
 - [CONTRIBUTING](./CONTRIBUTING.md): Prerequisites, workspace commands, the closed-package boundary rule, tests and PR expectations.
 - [License (MIT)](./LICENSE): The license covering this repository only.
+- [Desktop app screenshot](./packages/desktop/public/image/screen-shot-01.png): A running AragonAgent desktop window — icon rail and session list on the left, a conversation with live tool cards in the centre, the composer at the bottom.
+- [Terminal UI screenshot](./logo/screenshot.png): The full-screen Ink terminal interface with its header, live tool cards and cost/context status bar.
 
 ## Packages
 
