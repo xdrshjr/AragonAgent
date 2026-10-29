@@ -6,6 +6,7 @@ This repository contains the UI layer of AragonAgent: `packages/tui` (the termin
 
 ## Overview
 
+- [Releases (Windows installer)](https://github.com/xdrshjr/AragonAgent/releases/latest): Latest desktop release — Windows x64 NSIS installer for AragonAgent Desktop, engine bundled (unsigned; SmartScreen will warn, choose More info → Run anyway).
 - [README](./README.md): What this repository is, what it is not, why AragonAgent, quick start, repository layout, FAQ, license.
 - [README (Chinese)](./README.zh-CN.md): 简体中文版本，结构相同。
 - [CONTRIBUTING](./CONTRIBUTING.md): Prerequisites, workspace commands, the closed-package boundary rule, tests and PR expectations.

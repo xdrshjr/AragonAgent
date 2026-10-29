@@ -94,7 +94,24 @@ and package.**
 
 ## Quick start
 
-### a) Desktop app (Windows, from source)
+### a) Desktop app (Windows installer)
+
+If you just want the app and not a build toolchain, download `AragonAgent.Setup.0.0.1.exe` from the
+[releases page](https://github.com/xdrshjr/AragonAgent/releases/latest) — `/releases/latest` always
+points at the newest release. It is an NSIS installer for **Windows x64**.
+
+- **Per-user install, no admin rights.** It installs under your own user profile and never asks for
+  elevation.
+- **Engine included.** The agent engine is bundled inside the installer, so there is no `npm install`
+  and no Node.js needed.
+- **Unsigned.** There is no code-signing certificate yet, so on the first launch Windows SmartScreen
+  shows "Windows protected your PC". Click **More info → Run anyway** to continue.
+- **No auto-update.** Come back to the releases page to pick up a newer build.
+
+The installer ships the same open-source UI layer as this repository; the engine and CLI inside it are
+the closed-source npm packages described above.
+
+### b) Desktop app (Windows, from source)
 
 Requires Node ≥ 20 and Windows PowerShell 5.1+. Run `npm install` once at the repository root, then use
 the one-click script inside `packages/desktop`:
@@ -127,7 +144,7 @@ npm run build -w packages/desktop
 npx electron . --smoke
 ```
 
-### b) TUI from source
+### c) TUI from source
 
 ```bash
 git clone https://github.com/xdrshjr/AragonAgent.git
@@ -141,7 +158,7 @@ npm test -w packages/tui
 engine. Most people want the published CLI (next block) to actually chat with the agent; build this
 package when you are changing the terminal UI itself or mounting it in your own front end.
 
-### c) The published CLI (the shipped agent)
+### d) The published CLI (the shipped agent)
 
 ```bash
 npm i -g @aragon-agent/cli

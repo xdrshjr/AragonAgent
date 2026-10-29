@@ -82,7 +82,21 @@ UI 通过 CLI 的 `host/` facade 与引擎通信，那是一条有文档、有�
 
 ## 快速开始
 
-### a) 桌面应用（Windows，从源码）
+### a) 桌面应用（Windows 安装包）
+
+如果只想用应用、不想装一套构建工具链，直接从
+[Releases 页面](https://github.com/xdrshjr/AragonAgent/releases/latest) 下载 `AragonAgent.Setup.0.0.1.exe`
+即可 —— `/releases/latest` 永远指向最新一版。这是一个面向 **Windows x64** 的 NSIS 安装包。
+
+- **按用户安装，不需要管理员权限。** 它装在你自己的用户目录下，不会请求提权。
+- **引擎已内置。** 智能体引擎打包在安装包里，不需要 `npm install`，也不需要装 Node.js。
+- **未签名。** 目前还没有代码签名证书，所以首次启动时 Windows SmartScreen 会弹出
+  "Windows 已保护你的电脑" 警告，点 **更多信息 → 仍要运行** 即可继续。
+- **没有自动更新。** 想要更新的版本，请回到 Releases 页面下载。
+
+安装包里是本仓库同一套开源 UI 层；包内的引擎与 CLI 仍是上面所说的闭源 npm 包。
+
+### b) 桌面应用（Windows，从源码）
 
 需要 Node ≥ 20 与 Windows PowerShell 5.1+。先在仓库根目录执行一次 `npm install`，然后用
 `packages/desktop` 里的一键脚本：
@@ -114,7 +128,7 @@ npm run build -w packages/desktop
 npx electron . --smoke
 ```
 
-### b) 从源码构建 TUI
+### c) 从源码构建 TUI
 
 ```bash
 git clone https://github.com/xdrshjr/AragonAgent.git
@@ -127,7 +141,7 @@ npm test -w packages/tui
 `@aragon-agent/tui` 是组件库，不是可执行程序：它需要一个提供引擎的宿主来渲染。想真正和 agent 对话，
 大多数人要的是下面那个已发布的 CLI；只有当你改的是终端 UI 本身，或想把它挂进自己的前端时，才需要构建这个包。
 
-### c) 已发布的 CLI（真正发布的 agent）
+### d) 已发布的 CLI（真正发布的 agent）
 
 ```bash
 npm i -g @aragon-agent/cli
