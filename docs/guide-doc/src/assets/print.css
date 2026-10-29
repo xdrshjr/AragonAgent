@@ -1,0 +1,116 @@
+/* Print (§9.5). Paper has no hover, no scroll and no dark mode: keep the words,
+   drop every affordance, force the light palette so ink is spent on text. */
+
+@page { margin: 18mm; }
+
+@media print {
+  /* Force the recorded light pairs whatever theme the reader used (§3.2).
+     html[data-theme] outranks the [data-theme="light"] block regardless of the
+     order the four sheets are concatenated in. */
+  :root,
+  html[data-theme] {
+    color-scheme: light;
+    --bg: #FFFFFF;
+    --surface: #FFFFFF;
+    --elevated: #F4F5F8;
+    --line: #C9D0DB;
+    --text: #000000;
+    --text-2: #24303F;
+    --text-3: #3E4A5C;
+    --accent: #18406F;
+    --accent-2: #12335A;
+    --ok: #14603F;
+    --warn: #6B420B;
+    --bad: #8A2020;
+    --c-key: #4F2A84;
+    --c-str: #1F4E28;
+    --c-num: #5C3D06;
+    --c-com: #3E4A5C;
+    --c-fn: #18406F;
+    --c-type: #134C45;
+    --c-attr: #4B3308;
+    --c-punct: #24303F;
+    --c-add: #14603F;
+    --c-del: #8A2020;
+    --c-flag: #12335A;
+    --c-out: #24303F;
+  }
+
+  /* Anything that exists only to be clicked, scrolled or searched disappears. */
+  .site-header,
+  .nav,
+  .nav-scrim,
+  .toc,
+  .search-btn,
+  .icon-btn,
+  .copy-btn,
+  .to-top,
+  .modal,
+  .skip-link,
+  .site-footer,
+  .search-hint,
+  .noscript-note,
+  noscript { display: none !important; }
+
+  html,
+  body {
+    background: #FFFFFF !important;
+    color: #000000 !important;
+    font-size: 11pt;
+    line-height: 1.5;
+    letter-spacing: 0;
+    scroll-behavior: auto;
+  }
+
+  /* One column, full width: a printed page has no sidebar to reserve. */
+  .shell,
+  .main,
+  .prose,
+  .sources,
+  .see-also,
+  .page-nav,
+  .pager {
+    display: block;
+    width: auto;
+    max-width: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .page-title { font-size: 20pt; line-height: 1.2; }
+  .prose h2 { font-size: 14pt; line-height: 1.3; break-after: avoid; }
+  .prose h3 { font-size: 12pt; break-after: avoid; }
+  .page-head,
+  .event-card,
+  .callout,
+  .card,
+  .step,
+  .diff-side { break-inside: avoid; }
+  .code-block,
+  .table-wrap { break-inside: avoid; }
+
+  /* A printed line that runs off the page is simply gone — pre-wrap is the only
+     honest choice here, and it also removes horizontal scroll containers. */
+  .code,
+  .event-example { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+  .table-wrap,
+  .code-block,
+  .diff-side,
+  .event-example { overflow: visible !important; }
+
+  .table { font-size: 9.5pt; }
+  .table th { position: static; background: transparent; color: var(--text-2); }
+  .table tbody tr { height: auto; }
+  .table tbody tr:nth-child(even) { background: transparent; }
+  .code-line.is-hl { background: transparent; }
+
+  /* Internal links print bare (the page order is the navigation on paper);
+     external ones print their target so the reference survives (§9.5). */
+  a { color: #000000; text-decoration: underline; }
+  a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 9pt; }
+  .icon-external { display: none; }
+  .source-ref, .source-ref code { color: var(--text-2); }
+
+  .badge, .pending-tag, kbd { border: 1px solid var(--line); background: transparent; }
+}

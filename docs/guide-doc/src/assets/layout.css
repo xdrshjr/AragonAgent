@@ -1,0 +1,315 @@
+/* Frame — header, shell grid, nav tree, TOC, footer (§3.4). Mobile first: the
+   drawer and the single column are the base case, so a phone never parses a
+   column it cannot use. Only the four breakpoints of §3.4 exist here. */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  scroll-padding-top: 72px; /* anchors must clear the 56 px sticky header */
+  scroll-behavior: smooth;
+  background-color: var(--bg);
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* §3.7: a theme switch crossfades colour only, never layout or shadow. */
+html[data-theme] { color: var(--text); transition: var(--t-color); }
+
+body {
+  display: flex; flex-direction: column; min-height: 100vh; margin: 0;
+  background-color: var(--bg); color: var(--text);
+  font-family: var(--font-sans); font-size: 15px; font-weight: 400;
+  line-height: 1.75;
+  letter-spacing: .005em; /* §3.3: tracking instead of margin-dependent text-spacing */
+  transition: var(--t-color);
+}
+
+/* §3.6: the ring below is the only outline the whole site ever sets. */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-2); }
+img, svg { max-width: 100%; }
+
+/* First focusable element in the document (§9.4) — off-canvas until focused. */
+.skip-link {
+  position: fixed; top: var(--sp-2); left: var(--sp-2); z-index: 200;
+  padding: var(--sp-2) var(--sp-4); border-radius: var(--radius);
+  background-color: var(--elevated); color: var(--text); font-size: 13px;
+  box-shadow: var(--shadow); transform: translateY(-200%);
+  transition: transform var(--dur-2) var(--ease);
+}
+
+.skip-link:focus, .skip-link:focus-visible { transform: none; }
+
+/* Clip, don't hide: screen readers keep captions and dialog titles (§9.4). */
+.visually-hidden {
+  position: absolute !important; width: 1px; height: 1px; margin: -1px;
+  padding: 0; overflow: hidden; clip-path: inset(50%);
+  white-space: nowrap; border: 0;
+}
+
+/* Site header */
+
+/* A translucent sheet + blur keeps content readable as it slides under (§3.5). */
+.site-header {
+  position: sticky; top: 0; z-index: 50; height: var(--header-h);
+  border-bottom: 1px solid var(--line);
+  background-color: color-mix(in srgb, var(--bg) 84%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.header-inner {
+  display: flex; align-items: center; gap: var(--sp-2); width: 100%;
+  max-width: 1320px; height: 100%; margin-inline: auto;
+  padding-inline: clamp(12px, 2.5vw, 24px);
+}
+
+.brand {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  min-height: 44px; color: var(--text); font-size: 14.5px; font-weight: 600;
+}
+
+.brand:hover { color: var(--text); }
+
+.brand-mark {
+  width: 18px; height: 18px; flex: none;
+  border-radius: var(--radius-sm); background-color: var(--accent);
+}
+
+.brand-name { letter-spacing: .01em; white-space: nowrap; }
+
+.version-chip {
+  display: inline-flex; align-items: center; gap: var(--sp-1);
+  min-height: 22px; padding: 1px var(--sp-2); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); color: var(--text-3); font-size: 12.5px;
+  font-weight: 500; line-height: 1.5; letter-spacing: .01em;
+  white-space: nowrap; transition: var(--t-color);
+}
+
+.version-chip:hover { color: var(--text-2); border-color: var(--text-3); }
+
+.header-actions { display: flex; align-items: center; gap: var(--sp-1); margin-left: auto; }
+
+/* Shell */
+
+.shell { flex: 1 0 auto; width: 100%; margin-inline: auto; }
+.main { min-width: 0; padding: var(--sp-5) clamp(16px, 4vw, 24px) var(--sp-8); }
+.prose { max-width: var(--content-max); margin-inline: auto; }
+
+/* Navigation tree */
+
+.nav {
+  position: fixed; inset: 0 auto 0 0; z-index: 70;
+  display: flex; flex-direction: column; gap: var(--sp-1);
+  width: min(var(--nav-w), 86vw); padding: var(--sp-4) var(--sp-3) var(--sp-8);
+  overflow-y: auto; overscroll-behavior: contain;
+  background-color: var(--surface); box-shadow: var(--shadow);
+  transform: translateX(-100%); visibility: hidden;
+  transition: transform var(--dur-3) var(--ease), visibility 0s linear var(--dur-3);
+}
+
+/* The toggle lives in the header while the drawer lives in .shell, so no sibling
+   selector can bridge them: app.js marks the open state on #site-nav. */
+.nav.is-open { transform: none; visibility: visible; transition: transform var(--dur-3) var(--ease); }
+
+.nav-scrim {
+  display: block; position: fixed; inset: 0; z-index: 65;
+  background-color: rgb(0 0 0 / .55);
+}
+
+.nav-scrim[hidden] { display: none; }
+
+.nav-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-2); padding: 0 var(--sp-1) var(--sp-2);
+  margin-bottom: var(--sp-1); border-bottom: 1px solid var(--line);
+}
+
+.nav-title {
+  color: var(--text-3); font-size: 12.5px; font-weight: 500;
+  line-height: 1.5; letter-spacing: .01em;
+}
+
+.nav-body { display: flex; flex-direction: column; gap: var(--sp-2); }
+.nav-group { border: 0; }
+
+.nav-group-title {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-2); min-height: 32px;
+  padding: var(--sp-1) var(--sp-1) var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-sm); color: var(--text-3); font-size: 12px;
+  font-weight: 600; line-height: 1.4; letter-spacing: .06em;
+  list-style: none; cursor: pointer;
+}
+
+.nav-group-title::-webkit-details-marker { display: none; }
+.nav-group-title:hover { color: var(--text-2); }
+
+/* Chevron from two borders: no icon font, no extra request. */
+.nav-group-title::after {
+  content: ""; width: 6px; height: 6px; flex: none; margin-right: var(--sp-1);
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg); transition: transform var(--dur-2) var(--ease);
+}
+
+.nav-group[open] > .nav-group-title::after { transform: rotate(45deg); }
+
+.nav-list {
+  display: flex; flex-direction: column; gap: 1px;
+  margin: 0; padding: 0; list-style: none;
+}
+
+/* 36 px rows on desktop (§3.4); the padding keeps the hit area generous. */
+.nav-link {
+  display: flex; align-items: center; min-height: 36px;
+  padding: var(--sp-1) var(--sp-2) var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-sm); color: var(--text-2); font-size: 14px;
+  line-height: 1.45; transition: var(--t-color);
+}
+
+.nav-link:hover { color: var(--text); background-color: color-mix(in srgb, var(--text) 6%, transparent); }
+
+/* Current page: a 2 px accent bar plus a wash — never a coloured border (§3.5). */
+.nav-link.is-current {
+  color: var(--text); font-weight: 500;
+  background-color: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.nav-link.is-pending { color: var(--text-3); cursor: not-allowed; }
+
+/* TOC: collapsed into two small columns on the single-column layout (§3.4), never
+   removed — with no JS this list is the only in-page navigation there is. */
+
+.toc {
+  display: block; padding: var(--sp-3) 0 var(--sp-4);
+  border-bottom: 1px solid var(--line);
+}
+
+.toc-title { font-size: 12px; }
+.toc-list { columns: 2; column-gap: var(--sp-4); }
+.toc-item a { font-size: 12.5px; border-left-color: transparent; }
+.toc-progress { display: none; }
+
+.toc-title {
+  margin: 0 0 var(--sp-2); color: var(--text-3); font-size: 12.5px;
+  font-weight: 500; line-height: 1.5; letter-spacing: .01em;
+}
+
+.toc-list { margin: 0; padding: 0; list-style: none; }
+.toc-item { margin: 0; }
+
+.toc-item a {
+  display: block; padding: 3px var(--sp-1) 3px var(--sp-2);
+  border-left: 1px solid var(--line); color: var(--text-3);
+  font-size: 13px; line-height: 1.5; transition: var(--t-color);
+}
+
+.toc-item a:hover { color: var(--text); }
+.toc-item a.is-active { color: var(--accent); border-left-color: var(--accent); }
+.toc-level-1 a { color: var(--text-2); }
+
+/* H3 links sit one step quieter, so the two levels read apart at a glance. */
+.toc-level-2 a { padding-left: var(--sp-4); font-size: 12.5px; }
+
+.toc-progress {
+  height: 2px; margin-top: var(--sp-4); border-radius: 2px;
+  overflow: hidden; background: var(--line);
+}
+
+/* app.js writes `style.width = "N%"`; width (not scaleX) keeps that honest. */
+.toc-progress > span {
+  display: block; width: 0; height: 100%;
+  background-color: var(--accent); transition: width var(--dur-1) linear;
+}
+
+/* Footer */
+
+.site-footer { border-top: 1px solid var(--line); }
+
+.footer-inner {
+  display: flex; flex-wrap: wrap; justify-content: space-between;
+  gap: var(--sp-1) var(--sp-5); max-width: 1320px; margin-inline: auto;
+  padding: var(--sp-5) clamp(12px, 2.5vw, 24px); color: var(--text-3);
+  font-size: 12.5px; font-weight: 500; line-height: 1.5; letter-spacing: .01em;
+}
+
+.footer-meta, .footer-license { margin: 0; }
+.footer-license a { color: var(--text-2); }
+.footer-license a:hover { color: var(--accent); }
+
+/* Two columns: 900–1199 — the TOC leaves the rail, joins the flow */
+
+@media (min-width: 900px) {
+  .shell {
+    display: grid; grid-template-columns: 240px minmax(0, 1fr);
+    grid-template-areas: "nav toc" "nav main";
+    align-items: start; gap: 0 var(--sp-6); max-width: 1100px;
+  }
+
+  /* `sticky`, not `fixed`: the page stays the scrollport, so the footer remains
+     reachable and Ctrl+F can still find text above the fold. */
+  .nav {
+    position: sticky; top: var(--header-h); grid-area: nav; inset: auto;
+    width: auto; max-height: calc(100vh - var(--header-h));
+    padding: var(--sp-5) var(--sp-3) var(--sp-6) 0; overflow-y: auto;
+    background-color: transparent; box-shadow: none;
+    transform: none; transition: none;
+  }
+
+  .nav-scrim, .nav-scrim[hidden] { display: none; }
+
+  /* Two classes: layout.css loads before components.css, so one class could not
+     out-weigh the .icon-btn display rule in the later sheet. */
+  .icon-btn.nav-toggle, .icon-btn.nav-close { display: none; }
+
+  .toc {
+    display: block; grid-area: toc; padding: var(--sp-5) 0 var(--sp-3);
+    border-bottom: 1px solid var(--line);
+  }
+
+  /* Collapsed reading aid: two columns of links, not a 60-row list. */
+  .toc-list { columns: 2; column-gap: var(--sp-5); }
+
+  .main { grid-area: main; padding: var(--sp-6) 0 var(--sp-8); }
+  .header-inner { padding-inline: clamp(16px, 2.5vw, 32px); }
+}
+
+/* Three columns: ≥1200 — nav │ main (≤72ch) │ toc */
+
+@media (min-width: 1200px) {
+  .shell {
+    max-width: 1320px;
+    /* 264 = --nav-w, 220 = --toc-w; written literally to match §3.4. */
+    grid-template-columns: 264px minmax(0, 1fr) 220px;
+    grid-template-areas: "nav main toc"; gap: 40px;
+  }
+
+  .nav { padding-right: 0; scrollbar-width: thin; }
+
+  .toc {
+    position: sticky; top: var(--header-h); width: var(--toc-w);
+    max-height: calc(100vh - var(--header-h));
+    padding: var(--sp-6) 0 var(--sp-8); overflow-y: auto;
+    border-bottom: 0; scrollbar-width: thin;
+  }
+
+  .toc-list { columns: 1; }
+}
+
+/* Narrow phones: the header sheds labels, never function */
+
+@media (max-width: 519px) {
+  .version-chip { display: none; }
+  .footer-inner { flex-direction: column; }
+}
+
+/* §3.1.5 / §3.7: all motion off, anchors jump instantly. */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 1ms !important; animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important; scroll-behavior: auto !important;
+  }
+}

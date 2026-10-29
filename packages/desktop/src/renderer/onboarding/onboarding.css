@@ -1,0 +1,22 @@
+/* First-run onboarding: one centred card, three steps. Tokens only. */
+.onb { display: grid; place-items: center; min-height: 100%; padding: var(--space-6); overflow-y: auto; background: var(--bg-default); user-select: text; }
+.onb-card { width: min(620px, 100%); border: 1px solid var(--border-default); border-radius: var(--radius-pop); background: var(--bg-surface-100); padding: var(--space-6); box-shadow: var(--shadow-pop); }
+.onb-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-4); }
+.onb-steps { list-style: none; display: flex; gap: var(--space-4); margin: 0; padding: 0; color: var(--fg-lighter); }
+.onb-steps li[aria-current='step'] { color: var(--fg-default); font-weight: 600; }
+.onb-steps li[data-done='true'] { color: var(--fg-light); }
+.onb-step-n { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--border-strong); font-size: 11px; margin-right: 4px; }
+.onb-steps li[aria-current='step'] .onb-step-n { border-color: var(--brand); color: var(--brand); }
+.onb h1 { margin: 0 0 var(--space-4); font-size: 18px; }
+.onb h1:focus-visible { outline: none; box-shadow: none; }
+.onb-choices { border: 0; margin: 0 0 var(--space-3); padding: 0; display: grid; gap: var(--space-2); }
+.onb-choice { display: grid; grid-template-columns: auto 1fr; gap: 0 var(--space-3); align-items: center; padding: var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-card); cursor: pointer; }
+.onb-choice[data-selected='true'] { border-color: var(--brand); background: var(--brand-soft); }
+.onb-choice input { grid-row: span 2; accent-color: var(--brand); }
+.onb-choice-name { font-weight: 500; overflow-wrap: anywhere; }
+.onb-choice-desc { grid-column: 2; color: var(--fg-lighter); font-size: 12px; }
+.onb-grid { margin-bottom: var(--space-3); }
+.onb-foot { display: flex; justify-content: space-between; margin-top: var(--space-5); }
+.onb-note { margin: var(--space-4) 0 0; color: var(--fg-lighter); font-size: 12px; }
+.onb-examples { margin-top: var(--space-4); }
+.onb-examples ul { margin: 0; padding-left: var(--space-5); color: var(--fg-light); }

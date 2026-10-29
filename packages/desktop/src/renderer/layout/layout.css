@@ -1,0 +1,113 @@
+/* Shell layout: title bar / icon rail / sidebar / main / inspector. */
+.app { display: grid; grid-template-rows: var(--titlebar-h) 1fr; grid-template-columns: minmax(0, 1fr); height: 100%; min-width: 0; }
+.titlebar {
+  display: flex; align-items: center; gap: var(--space-2); height: var(--titlebar-h);
+  padding: 0 var(--space-3); border-bottom: 1px solid var(--border-default); background: var(--bg-surface-100);
+}
+/* Leave room for the native window controls (macOS traffic lights left, Windows overlay right). */
+:root[data-platform='darwin'] .titlebar { padding-left: 84px; }
+:root[data-platform='win32'] .titlebar, :root[data-platform='linux'] .titlebar {
+  /* The caption-button strip is native: leave exactly its width (the env() pair is the strip's rect) plus a gap so no control touches it; 150px in total if unknown. */
+  padding-right: max(var(--space-3), calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, calc(100vw - 142px)) + var(--space-2)));
+}
+.titlebar-brand { display: inline-flex; align-items: center; flex: none; margin-right: 2px; }
+.titlebar-brand svg { display: block; }
+.crumbs { display: flex; flex: 0 1 auto; align-items: center; gap: 6px; min-width: 0; overflow: hidden; color: var(--fg-light); }
+.crumbs strong { color: var(--fg-default); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.titlebar-spacer { flex: 1; }
+.search-trigger {
+  display: inline-flex; flex: 0 1 220px; align-items: center; gap: 8px; height: var(--control-md); padding: 0 8px 0 10px; min-width: 0; overflow: hidden; white-space: nowrap;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-control); color: var(--fg-lighter); background: var(--bg-surface-200);
+}
+.search-trigger:hover { background: var(--bg-surface-300); color: var(--fg-default); }
+
+.body { display: flex; min-height: 0; min-width: 0; }
+.rail {
+  width: var(--rail-w); flex: none; display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: var(--space-2) 0; border-right: 1px solid var(--border-default); background: var(--bg-surface-100);
+}
+.rail-spacer { flex: 1; }
+.rail .icon-btn { width: 36px; height: 36px; position: relative; }
+.rail .icon-btn[data-active='true']::before {
+  content: ''; position: absolute; left: -6px; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--brand);
+}
+
+/* The slot owns the width; the sidebar fills it. A long title can therefore be cut, never widen the slot. */
+.sidebar-slot { display: flex; flex: none; min-width: 0; overflow: hidden; }
+.sidebar {
+  display: flex; flex-direction: column; flex: 1 1 0; width: 100%; min-width: 0; overflow: hidden; background: var(--bg-surface-100);
+  border-right: 1px solid var(--border-default);
+}
+.sidebar-head { display: flex; align-items: center; justify-content: space-between; padding: var(--space-3) var(--space-3) var(--space-2); }
+.sidebar-head-actions { display: inline-flex; align-items: center; gap: 2px; }
+.sidebar-title { margin: 0; font-size: 12px; font-weight: 600; color: var(--fg-light); text-transform: uppercase; letter-spacing: 0.04em; }
+.sidebar-filter { position: relative; padding: 0 var(--space-3) var(--space-2); }
+.sidebar-filter svg { position: absolute; left: 22px; top: 8px; color: var(--fg-lighter); }
+.sidebar-filter .field { padding-left: 28px; }
+.sidebar-scroll { flex: 1; min-width: 0; overflow-x: hidden; overflow-y: auto; padding: 0 var(--space-2) var(--space-3); }
+.sidebar-skeleton { display: grid; gap: 10px; padding: var(--space-3); }
+.sidebar-empty { color: var(--fg-lighter); padding: var(--space-3); margin: 0; }
+.sgroup + .sgroup { margin-top: var(--space-2); }
+.sgroup-title {
+  margin: var(--space-2) var(--space-2) 2px; font-size: 11px; font-weight: 600; color: var(--fg-lighter);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.slist { list-style: none; margin: 0; padding: 0; min-width: 0; }
+.srow { position: relative; display: flex; align-items: center; min-width: 0; border-radius: var(--radius-control); }
+.srow:hover, .srow:focus-within { background: var(--bg-surface-300); }
+.srow[data-active='true'] { background: var(--bg-surface-300); box-shadow: inset 2px 0 0 var(--brand); }
+.srow-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; height: var(--row-h); padding: 0 var(--space-2); text-align: left; }
+.srow-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srow-time { color: var(--fg-lighter); font-size: 11px; flex: none; }
+.srow-pin { color: var(--fg-lighter); flex: none; }
+.srow-actions { display: none; position: absolute; right: 4px; gap: 2px; background: var(--bg-surface-300); border-radius: var(--radius-control); }
+/* Fade the title out to the left of the icons instead of cutting it against them. */
+.srow-actions::before {
+  content: ''; position: absolute; right: 100%; top: 0; bottom: 0; width: 16px; pointer-events: none;
+  background: linear-gradient(to right, transparent, var(--bg-surface-300));
+}
+.srow:hover .srow-actions, .srow:focus-within .srow-actions { display: inline-flex; }
+.srow:hover .srow-time, .srow:focus-within .srow-time { visibility: hidden; }
+
+.resizer { width: 5px; flex: none; margin-left: -3px; cursor: col-resize; z-index: 5; }
+.resizer:hover, .resizer[data-dragging='true'] { background: var(--brand-soft); }
+
+.main { flex: 1; min-width: 360px; min-height: 0; display: flex; flex-direction: column; background: var(--bg-default); }
+.empty { margin: auto; text-align: center; max-width: 420px; padding: var(--space-6); }
+.empty h1 { font-size: 20px; margin: var(--space-4) 0 var(--space-2); }
+.empty p { color: var(--fg-light); margin: 0 0 var(--space-4); }
+.recent { list-style: none; padding: 0; margin: var(--space-4) 0 0; text-align: left; }
+.recent button { width: 100%; text-align: left; padding: 6px 8px; border-radius: var(--radius-control); color: var(--fg-light); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent button:hover { background: var(--bg-surface-300); color: var(--fg-default); }
+
+/* Straddles the boundary and takes no layout width, so the max-width arithmetic below stays exact. */
+.inspector-resizer { margin-left: -3px; margin-right: -2px; }
+/* Never let the inspector take the main pane below its floor. min-width beats max-width in CSS, so
+   "does not fit" is decided in JS (layout-tier.ts) and expressed through data-tier. */
+.inspector {
+  flex: none; display: flex; flex-direction: column; min-width: 320px;
+  max-width: calc(100% - var(--rail-w) - var(--sidebar-slot-w, 0px) - 360px);
+  border-left: 1px solid var(--border-default); background: var(--bg-surface-100);
+}
+.body[data-tier='3'] .main { min-width: 240px; }
+/* Tier 3: even the relaxed floors do not fit, so the inspector gives way (its tab strip scrolls). */
+.body[data-tier='3'] .inspector { min-width: 0; max-width: calc(100% - var(--rail-w) - 240px); }
+.inspector-body { flex: 1; min-height: 0; overflow: auto; }
+.inspector .tab .badge { margin-left: 2px; }
+
+.banner { display: flex; align-items: center; gap: var(--space-3); padding: 6px var(--space-4); background: var(--warning-soft); color: var(--fg-default); border-bottom: 1px solid var(--border-default); }
+.toast-note { position: fixed; right: var(--space-4); bottom: var(--space-4); z-index: 40; max-width: 380px; padding: var(--space-3) var(--space-4); background: var(--bg-surface-200); border: 1px solid var(--border-default); border-radius: var(--radius-card); box-shadow: var(--shadow-pop); }
+.fullpage { margin: auto; max-width: 560px; padding: var(--space-6); }
+.fullpage h1 { margin: 0 0 var(--space-2); font-size: 18px; }
+.fullpage dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: var(--space-4) 0; }
+.fullpage dt { color: var(--fg-lighter); }
+.fullpage dd { margin: 0; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 12px; }
+
+/* A quiet chip: it only exists while an update is on offer, and never competes with the search box. */
+.update-badge {
+  display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px;
+  border: 1px solid var(--border-default); border-radius: 999px; background: var(--brand-soft);
+  color: var(--brand); font-size: var(--text-ui); white-space: nowrap; -webkit-app-region: no-drag;
+}
+.update-badge:hover { background: var(--bg-surface-200); }
+.update-badge:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }

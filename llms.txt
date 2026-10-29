@@ -1,0 +1,53 @@
+# AragonAgent
+
+> AragonAgent is an open-source terminal coding agent UI (Ink/React TUI) and Electron desktop app that runs on the closed-source, npm-published AragonAgent agent engine.
+
+This repository contains the UI layer of AragonAgent: `packages/tui` (the terminal runtime, published to npm as `@aragon-agent/tui`) and `packages/desktop` (the private Electron desktop app with an NSIS installer and one-click Windows packaging), plus `docs/` (the developer documentation site). The agent engine (`@aragon-agent/core`) and the CLI host that provides the `aragon` command (`@aragon-agent/cli`) are closed source and installed from npm.
+
+## Overview
+
+- [README](./README.md): What this repository is, what it is not, why AragonAgent, quick start, repository layout, FAQ, license.
+- [README (Chinese)](./README.zh-CN.md): 简体中文版本，结构相同。
+- [CONTRIBUTING](./CONTRIBUTING.md): Prerequisites, workspace commands, the closed-package boundary rule, tests and PR expectations.
+- [License (MIT)](./LICENSE): The license covering this repository only.
+
+## Packages
+
+- [packages/tui](./packages/tui): The terminal runtime behind the `aragon` command — Ink components, terminal input protocols, the scrollback renderer and the view model. Published as `@aragon-agent/tui`.
+- [packages/tui/README.md](./packages/tui/README.md): Subpath imports, the logging port, layering rules and development commands for the TUI.
+- [packages/desktop](./packages/desktop): The Electron desktop app — main/host/preload/renderer processes, build flavors, Electron fuses, packaging and release runbook. Private, never published.
+- [packages/desktop/README.md](./packages/desktop/README.md): How the app shares `~/.aragon-agent` with the terminal, test and benchmark commands, build flavors, known limits.
+- [packages/desktop/docs/packaging-desktop.md](./packages/desktop/docs/packaging-desktop.md): One-click Windows packaging — parameter table, exit codes, artifacts, logs and troubleshooting.
+
+## Documentation site
+
+- [docs/guide-doc/dist/index.html](./docs/guide-doc/dist/index.html): The prebuilt static documentation site (open in a browser; no server or network needed).
+- [docs/guide-doc/README.md](./docs/guide-doc/README.md): How the site is generated, gated and deployed, and how to add a page.
+- [Start](./docs/guide-doc/dist/start/install/index.html): Install, first run, five-minute tour, core concepts.
+- [Daily use](./docs/guide-doc/dist/guide/tui/index.html): Interface tour, keybindings, plan mode, TODO, team subagents, skills.
+- [Team subagents](./docs/guide-doc/dist/guide/team/index.html): Parallel subagents and the combined report.
+- [TODO and acceptance criteria](./docs/guide-doc/dist/guide/todo/index.html): The live todo list and its verify phase.
+- [Configuration](./docs/guide-doc/dist/config/reference/index.html): Config files, precedence and every key.
+- [Machine contract](./docs/guide-doc/dist/exec/overview/index.html): `aragon exec` — output formats, events, permissions, budgets.
+- [Engine API](./docs/guide-doc/dist/api/install/index.html): `@aragon-agent/core` install, agent, tools, providers, sandbox.
+- [Built-in tools](./docs/guide-doc/dist/tools/index.html): The tool reference.
+- [Troubleshooting](./docs/guide-doc/dist/troubleshoot/faq/index.html): FAQ, `doctor` self-check, escape paths.
+
+## Capabilities
+
+- Two front ends on one engine: an Ink/React terminal UI and an Electron desktop app that share `~/.aragon-agent`.
+- Team subagents with depth-capped parallel fan-out and one combined report.
+- Read-only plan mode, plus a TODO list with per-item acceptance criteria and a verify phase.
+- Background jobs and services (`job_list`, `job_wait`), reaped when the app exits.
+- Context gauge, automatic compaction with a restorable archive, sessions that resume and branch.
+- Model adapters for Anthropic, OpenAI and Google, plus any OpenAI-compatible endpoint via a custom `baseUrl`; optional cheaper fast tier.
+- One-click Windows packaging: `pack-desktop.cmd` builds, stages the engine from npm tarballs, runs `verify-bundle`, applies Electron fuses.
+
+## Notes
+
+- The engine and CLI are **closed source**. `@aragon-agent/core` (currently 0.2.63) and `@aragon-agent/cli` (currently 0.6.51) are consumed as published npm packages; their source is not part of this repository, and the UI talks to them only through the CLI's documented `host/` facade.
+- `@aragon-agent/tui` is published to npm (currently 0.0.4). `@aragon-agent/desktop` is private and ships as an installer, never to npm.
+- The desktop app's packaging path is Windows (NSIS, PowerShell 5.1+, Node >= 20). macOS and Linux bundles can be produced from the same electron-builder configuration but are unsigned and not exercised in this repository — treat them as unsupported.
+- There is no VS Code extension, IDE plugin or editor integration (not supported yet).
+- The agent does not work offline: every answer is an HTTPS call to your configured model provider. Only the static documentation site works without a network.
+- No update feed is configured in this repository; a build from this tree makes no update request. Builds are unsigned.

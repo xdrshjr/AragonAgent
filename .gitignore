@@ -1,0 +1,60 @@
+# AragonAgent - ignored paths.
+#
+# Two rules matter more than the rest:
+#   1. every generated `dist/` is ignored EXCEPT the documentation site, which is
+#      committed on purpose (see the "shipped documentation site" block);
+#   2. nothing below relies on a machine-local git config.
+
+# ---- Dependencies ---------------------------------------------------------
+node_modules/
+
+# ---- Build output ---------------------------------------------------------
+dist/
+packages/*/dist/
+
+# ---- Shipped documentation site (deliberately committed) ------------------
+# `docs/guide-doc` cannot be built in this repository: its accuracy gate extracts
+# truth sets from the private engine sources, so the site ships prebuilt. The
+# broad `dist/` rule above would swallow it. Git cannot re-include a file whose
+# parent directory is still excluded, so the directory itself is re-included
+# first and its contents second. Both lines are required - drop either one and
+# the site silently disappears from the tree.
+!docs/guide-doc/dist/
+!docs/guide-doc/dist/**
+
+# The generator's scratch output: build.mjs renders into dist.tmp before the
+# atomic rename, and the phase tests render into .tmp-test-*.
+docs/guide-doc/dist.tmp/
+docs/guide-doc/.tmp-test-*/
+
+# ---- TypeScript incremental build info ------------------------------------
+*.tsbuildinfo
+
+# ---- Desktop app packaging / test / benchmark output ----------------------
+# Reports and failure artifacts, never source.
+packages/desktop/build-staging/
+packages/desktop/release/
+packages/desktop/release-e2e/
+packages/desktop/test-results/
+packages/desktop/bench-results/
+packages/desktop/pack-logs/
+
+# ---- Local state and secrets ---------------------------------------------
+.env
+.env.*
+!.env.example
+*.log
+coverage/
+
+# ---- OS cruft -------------------------------------------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ---- Editor cruft ---------------------------------------------------------
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*~

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="AragonAgent">
+  <rect width="1024" height="1024" rx="230" fill="#171717"/>
+  <path d="M318 330l256 190-256 190" fill="none" stroke="#fafafa" stroke-width="72" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="676" cy="700" r="62" fill="#3ecf8e"/>
+</svg>

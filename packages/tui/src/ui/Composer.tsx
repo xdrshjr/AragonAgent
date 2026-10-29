@@ -1,0 +1,233 @@
+/** Input border and draft shell. Global action hints and activity live below the viewport. */
+import React, { useCallback, useState } from 'react';
+import { Box, type DOMElement } from 'ink';
+import type { Theme } from './theme.js';
+import type { TermCapabilities } from './capabilities.js';
+import { pickGlyphs } from './glyphs.js';
+import { HINT_FADE_AFTER } from '../model/config/schema.js';
+import type { ComposerSubmitResult } from './composer-input.js';
+import { PromptInput, type CommandOption, type DraftFill } from './PromptInput.js';
+import type { RunActivity } from './run-status-row.js';
+import { MODE_LABEL, nextMode, type AgentMode } from '../model/agent/agent-mode.js';
+import { isGovernedModeValue } from './governance-status.js';
+
+/** Legacy caller shape retained for source compatibility; Composer no longer mounts it. */
+export interface RunRowProps {
+  activity: RunActivity;
+  /** The row is in the viewport with no overlay: draw the animated spinner. */
+  live: boolean;
+  /** Measured by `ScrollViewport` to learn whether the row has scrolled away. */
+  rowRef?: React.RefObject<DOMElement>;
+}
+
+export interface ComposerProps {
+  /** Compatibility prop; activity is now rendered by the global StatusBar. */
+  runRow?: RunRowProps | null;
+  cols?: number;
+  terminalRows?: number;
+  statusExpanded?: boolean;
+  deleteDisambiguated?: boolean;
+  onCompletionContextChange?: (context: 'none' | 'slash' | 'file') => void;
+  cursorVisible?: boolean;
+  onInteraction?: () => void;
+  measureRef?: React.RefObject<DOMElement>;
+  /** False while an overlay owns the keyboard (the input is visually blurred). */
+  isActive: boolean;
+  reducedMotion?: boolean;
+  onEscape?: () => void;
+  onEscapeDismiss?: () => void;
+  running: boolean;
+  history: string[];
+  commands: CommandOption[];
+  cwd: string;
+  /** Dropped on short terminals to buy back a row (§5.4). */
+  showHint: boolean;
+  /** Compatibility prop; submission count no longer hides essential actions. */
+  submitCount: number;
+  /** Compatibility prop; App owns secondary teaching-hint visibility. */
+  hintsEnabled: boolean;
+  /** Mirror of the controller's effective mode; drives the border. */
+  agentMode: AgentMode;
+  /**
+   * The adopted posture (governance-mode 10.2). A governed one paints the idle/draft
+   * border in `governAccent`, the same slot PLAN uses `accent` for. Absent = the
+   * pre-governance border logic, unchanged.
+   */
+  posture?: string;
+  /** Compatibility prop; the global action row names the effective mode key. */
+  modeToggleKey?: string;
+  popupMaxRows?: number;
+  popupMaxHeight?: number;
+  onPopupRowsChange?: (rows: number) => void;
+  /** Compatibility prop; history position is displayed by Header. */
+  scrolledLines?: number;
+  /** Compatibility prop; the global status and action rows show live services. */
+  services?: number;
+  /**
+   * The composer's DRAFT row count, forwarded upward (tui-paste-handling
+   * section 5.5).
+   *
+   * `hasDraft` stays here, because the border reacts to it and routing that
+   * through `App` would re-render the transcript on the first keystroke of every
+   * message. The row count is the opposite case: `layout/budget.ts` needs it, so
+   * it has to reach `App` — and it changes on a line break rather than on a
+   * character, which is what keeps the re-render rate the same (R-6).
+   */
+  onDraftRows?: (rows: number) => void;
+  /**
+   * Draft PRESENCE, forwarded upward for the Ctrl+C ladder
+   * (ctrl-c-clear-draft-exit). App stores it in a ref only - no state,
+   * so the transcript does not re-render on the first keystroke of a
+   * message (the same cost the comment above documents).
+   */
+  onDraftPresence?: (hasDraft: boolean) => void;
+  /**
+   * Downward half of the same channel: ticks when App asks the editor
+   * to clear the draft (Ctrl+C x2 while drafting). Passed through to
+   * PromptInput unchanged.
+   */
+  draftClearNonce?: number;
+  /** Downward half of the fill channel; forwarded to `PromptInput` unchanged. */
+  draftFill?: DraftFill;
+  /** `prompts.insertMode`, forwarded unchanged. */
+  insertMode?: 'insert' | 'replace';
+  /** Paste refusals from `PromptInput`, routed to `App`'s notice dispatch. */
+  onNotice?: (level: 'warn' | 'error', text: string) => void;
+  theme: Theme;
+  caps: TermCapabilities;
+  onSubmit: (text: string) => ComposerSubmitResult;
+  onHelp?: () => void;
+}
+
+/** Legacy helper retained for consumers and contract tests; not rendered by Composer. */
+export function runningHintClauses(opts: {
+  glyphs: ReturnType<typeof pickGlyphs>;
+  services: number;
+}): string[] {
+  const { glyphs, services } = opts;
+  const clauses = [`${glyphs.enterKey} queue`, `esc${glyphs.times}2 interrupt`];
+  if (services > 0) clauses.push(`ctrl+c stop ${services}`);
+  clauses.push(`ctrl+c${glyphs.times}2 exit`);
+  return clauses;
+}
+
+/** Compatibility formatter. Product hints use interaction-hints.ts. */
+function hintText(opts: {
+  running: boolean;
+  submitCount: number;
+  glyphs: ReturnType<typeof pickGlyphs>;
+  mode: AgentMode;
+  toggleKey: string;
+  /** Live background services; 0 leaves both rows byte-identical to today's. */
+  services: number;
+}): string {
+  const { running, submitCount, glyphs, mode, toggleKey, services } = opts;
+  const dot = ` ${glyphs.midDot} `;
+  if (running) return runningHintClauses({ glyphs, services }).join(dot);
+  const toggle = `${toggleKey} ${MODE_LABEL[nextMode(mode)].toLowerCase()}`;
+  const stop = services > 0 ? [`ctrl+c stop ${services}`] : [];
+  if (submitCount >= HINT_FADE_AFTER) return [...stop, toggle, '? help'].join(dot);
+  return [
+    ...stop,
+    `${glyphs.enterKey} send`,
+    `${glyphs.shiftEnter} newline`,
+    '/ commands',
+    '@ files',
+    toggle,
+    '? help',
+  ].join(dot);
+}
+
+/** Compatibility export for existing hint contract tests. */
+export const hintTextForTest = hintText;
+
+export function Composer({
+  deleteDisambiguated, onCompletionContextChange,
+  cols, terminalRows, statusExpanded, cursorVisible, onInteraction, measureRef,
+  isActive,
+  reducedMotion,
+  onEscape,
+  onEscapeDismiss,
+  running,
+  history,
+  commands,
+  cwd,
+  agentMode,
+  posture,
+  popupMaxRows,
+  popupMaxHeight,
+  onPopupRowsChange,
+  onDraftRows,
+  onDraftPresence,
+  draftClearNonce,
+  draftFill,
+  insertMode,
+  onNotice,
+  theme,
+  caps,
+  onSubmit,
+  onHelp,
+}: ComposerProps): React.ReactElement {
+  const [hasDraft, setHasDraft] = useState(false);
+  const onDraftChange = useCallback(
+    (next: { hasDraft: boolean; rows: number }) => {
+      setHasDraft(next.hasDraft);
+      // Presence FIRST: the App ref must be current before the row-count
+      // report below can trigger the App render that reads it.
+      onDraftPresence?.(next.hasDraft);
+      onDraftRows?.(next.rows);
+    },
+    [onDraftPresence, onDraftRows],
+  );
+
+  // Plan mode inserts ONE branch, above `draft` and below `running`. The
+  // ordering is load-bearing: an in-flight run's border must stay `toolRunning`,
+  // because "is it running" is more urgent than "which mode".
+  const borderColor = !isActive
+    ? theme.toolPending
+    : running
+    ? theme.toolRunning
+    : isGovernedModeValue(posture)
+    ? theme.governAccent
+    : agentMode === 'plan'
+    ? theme.accent
+    : hasDraft
+    ? theme.focusBorder ?? theme.primary
+    : theme.idleBorder ?? theme.border;
+
+  return (
+    <Box ref={measureRef} width={cols} flexDirection="column" flexShrink={0}>
+      <PromptInput
+        deleteDisambiguated={deleteDisambiguated}
+        onCompletionContextChange={onCompletionContextChange}
+        cols={cols}
+        terminalRows={terminalRows}
+        statusExpanded={statusExpanded}
+        cursorVisible={cursorVisible}
+        onInteraction={onInteraction}
+        isActive={isActive}
+        reducedMotion={reducedMotion}
+        onEscape={onEscape}
+        onEscapeDismiss={onEscapeDismiss}
+        running={running}
+        history={history}
+        commands={commands}
+        cwd={cwd}
+        theme={theme}
+        caps={caps}
+        popupMaxRows={popupMaxRows}
+        popupMaxHeight={popupMaxHeight}
+        onPopupRowsChange={onPopupRowsChange}
+        onSubmit={onSubmit}
+        onHelp={onHelp}
+        agentMode={agentMode}
+        borderColor={borderColor}
+        onDraftChange={onDraftChange}
+        draftClearNonce={draftClearNonce}
+        draftFill={draftFill}
+        insertMode={insertMode}
+        onNotice={onNotice}
+      />
+    </Box>
+  );
+}

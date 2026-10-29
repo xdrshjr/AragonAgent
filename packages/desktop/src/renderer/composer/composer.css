@@ -1,0 +1,76 @@
+/* The composer and its status row. Tokens only. */
+.composer { position: relative; flex: none; width: 100%; max-width: var(--read-width); margin: 0 auto; padding: var(--space-2) var(--space-4) var(--space-4); }
+.composer-box { border: 1px solid var(--border-strong); border-radius: var(--radius-pop); background: var(--bg-surface-100); }
+.composer[data-dragging='true'] .composer-box { border-color: var(--brand); background: var(--brand-soft); }
+.composer-box:focus-within { border-color: var(--brand); }
+.composer-input {
+  display: block; width: 100%; border: 0; outline: 0; resize: none; background: transparent; color: var(--fg-default);
+  padding: 8px 12px; line-height: 20px; font-size: var(--text-body); max-height: 256px; overflow-y: auto; user-select: text;
+}
+.composer-input:focus-visible { outline: none; box-shadow: none; }
+.composer-input::placeholder { color: var(--fg-lighter); }
+.chips { display: grid; gap: 4px; padding: 8px 8px 0; }
+.composer-error { color: var(--destructive); font-size: 12px; padding: 0 var(--space-1) var(--space-2); }
+.esc-hint { position: absolute; right: var(--space-4); top: -4px; transform: translateY(-100%); padding: 4px 10px; font-size: 12px; background: var(--bg-surface-300); border: 1px solid var(--border-strong); border-radius: var(--radius-control); box-shadow: var(--shadow-pop); z-index: 5; }
+
+/* ---- Paste chip ------------------------------------------------------------------------- */
+.paste-chip { border: 1px solid var(--border-default); border-radius: var(--radius-control); background: var(--bg-surface-200); }
+.paste-chip-bar { display: flex; align-items: center; justify-content: space-between; padding-right: 2px; }
+.paste-chip-toggle { display: inline-flex; align-items: center; gap: 6px; height: var(--control-sm); padding: 0 8px; color: var(--fg-light); }
+.paste-chip-preview { margin: 0; padding: 6px 10px; max-height: 200px; overflow: auto; font: 400 var(--text-code) / var(--leading-code) var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; border-top: 1px solid var(--border-default); }
+
+/* ---- Status row ------------------------------------------------------------------------- */
+.status-row { display: flex; align-items: center; gap: 4px; padding: 4px 6px 6px; flex-wrap: wrap; }
+.status-spacer { flex: 1; }
+.chip-group { display: inline-flex; align-items: center; }
+.status-chip {
+  display: inline-flex; align-items: center; gap: 6px; height: var(--control-sm); padding: 0 8px; border-radius: var(--radius-control);
+  color: var(--fg-light); font-size: 12px; max-width: 260px;
+}
+button.status-chip:hover { background: var(--bg-surface-300); color: var(--fg-default); }
+.status-chip.static { cursor: default; }
+.chip-icon { padding: 0; width: var(--control-sm); justify-content: center; }
+.chip-caret { padding: 0 2px; margin-left: -4px; }
+.chip-label { color: var(--fg-lighter); }
+.status-chip strong { color: var(--fg-default); font-weight: 600; }
+.chip-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
+.chip-pending { color: var(--warning); }
+.chip-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warning); flex: none; }
+.ring-track { stroke: var(--border-strong); }
+.ring-fill { stroke: var(--brand); }
+.ring[data-level='warn'] .ring-fill { stroke: var(--warning); }
+.ring[data-level='danger'] .ring-fill { stroke: var(--destructive); }
+
+/* ---- Popover content -------------------------------------------------------------------- */
+.model-pop { display: grid; gap: var(--space-1); min-width: 260px; max-width: 340px; }
+.pop-title { font-weight: 600; padding: 2px 6px; }
+.pop-section { color: var(--fg-lighter); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; padding: var(--space-2) 6px 0; }
+.pop-note { margin: 0; padding: 4px 6px; color: var(--warning); font-size: 12px; }
+.pop-facts { display: grid; grid-template-columns: max-content 1fr; gap: 2px var(--space-3); margin: 0; padding: 2px 6px; }
+.pop-facts dt { color: var(--fg-lighter); }
+.pop-facts dd { margin: 0; }
+.menu { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+.menu-item { display: flex; align-items: center; gap: var(--space-2); width: 100%; min-height: var(--control-md); padding: 2px 8px; border-radius: var(--radius-control); text-align: left; }
+.menu-item:hover { background: var(--bg-surface-300); }
+.menu-item[aria-checked='true'] { background: var(--brand-soft); color: var(--brand); }
+.menu-item[aria-disabled='true'] { opacity: 0.55; cursor: not-allowed; }
+.menu-item .hint { margin: 0 0 0 auto; }
+.seg { display: flex; gap: 2px; flex-wrap: wrap; padding: 0 4px; }
+.seg-item { height: var(--control-sm); padding: 0 8px; border: 1px solid var(--border-default); border-radius: var(--radius-control); font-size: 12px; }
+.seg-item[aria-checked='true'] { background: var(--brand-soft); color: var(--brand); border-color: var(--brand); }
+.seg-item[aria-disabled='true'] { opacity: 0.55; cursor: not-allowed; }
+
+/* ---- Slash / mention popups ------------------------------------------------------------- */
+.popup {
+  position: absolute; left: var(--space-4); right: var(--space-4); bottom: calc(100% - var(--space-2)); z-index: 30; max-height: 280px; overflow-y: auto;
+  background: var(--bg-surface-100); border: 1px solid var(--border-default); border-radius: var(--radius-card); box-shadow: var(--shadow-pop); padding: 4px;
+}
+.popup[role='status'], .popup[role='alert'] { padding: var(--space-2) var(--space-3); color: var(--fg-light); }
+.popup-group { color: var(--fg-lighter); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; padding: 6px 8px 2px; }
+.popup-item { display: flex; align-items: baseline; gap: var(--space-3); padding: 4px 8px; border-radius: var(--radius-control); cursor: pointer; }
+.popup-item[data-active='true'] { background: var(--brand-soft); }
+.popup-item[aria-disabled='true'] { opacity: 0.6; cursor: default; }
+.popup-name { font-family: var(--font-mono); font-size: 12.5px; flex: none; }
+.popup-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.popup-hint { color: var(--fg-lighter); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.popup-foot { color: var(--fg-lighter); font-size: 11px; padding: 4px 8px; }

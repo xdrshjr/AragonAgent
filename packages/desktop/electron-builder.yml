@@ -1,0 +1,57 @@
+# Installer configuration. The engine ships as REAL files in `resources/engine` (not in the asar):
+# the session hosts and the sessions worker are started from there, and the engine's own
+# runtime/*.cjs and skill assets need real paths. `stage.mjs` builds that directory and
+# `after-pack.cjs` places it.
+appId: com.aragonagent.desktop
+productName: AragonAgent
+copyright: AragonAgent contributors
+directories:
+  output: release
+  buildResources: build
+asar: true
+# The engine (core/tui/cli and their dependencies, all of which this package lists as dependencies
+# so the workspace resolves them in development) must NOT be copied into app.asar: the installed app
+# loads it from resources/engine, and a second copy inside the asar is dead weight with a wrong
+# native-addon story. Only what the main process itself imports survives: `fflate`.
+npmRebuild: false
+nodeGypRebuild: false
+buildDependenciesFromSource: false
+files:
+  - dist/main/**
+  - dist/shared/**
+  - dist/preload/index.cjs
+  - dist/renderer/**
+  - package.json
+  - '!node_modules/**'
+  - node_modules/fflate/**
+  - '!**/*.map'
+  - '!**/__tests__/**'
+  - '!**/*.test.*'
+# Update NOTIFICATION settings are fixed when the app is built, so neither the manifest nor
+# desktop-state.json can widen them. No feed exists yet; supply one by adding, in CI:
+#   extraMetadata:
+#     updates:
+#       feedUrl: https://<host>/<path>/latest.json     # https only
+#       allowedHosts: [<host>]                        # the ONLY hosts a download/notes URL may use
+# Left out on purpose: a placeholder host here would ship in every build. With no feed the Updates
+# page says so. Fuses are NOT set here: `scripts/dist.mjs` passes them from scripts/lib/fuses.mjs.
+# The engine is copied by scripts/after-pack.cjs, NOT by extraResources (see that file).
+afterPack: scripts/after-pack.cjs
+win:
+  target:
+    - { target: nsis, arch: [x64] }
+  icon: build/icon.png
+nsis:
+  oneClick: false
+  perMachine: false            # user-level install: no administrator prompt
+  allowToChangeInstallationDirectory: true
+mac:
+  target: [dmg, zip]
+  category: public.app-category.developer-tools
+  hardenedRuntime: true
+  # identity / notarize are intentionally unset: they need a signing certificate that is not part of
+  # this repository. Fill them in CI (see README, "Signing").
+linux:
+  target: [AppImage, deb]
+  category: Development
+  icon: build/icon.png

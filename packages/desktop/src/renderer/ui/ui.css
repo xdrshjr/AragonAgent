@@ -1,0 +1,134 @@
+/* Base components. Everything reads tokens; there are no raw colours in here. */
+
+/* ---- Buttons ---------------------------------------------------------------------------- */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: var(--control-md); padding: 0 12px; border-radius: var(--radius-control);
+  border: 1px solid var(--border-strong); background: var(--bg-surface-200); color: var(--fg-default);
+  font-weight: 500; white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
+}
+.btn:hover:not(:disabled) { background: var(--bg-surface-300); }
+.btn:disabled { opacity: 0.5; }
+.btn[data-size='sm'] { height: var(--control-sm); padding: 0 8px; font-size: 12px; }
+.btn[data-size='lg'] { height: var(--control-lg); padding: 0 16px; }
+.btn[data-variant='primary'] { background: var(--brand); border-color: var(--brand); color: var(--brand-fg); }
+.btn[data-variant='primary']:hover:not(:disabled) { background: var(--brand-hover); border-color: var(--brand-hover); }
+.btn[data-variant='ghost'] { background: transparent; border-color: transparent; }
+.btn[data-variant='ghost']:hover:not(:disabled) { background: var(--bg-surface-300); }
+.btn[data-variant='danger'] { background: var(--destructive-soft); border-color: var(--destructive); color: var(--destructive); }
+.btn[data-variant='danger']:hover:not(:disabled) { background: var(--destructive); color: var(--bg-default); }
+
+.icon-btn {
+  display: inline-grid; place-items: center; width: var(--control-md); height: var(--control-md);
+  border-radius: var(--radius-control); color: var(--fg-light);
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.icon-btn[data-size='sm'] { width: var(--control-sm); height: var(--control-sm); }
+.icon-btn:hover:not(:disabled) { background: var(--bg-surface-300); color: var(--fg-default); }
+.icon-btn[data-active='true'] { color: var(--brand); background: var(--brand-soft); }
+.icon-btn:disabled { opacity: 0.45; }
+
+/* ---- Fields ----------------------------------------------------------------------------- */
+.field {
+  width: 100%; height: var(--control-md); padding: 0 10px; border-radius: var(--radius-control);
+  border: 1px solid var(--border-strong); background: var(--bg-surface-100); color: var(--fg-default);
+  user-select: text;
+}
+textarea.field { height: auto; padding: 8px 10px; resize: vertical; line-height: var(--leading-ui); }
+.field::placeholder { color: var(--fg-lighter); }
+.field[aria-invalid='true'] { border-color: var(--destructive); }
+.field:disabled { opacity: 0.55; }
+select.field { appearance: none; padding-right: 26px; background-image: linear-gradient(45deg, transparent 50%, var(--fg-light) 50%), linear-gradient(135deg, var(--fg-light) 50%, transparent 50%); background-position: calc(100% - 14px) 12px, calc(100% - 9px) 12px; background-size: 5px 5px; background-repeat: no-repeat; }
+
+.label { display: block; font-weight: 500; margin-bottom: 4px; color: var(--fg-default); }
+.hint { color: var(--fg-lighter); font-size: 12px; margin-top: 4px; }
+.error-text { color: var(--destructive); font-size: 12px; margin-top: 4px; }
+
+.switch {
+  width: 32px; height: 18px; border-radius: 9px; background: var(--bg-surface-300);
+  border: 1px solid var(--border-strong); position: relative; flex: none;
+  transition: background var(--dur-fast) var(--ease);
+}
+.switch[data-state='checked'] { background: var(--brand); border-color: var(--brand); }
+.switch-thumb {
+  display: block; width: 12px; height: 12px; border-radius: 50%; background: var(--fg-default);
+  transform: translateX(2px); transition: transform var(--dur-fast) var(--ease);
+}
+.switch[data-state='checked'] .switch-thumb { transform: translateX(16px); background: var(--brand-fg); }
+
+/* ---- Small things ----------------------------------------------------------------------- */
+.badge {
+  display: inline-flex; align-items: center; gap: 4px; height: 18px; padding: 0 6px; border-radius: 9px;
+  font-size: 11px; font-weight: 500; background: var(--bg-surface-300); color: var(--fg-light);
+}
+.badge[data-tone='brand'] { background: var(--brand-soft); color: var(--brand); }
+.badge[data-tone='warning'] { background: var(--warning-soft); color: var(--warning); }
+.badge[data-tone='danger'] { background: var(--destructive-soft); color: var(--destructive); }
+.badge[data-tone='info'] { background: var(--info-soft); color: var(--info); }
+
+.kbd {
+  display: inline-flex; align-items: center; height: 18px; padding: 0 5px; border-radius: 4px;
+  border: 1px solid var(--border-strong); border-bottom-width: 2px; background: var(--bg-surface-200);
+  font: 500 11px / 1 var(--font-ui); color: var(--fg-light);
+}
+
+.skeleton {
+  border-radius: var(--radius-control); background: linear-gradient(90deg, var(--bg-surface-200) 0, var(--bg-surface-300) 100px, var(--bg-surface-200) 200px);
+  background-size: 400px 100%; animation: shimmer 1.4s linear infinite;
+}
+.spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border-strong); border-top-color: var(--brand); animation: spin 0.8s linear infinite; }
+
+/* A status is a DOT PLUS A SHAPE/LABEL, never colour alone: the dot's `data-kind` also changes
+   its fill/outline so it reads in forced-colors and for colour-blind users. */
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
+.dot[data-kind='running'] { background: var(--brand); animation: breathe 1.6s ease-in-out infinite; }
+.dot[data-kind='ready'] { background: transparent; border: 1.5px solid var(--brand); }
+.dot[data-kind='parked'] { background: transparent; border: 1.5px dashed var(--fg-lighter); }
+.dot[data-kind='waiting'] { background: var(--warning); border-radius: 2px; }
+.dot[data-kind='error'] { background: var(--destructive); clip-path: polygon(50% 0, 100% 100%, 0 100%); border-radius: 0; }
+.dot[data-kind='locked'] { background: var(--fg-lighter); border-radius: 2px; clip-path: inset(25% 0 0 0); }
+.dot[data-kind='idle'] { background: var(--fg-muted); }
+
+/* ---- Overlays --------------------------------------------------------------------------- */
+.overlay-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.5); z-index: 50; }
+.dialog {
+  position: fixed; z-index: 51; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 64px); overflow: auto;
+  background: var(--bg-surface-100); border: 1px solid var(--border-default); border-radius: var(--radius-pop);
+  box-shadow: var(--shadow-pop); padding: var(--space-5);
+}
+.dialog[data-size='lg'] { width: min(720px, calc(100vw - 32px)); }
+.dialog-title { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+.dialog-desc { margin: 0 0 var(--space-4); color: var(--fg-light); }
+.dialog-actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-5); }
+
+.popover {
+  z-index: 60; min-width: 220px; background: var(--bg-surface-100); border: 1px solid var(--border-default);
+  border-radius: var(--radius-card); box-shadow: var(--shadow-pop); padding: var(--space-2);
+}
+.tooltip {
+  z-index: 70; padding: 4px 8px; border-radius: var(--radius-control); font-size: 12px;
+  background: var(--bg-surface-300); color: var(--fg-default); border: 1px solid var(--border-default); box-shadow: var(--shadow-pop);
+}
+
+/* Tabs never wrap or shrink: a strip that is too narrow scrolls instead. The divider is an inset
+   shadow, not a border + negative margin, because overflow-x makes the box clip its own border row. */
+.tabs-list {
+  position: relative; /* the offset parent of its tabs: revealActiveTab reads their offsetLeft */
+  display: flex; flex-wrap: nowrap; gap: 2px; overflow-x: auto; scrollbar-width: none;
+  box-shadow: inset 0 -1px 0 var(--border-default);
+}
+.tabs-list::-webkit-scrollbar { display: none; }
+.tabs-list[data-overflow='both'] { mask-image: linear-gradient(to right, transparent, black 16px, black calc(100% - 16px), transparent); }
+.tabs-list[data-overflow='start'] { mask-image: linear-gradient(to right, transparent, black 16px); }
+.tabs-list[data-overflow='end'] { mask-image: linear-gradient(to right, black calc(100% - 16px), transparent); }
+@media (forced-colors: active) { .tabs-list { mask-image: none !important; } }
+.tab {
+  flex: none; white-space: nowrap; height: 32px; padding: 0 12px; color: var(--fg-light);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.tab:hover { color: var(--fg-default); }
+.tab[data-state='active'] { color: var(--fg-default); box-shadow: inset 0 -2px 0 var(--brand); }
+
+.error-panel { padding: var(--space-4); border: 1px solid var(--destructive); border-radius: var(--radius-card); background: var(--destructive-soft); }

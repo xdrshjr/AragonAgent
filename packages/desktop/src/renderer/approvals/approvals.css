@@ -1,0 +1,41 @@
+/* Approvals: the inline card, the sticky reminder, and the dialogs' content. Tokens only. */
+.approval {
+  margin: var(--space-2) 0; padding: var(--space-3); border: 1px solid var(--warning); border-radius: var(--radius-card);
+  background: var(--bg-surface-100); display: grid; gap: var(--space-2);
+}
+.approval-head { display: flex; align-items: center; gap: var(--space-2); }
+.approval-queue { margin-left: auto; color: var(--fg-lighter); font-size: 12px; }
+.approval-warning { display: flex; align-items: center; gap: var(--space-2); color: var(--warning); background: var(--warning-soft); padding: 4px var(--space-2); border-radius: var(--radius-control); font-size: 12px; }
+.approval-summary {
+  margin: 0; padding: var(--space-2) var(--space-3); max-height: 260px; overflow: auto; border-radius: var(--radius-control);
+  background: var(--bg-surface-200); border: 1px solid var(--border-default); white-space: pre-wrap; overflow-wrap: anywhere;
+  font: 400 var(--text-code) / var(--leading-code) var(--font-mono);
+}
+.approval-summary mark.danger { background: var(--warning-soft); color: var(--warning); outline: 1px solid var(--warning); border-radius: 2px; }
+.approval-summary mark.danger[data-kind='recursive-delete'], .approval-summary mark.danger[data-kind='disk-write'] {
+  background: var(--destructive-soft); color: var(--destructive); outline-color: var(--destructive);
+}
+.approval-reason { display: grid; gap: 4px; color: var(--fg-light); font-size: 12px; }
+.approval-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
+.approval[data-armed='false'] .approval-actions .btn, .btn[aria-disabled='true'] { opacity: 0.5; cursor: not-allowed; }
+.approval-bar {
+  display: flex; align-items: center; gap: var(--space-2); flex: none; padding: 6px var(--space-4); color: var(--warning);
+  background: var(--warning-soft); border-top: 1px solid var(--warning); border-bottom: 1px solid var(--warning);
+}
+.approval-bar span { flex: 1; }
+
+.ask-question { border: 0; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+.ask-question legend { padding: 0; font-weight: 600; margin-bottom: var(--space-1); }
+.ask-option { display: flex; gap: var(--space-2); align-items: flex-start; padding: 6px var(--space-2); border: 1px solid var(--border-default); border-radius: var(--radius-control); cursor: pointer; }
+.ask-option[data-checked='true'] { border-color: var(--brand); background: var(--brand-soft); }
+.ask-option input { margin-top: 3px; accent-color: var(--brand); }
+.ask-option-text { display: grid; gap: 2px; }
+.ask-explain { display: grid; gap: 4px; }
+.plan-body { display: grid; gap: var(--space-3); }
+.plan-steps { margin: 0; padding-left: 1.4em; display: grid; gap: var(--space-2); }
+.plan-steps p { margin: 2px 0 0; color: var(--fg-light); }
+.plan-section h3 { margin: 0 0 4px; font-size: 12px; color: var(--fg-lighter); text-transform: uppercase; letter-spacing: 0.04em; }
+.plan-section ul { margin: 0; padding-left: 1.2em; }
+.skill-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px var(--space-3); margin: 0 0 var(--space-3); }
+.skill-facts dt { color: var(--fg-lighter); }
+.skill-facts dd { margin: 0; overflow-wrap: anywhere; }

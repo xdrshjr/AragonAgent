@@ -1,0 +1,141 @@
+/*
+ * Design tokens (spec appendix B): Supabase-Studio-style neutrals and ONE brand green.
+ * Neutral greys carry ~95% of the screen; green is reserved for the primary action, "online /
+ * selected" and focus. Information is carried by type hierarchy and 1px borders, not by shadow
+ * or colour blocks. The contrast of every foreground/background pair below is COMPUTED by
+ * `tokens.test.ts`, not eyeballed: body >= 7:1, secondary >= 4.5:1, control borders >= 3:1.
+ */
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg-default: #121212;
+  --bg-surface-100: #171717;
+  --bg-surface-200: #1f1f1f;
+  --bg-surface-300: #292929;
+  --border-default: #2e2e2e;
+  --border-strong: #787878;
+  --fg-default: #fafafa;
+  --fg-light: #b4b4b4;
+  --fg-lighter: #9a9a9a;
+  --fg-muted: #6b6b6b;
+  --brand: #3ecf8e;
+  --brand-hover: #5fe0a5;
+  --brand-fg: #0b2a1c;
+  --brand-soft: rgb(62 207 142 / 0.14);
+  --destructive: #ff6369;
+  --destructive-soft: rgb(229 72 77 / 0.16);
+  --warning: #f5a524;
+  --warning-soft: rgb(245 165 36 / 0.16);
+  --info: #52a9ff;
+  --info-soft: rgb(82 169 255 / 0.14);
+  --shadow-pop: 0 8px 24px rgb(0 0 0 / 0.32);
+  --focus-ring: rgb(62 207 142 / 0.45);
+  --selection: rgb(62 207 142 / 0.28);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg-default: #fcfcfc;
+  --bg-surface-100: #ffffff;
+  --bg-surface-200: #f7f7f7;
+  --bg-surface-300: #f0f0f0;
+  --border-default: #e6e6e6;
+  --border-strong: #8a8a8a;
+  --fg-default: #171717;
+  --fg-light: #525252;
+  --fg-lighter: #6b6b6b;
+  --fg-muted: #9a9a9a;
+  --brand: #14804f;
+  --brand-hover: #0f6a41;
+  --brand-fg: #ffffff;
+  --brand-soft: rgb(20 128 79 / 0.1);
+  --destructive: #c0292e;
+  --destructive-soft: rgb(192 41 46 / 0.1);
+  --warning: #96600a;
+  --warning-soft: rgb(150 96 10 / 0.12);
+  --info: #1a6fc9;
+  --info-soft: rgb(26 111 201 / 0.1);
+  --shadow-pop: 0 8px 24px rgb(0 0 0 / 0.12);
+  --focus-ring: rgb(20 128 79 / 0.4);
+  --selection: rgb(20 128 79 / 0.2);
+}
+
+/* `warm` swaps the neutrals' hue only (about 40-60 degrees, saturation <= 6%); brand and every
+   interactive state are unchanged, so the product still reads as one product. */
+:root[data-theme='warm'] {
+  color-scheme: dark;
+  --bg-default: #131210;
+  --bg-surface-100: #191815;
+  --bg-surface-200: #211f1b;
+  --bg-surface-300: #2b2924;
+  --border-default: #33302a;
+  --border-strong: #7c7769;
+  --fg-default: #faf8f3;
+  --fg-light: #b8b3a7;
+  --fg-lighter: #9d978a;
+  --fg-muted: #6e695e;
+}
+
+:root {
+  --font-ui: 'Inter', system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei UI', 'Noto Sans CJK SC', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, 'Noto Sans Mono CJK SC', monospace;
+  --text-ui: 13px;
+  --text-body: 14px;
+  --text-code: 12.5px;
+  --leading-ui: 1.5;
+  --leading-body: 1.65;
+  --leading-code: 1.55;
+  --radius-control: 6px;
+  --radius-card: 8px;
+  --radius-pop: 12px;
+  --control-sm: 24px;
+  --control-md: 28px;
+  --control-lg: 32px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --dur-fast: 120ms;
+  --dur-base: 160ms;
+  --dur-slow: 200ms;
+  --titlebar-h: 40px;
+  --rail-w: 48px;
+  --read-width: 760px;
+  --row-h: 36px;
+}
+
+:root[data-density='compact'] {
+  --read-width: 880px;
+  --row-h: 30px;
+}
+
+/* Either the OS preference OR the user's own setting stops motion: both are first-class. */
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-fast: 0ms; --dur-base: 0ms; --dur-slow: 0ms; }
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
+:root[data-reduced-motion='true'] { --dur-fast: 0ms; --dur-base: 0ms; --dur-slow: 0ms; }
+:root[data-reduced-motion='true'] *,
+:root[data-reduced-motion='true'] *::before,
+:root[data-reduced-motion='true'] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+}
+
+@media (forced-colors: active) {
+  :root {
+    --border-default: CanvasText;
+    --border-strong: CanvasText;
+    --brand: Highlight;
+    --brand-fg: HighlightText;
+    --focus-ring: Highlight;
+  }
+}

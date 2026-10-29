@@ -1,0 +1,109 @@
+/* Design tokens — the only file with raw values (§3.2). Depth comes from three
+   luminance steps (bg → surface → elevated), so no component needs a coloured
+   border or a stacked shadow to show layering. :root holds the dark default. */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces: page floor, card/sidebar, floating layer + code. */
+  --bg: #0B0F16;
+  --surface: #11161F;
+  --elevated: #171D28;
+
+  /* 1 px decoration at 1.37:1 — never a text colour (§3.2, P2-3). */
+  --line: #242C3A;
+
+  --text: #E7ECF4;
+  --text-2: #AEB9CB;
+  --text-3: #8593AB;
+
+  /* One brand hue: links, the current nav item and the focus ring only. */
+  --accent: #7EA6E0;
+  --accent-2: #8FB6EA;
+
+  /* Semantic colours appear only on labels meaning ok / caution / danger. */
+  --ok: #5FB894;
+  --warn: #E0B063;
+  --bad: #E5797C;
+
+  /* Code: 12 classes, each measured against --elevated (§3.2). */
+  --c-key: #C4A0F0;
+  --c-str: #93C98F;
+  --c-num: #D9B26A;
+  --c-com: #8593AB;
+  --c-fn: #7EA6E0;
+  --c-type: #6FC3B4;
+  --c-attr: #C9A66B;
+  --c-punct: #AEB9CB;
+  --c-add: #5FB894;
+  --c-del: #E5797C;
+  --c-flag: #7EA6E0;
+  --c-out: #AEB9CB;
+
+  /* System stacks only: zero requests, zero font-swap shift (§10.1). CJK faces
+     are listed so Chinese never falls back to a Latin-only face. */
+  --font-sans: ui-sans-serif, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, "Noto Sans Mono CJK SC", monospace;
+
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 10px;
+
+  /* 4 px base scale — the eight steps behind the §3.3 rhythm. */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 40px;
+  --sp-8: 64px;
+
+  /* Only layers that float above the page cast a shadow (§3.1.3). */
+  --shadow: 0 1px 2px rgb(0 0 0 / .28), 0 12px 32px rgb(0 0 0 / .26);
+
+  /* Three durations, no more (§3.7). Only opacity / transform / colour animate. */
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+  --dur-3: 240ms;
+  --ease: cubic-bezier(.2, .8, .2, 1);
+
+  /* Whole transition lists, so no component can invent a fourth duration. */
+  --t-color: color var(--dur-1) linear, background-color var(--dur-1) linear,
+    border-color var(--dur-1) linear;
+  --t-move: opacity var(--dur-2) ease-out, transform var(--dur-3) var(--ease);
+
+  --header-h: 56px;
+  --nav-w: 264px;
+  --toc-w: 220px;
+  --content-max: 72ch;
+}
+
+/* Light theme: colours only. Radii, motion and metrics are theme-invariant, so
+   this block stays exactly the 24 measured pairs of §3.2 and nothing else. */
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #F7F8FA;
+  --surface: #FFFFFF;
+  --elevated: #F1F3F7;
+  --line: #DDE2EA;
+  --text: #131820;
+  --text-2: #414B5C;
+  --text-3: #5F6B7E;
+  --accent: #2C5C9B;
+  --accent-2: #234B80;
+  --ok: #1F7A57;
+  --warn: #8A5A15;
+  --bad: #A63A3A;
+  --c-key: #6D3FA8;
+  --c-str: #2F6B3A;
+  --c-num: #7A5310;
+  --c-com: #5F6B7E;
+  --c-fn: #2C5C9B;
+  --c-type: #1F6B62;
+  --c-attr: #6B4A12;
+  --c-punct: #414B5C;
+  --c-add: #1F7A57;
+  --c-del: #A63A3A;
+  --c-flag: #234B80;
+  --c-out: #414B5C;
+}

@@ -1,0 +1,24 @@
+/* Command palette and shortcut sheet. */
+.palette {
+  position: fixed; z-index: 51; top: 14vh; left: 50%; transform: translateX(-50%);
+  width: min(620px, calc(100vw - 32px)); background: var(--bg-surface-100); border: 1px solid var(--border-default);
+  border-radius: var(--radius-pop); box-shadow: var(--shadow-pop); overflow: hidden;
+}
+.palette-input { width: 100%; height: 44px; padding: 0 var(--space-4); border: 0; border-bottom: 1px solid var(--border-default); background: transparent; color: var(--fg-default); font-size: 14px; }
+.palette-input:focus-visible { outline: none; box-shadow: none; border-bottom-color: var(--brand); }
+.palette-list { max-height: min(420px, 60vh); overflow-y: auto; padding: var(--space-2); }
+.palette-empty { padding: var(--space-5); text-align: center; color: var(--fg-lighter); }
+[cmdk-group-heading] { padding: var(--space-2) var(--space-2) 2px; font-size: 11px; font-weight: 600; color: var(--fg-lighter); text-transform: uppercase; letter-spacing: 0.04em; }
+.palette-item { display: flex; align-items: center; gap: var(--space-2); height: var(--row-h); padding: 0 var(--space-2); border-radius: var(--radius-control); cursor: pointer; color: var(--fg-default); }
+.palette-item[data-selected='true'] { background: var(--bg-surface-300); box-shadow: inset 2px 0 0 var(--brand); }
+.palette-icon { display: inline-grid; place-items: center; color: var(--fg-light); flex: none; }
+.palette-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-hint { flex: none; margin-left: auto; color: var(--fg-lighter); font-size: 12px; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-keys { display: inline-flex; gap: 4px; }
+
+.shortcuts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-5); }
+.shortcuts-grid h3 { margin: 0 0 var(--space-2); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-light); }
+.shortcuts-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.shortcuts-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.shortcuts-list .keys { display: inline-flex; gap: 4px; flex: none; }
+@media (max-width: 640px) { .shortcuts-grid { grid-template-columns: 1fr; } }

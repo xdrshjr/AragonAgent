@@ -1,0 +1,17 @@
+{
+  "name": "@aragon-agent/guide-doc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AragonAgent 文档站：零依赖静态站点（API 参考与使用指南）",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "node build.mjs --phase all",
+    "check": "node check.mjs --model --strict",
+    "check:dist": "node check.mjs --dist",
+    "serve": "node serve.mjs",
+    "test": "node --test tests/*.test.mjs"
+  }
+}

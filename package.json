@@ -1,0 +1,45 @@
+{
+  "name": "@aragon-agent/oss",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Open-source UI layer for the AragonAgent coding agent: the Ink/React terminal UI (@aragon-agent/tui) and the Electron desktop app (@aragon-agent/desktop), running on the published @aragon-agent/core engine.",
+  "license": "MIT",
+  "homepage": "https://github.com/xdrshjr/AragonAgent#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xdrshjr/AragonAgent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xdrshjr/AragonAgent/issues"
+  },
+  "keywords": [
+    "coding-agent",
+    "ai-agent",
+    "terminal",
+    "tui",
+    "ink",
+    "react",
+    "electron",
+    "claude-code-alternative",
+    "codex-cli",
+    "agent-ui",
+    "typescript"
+  ],
+  "workspaces": [
+    "packages/tui",
+    "packages/desktop"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "npm run build:tui && npm run build:desktop",
+    "build:tui": "npm run build -w packages/tui",
+    "build:desktop": "npm run build -w packages/desktop",
+    "test:tui": "npm test -w packages/tui",
+    "test:desktop": "npm test -w packages/desktop",
+    "typecheck:tui": "npm run typecheck -w packages/tui",
+    "typecheck:desktop": "npm run typecheck -w packages/desktop",
+    "pack:desktop": "powershell -NoProfile -ExecutionPolicy Bypass -File ./packages/desktop/pack-desktop.ps1"
+  }
+}

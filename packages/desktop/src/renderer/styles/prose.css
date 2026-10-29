@@ -1,0 +1,23 @@
+/* Markdown body of an assistant message: 14px / 1.65, modest vertical rhythm. */
+.prose { font-size: var(--text-body); line-height: var(--leading-body); color: var(--fg-default); overflow-wrap: anywhere; }
+.prose > :first-child { margin-top: 0; }
+.prose > :last-child { margin-bottom: 0; }
+.prose p, .prose ul, .prose ol, .prose pre, .prose blockquote, .prose table { margin: 0 0 0.85em; }
+.prose h1, .prose h2, .prose h3, .prose h4 { line-height: 1.3; margin: 1.3em 0 0.5em; font-weight: 600; }
+.prose h1 { font-size: 1.35em; }
+.prose h2 { font-size: 1.2em; }
+.prose h3 { font-size: 1.08em; }
+.prose h4 { font-size: 1em; }
+.prose ul, .prose ol { padding-left: 1.4em; }
+.prose li + li { margin-top: 0.25em; }
+.prose a { color: var(--brand); text-decoration: underline; text-underline-offset: 2px; }
+.prose code {
+  font: 400 var(--text-code) / var(--leading-code) var(--font-mono);
+  background: var(--bg-surface-300); padding: 0.1em 0.35em; border-radius: 4px;
+}
+.prose pre code { background: none; padding: 0; }
+.prose blockquote { border-left: 2px solid var(--border-strong); padding-left: 0.9em; color: var(--fg-light); }
+.prose table { border-collapse: collapse; display: block; overflow-x: auto; }
+.prose th, .prose td { border: 1px solid var(--border-default); padding: 0.35em 0.7em; text-align: left; }
+.prose hr { border: 0; border-top: 1px solid var(--border-default); margin: 1.2em 0; }
+.prose img { max-width: 100%; border-radius: var(--radius-card); }

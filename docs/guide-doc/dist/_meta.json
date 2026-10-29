@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "site": "AragonAgent 文档",
+  "builtAt": "2026-10-22T09:45:07.658Z",
+  "generator": "docs/guide-doc/build.mjs",
+  "versions": {
+    "cli": "0.6.39",
+    "core": "0.2.51"
+  },
+  "commit": "dev",
+  "base": "/",
+  "phase": "all",
+  "pages": 56,
+  "phaseCounts": {
+    "A": 29,
+    "B": 27
+  },
+  "assetHash": "6fc44229",
+  "warnCount": 0,
+  "counterExampleLines": 0,
+  "truncatedSections": 102,
+  "searchIndexBytes": 166183,
+  "searchIndexOverBudget": false,
+  "staleDirs": []
+}

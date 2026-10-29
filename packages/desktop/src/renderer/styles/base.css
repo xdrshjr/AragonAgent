@@ -1,0 +1,49 @@
+@import './tokens.css';
+@import './prose.css';
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  background: var(--bg-default);
+  color: var(--fg-default);
+  font: 400 var(--text-ui) / var(--leading-ui) var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+  user-select: none; /* the shell is chrome; selectable text opts back in below */
+}
+::selection { background: var(--selection); }
+.selectable, .selectable * { user-select: text; }
+
+button, input, textarea, select { font: inherit; color: inherit; }
+button { background: none; border: 0; padding: 0; cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+
+/* One focus treatment everywhere: a 2px ring in the brand colour at 45% plus a 1px solid
+   inner line, so it stays visible on any background (forced-colors falls back to Highlight). */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+  box-shadow: 0 0 0 1px var(--brand);
+}
+
+/* Window dragging: the title bar drags, every control inside it must not. */
+.drag { -webkit-app-region: drag; }
+.no-drag, .drag button, .drag input, .drag a, .drag [role='button'] { -webkit-app-region: no-drag; }
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+* { scrollbar-width: thin; scrollbar-color: var(--bg-surface-300) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  background: var(--bg-surface-300); border-radius: 10px;
+  border: 2px solid transparent; background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--border-strong); background-clip: content-box; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+@keyframes shimmer { 0% { background-position: -200px 0; } 100% { background-position: 200px 0; } }

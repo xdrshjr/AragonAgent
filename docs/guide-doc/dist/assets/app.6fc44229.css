@@ -1,0 +1,991 @@
+/* tokens.css */
+/* Design tokens — the only file with raw values (§3.2). Depth comes from three
+   luminance steps (bg → surface → elevated), so no component needs a coloured
+   border or a stacked shadow to show layering. :root holds the dark default. */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces: page floor, card/sidebar, floating layer + code. */
+  --bg: #0B0F16;
+  --surface: #11161F;
+  --elevated: #171D28;
+
+  /* 1 px decoration at 1.37:1 — never a text colour (§3.2, P2-3). */
+  --line: #242C3A;
+
+  --text: #E7ECF4;
+  --text-2: #AEB9CB;
+  --text-3: #8593AB;
+
+  /* One brand hue: links, the current nav item and the focus ring only. */
+  --accent: #7EA6E0;
+  --accent-2: #8FB6EA;
+
+  /* Semantic colours appear only on labels meaning ok / caution / danger. */
+  --ok: #5FB894;
+  --warn: #E0B063;
+  --bad: #E5797C;
+
+  /* Code: 12 classes, each measured against --elevated (§3.2). */
+  --c-key: #C4A0F0;
+  --c-str: #93C98F;
+  --c-num: #D9B26A;
+  --c-com: #8593AB;
+  --c-fn: #7EA6E0;
+  --c-type: #6FC3B4;
+  --c-attr: #C9A66B;
+  --c-punct: #AEB9CB;
+  --c-add: #5FB894;
+  --c-del: #E5797C;
+  --c-flag: #7EA6E0;
+  --c-out: #AEB9CB;
+
+  /* System stacks only: zero requests, zero font-swap shift (§10.1). CJK faces
+     are listed so Chinese never falls back to a Latin-only face. */
+  --font-sans: ui-sans-serif, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, "Noto Sans Mono CJK SC", monospace;
+
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 10px;
+
+  /* 4 px base scale — the eight steps behind the §3.3 rhythm. */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 40px;
+  --sp-8: 64px;
+
+  /* Only layers that float above the page cast a shadow (§3.1.3). */
+  --shadow: 0 1px 2px rgb(0 0 0 / .28), 0 12px 32px rgb(0 0 0 / .26);
+
+  /* Three durations, no more (§3.7). Only opacity / transform / colour animate. */
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+  --dur-3: 240ms;
+  --ease: cubic-bezier(.2, .8, .2, 1);
+
+  /* Whole transition lists, so no component can invent a fourth duration. */
+  --t-color: color var(--dur-1) linear, background-color var(--dur-1) linear,
+    border-color var(--dur-1) linear;
+  --t-move: opacity var(--dur-2) ease-out, transform var(--dur-3) var(--ease);
+
+  --header-h: 56px;
+  --nav-w: 264px;
+  --toc-w: 220px;
+  --content-max: 72ch;
+}
+
+/* Light theme: colours only. Radii, motion and metrics are theme-invariant, so
+   this block stays exactly the 24 measured pairs of §3.2 and nothing else. */
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #F7F8FA;
+  --surface: #FFFFFF;
+  --elevated: #F1F3F7;
+  --line: #DDE2EA;
+  --text: #131820;
+  --text-2: #414B5C;
+  --text-3: #5F6B7E;
+  --accent: #2C5C9B;
+  --accent-2: #234B80;
+  --ok: #1F7A57;
+  --warn: #8A5A15;
+  --bad: #A63A3A;
+  --c-key: #6D3FA8;
+  --c-str: #2F6B3A;
+  --c-num: #7A5310;
+  --c-com: #5F6B7E;
+  --c-fn: #2C5C9B;
+  --c-type: #1F6B62;
+  --c-attr: #6B4A12;
+  --c-punct: #414B5C;
+  --c-add: #1F7A57;
+  --c-del: #A63A3A;
+  --c-flag: #234B80;
+  --c-out: #414B5C;
+}
+
+/* layout.css */
+/* Frame — header, shell grid, nav tree, TOC, footer (§3.4). Mobile first: the
+   drawer and the single column are the base case, so a phone never parses a
+   column it cannot use. Only the four breakpoints of §3.4 exist here. */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  scroll-padding-top: 72px; /* anchors must clear the 56 px sticky header */
+  scroll-behavior: smooth;
+  background-color: var(--bg);
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* §3.7: a theme switch crossfades colour only, never layout or shadow. */
+html[data-theme] { color: var(--text); transition: var(--t-color); }
+
+body {
+  display: flex; flex-direction: column; min-height: 100vh; margin: 0;
+  background-color: var(--bg); color: var(--text);
+  font-family: var(--font-sans); font-size: 15px; font-weight: 400;
+  line-height: 1.75;
+  letter-spacing: .005em; /* §3.3: tracking instead of margin-dependent text-spacing */
+  transition: var(--t-color);
+}
+
+/* §3.6: the ring below is the only outline the whole site ever sets. */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-2); }
+img, svg { max-width: 100%; }
+
+/* First focusable element in the document (§9.4) — off-canvas until focused. */
+.skip-link {
+  position: fixed; top: var(--sp-2); left: var(--sp-2); z-index: 200;
+  padding: var(--sp-2) var(--sp-4); border-radius: var(--radius);
+  background-color: var(--elevated); color: var(--text); font-size: 13px;
+  box-shadow: var(--shadow); transform: translateY(-200%);
+  transition: transform var(--dur-2) var(--ease);
+}
+
+.skip-link:focus, .skip-link:focus-visible { transform: none; }
+
+/* Clip, don't hide: screen readers keep captions and dialog titles (§9.4). */
+.visually-hidden {
+  position: absolute !important; width: 1px; height: 1px; margin: -1px;
+  padding: 0; overflow: hidden; clip-path: inset(50%);
+  white-space: nowrap; border: 0;
+}
+
+/* Site header */
+
+/* A translucent sheet + blur keeps content readable as it slides under (§3.5). */
+.site-header {
+  position: sticky; top: 0; z-index: 50; height: var(--header-h);
+  border-bottom: 1px solid var(--line);
+  background-color: color-mix(in srgb, var(--bg) 84%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.header-inner {
+  display: flex; align-items: center; gap: var(--sp-2); width: 100%;
+  max-width: 1320px; height: 100%; margin-inline: auto;
+  padding-inline: clamp(12px, 2.5vw, 24px);
+}
+
+.brand {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  min-height: 44px; color: var(--text); font-size: 14.5px; font-weight: 600;
+}
+
+.brand:hover { color: var(--text); }
+
+.brand-mark {
+  width: 18px; height: 18px; flex: none;
+  border-radius: var(--radius-sm); background-color: var(--accent);
+}
+
+.brand-name { letter-spacing: .01em; white-space: nowrap; }
+
+.version-chip {
+  display: inline-flex; align-items: center; gap: var(--sp-1);
+  min-height: 22px; padding: 1px var(--sp-2); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); color: var(--text-3); font-size: 12.5px;
+  font-weight: 500; line-height: 1.5; letter-spacing: .01em;
+  white-space: nowrap; transition: var(--t-color);
+}
+
+.version-chip:hover { color: var(--text-2); border-color: var(--text-3); }
+
+.header-actions { display: flex; align-items: center; gap: var(--sp-1); margin-left: auto; }
+
+/* Shell */
+
+.shell { flex: 1 0 auto; width: 100%; margin-inline: auto; }
+.main { min-width: 0; padding: var(--sp-5) clamp(16px, 4vw, 24px) var(--sp-8); }
+.prose { max-width: var(--content-max); margin-inline: auto; }
+
+/* Navigation tree */
+
+.nav {
+  position: fixed; inset: 0 auto 0 0; z-index: 70;
+  display: flex; flex-direction: column; gap: var(--sp-1);
+  width: min(var(--nav-w), 86vw); padding: var(--sp-4) var(--sp-3) var(--sp-8);
+  overflow-y: auto; overscroll-behavior: contain;
+  background-color: var(--surface); box-shadow: var(--shadow);
+  transform: translateX(-100%); visibility: hidden;
+  transition: transform var(--dur-3) var(--ease), visibility 0s linear var(--dur-3);
+}
+
+/* The toggle lives in the header while the drawer lives in .shell, so no sibling
+   selector can bridge them: app.js marks the open state on #site-nav. */
+.nav.is-open { transform: none; visibility: visible; transition: transform var(--dur-3) var(--ease); }
+
+.nav-scrim {
+  display: block; position: fixed; inset: 0; z-index: 65;
+  background-color: rgb(0 0 0 / .55);
+}
+
+.nav-scrim[hidden] { display: none; }
+
+.nav-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-2); padding: 0 var(--sp-1) var(--sp-2);
+  margin-bottom: var(--sp-1); border-bottom: 1px solid var(--line);
+}
+
+.nav-title {
+  color: var(--text-3); font-size: 12.5px; font-weight: 500;
+  line-height: 1.5; letter-spacing: .01em;
+}
+
+.nav-body { display: flex; flex-direction: column; gap: var(--sp-2); }
+.nav-group { border: 0; }
+
+.nav-group-title {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-2); min-height: 32px;
+  padding: var(--sp-1) var(--sp-1) var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-sm); color: var(--text-3); font-size: 12px;
+  font-weight: 600; line-height: 1.4; letter-spacing: .06em;
+  list-style: none; cursor: pointer;
+}
+
+.nav-group-title::-webkit-details-marker { display: none; }
+.nav-group-title:hover { color: var(--text-2); }
+
+/* Chevron from two borders: no icon font, no extra request. */
+.nav-group-title::after {
+  content: ""; width: 6px; height: 6px; flex: none; margin-right: var(--sp-1);
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg); transition: transform var(--dur-2) var(--ease);
+}
+
+.nav-group[open] > .nav-group-title::after { transform: rotate(45deg); }
+
+.nav-list {
+  display: flex; flex-direction: column; gap: 1px;
+  margin: 0; padding: 0; list-style: none;
+}
+
+/* 36 px rows on desktop (§3.4); the padding keeps the hit area generous. */
+.nav-link {
+  display: flex; align-items: center; min-height: 36px;
+  padding: var(--sp-1) var(--sp-2) var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-sm); color: var(--text-2); font-size: 14px;
+  line-height: 1.45; transition: var(--t-color);
+}
+
+.nav-link:hover { color: var(--text); background-color: color-mix(in srgb, var(--text) 6%, transparent); }
+
+/* Current page: a 2 px accent bar plus a wash — never a coloured border (§3.5). */
+.nav-link.is-current {
+  color: var(--text); font-weight: 500;
+  background-color: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.nav-link.is-pending { color: var(--text-3); cursor: not-allowed; }
+
+/* TOC: collapsed into two small columns on the single-column layout (§3.4), never
+   removed — with no JS this list is the only in-page navigation there is. */
+
+.toc {
+  display: block; padding: var(--sp-3) 0 var(--sp-4);
+  border-bottom: 1px solid var(--line);
+}
+
+.toc-title { font-size: 12px; }
+.toc-list { columns: 2; column-gap: var(--sp-4); }
+.toc-item a { font-size: 12.5px; border-left-color: transparent; }
+.toc-progress { display: none; }
+
+.toc-title {
+  margin: 0 0 var(--sp-2); color: var(--text-3); font-size: 12.5px;
+  font-weight: 500; line-height: 1.5; letter-spacing: .01em;
+}
+
+.toc-list { margin: 0; padding: 0; list-style: none; }
+.toc-item { margin: 0; }
+
+.toc-item a {
+  display: block; padding: 3px var(--sp-1) 3px var(--sp-2);
+  border-left: 1px solid var(--line); color: var(--text-3);
+  font-size: 13px; line-height: 1.5; transition: var(--t-color);
+}
+
+.toc-item a:hover { color: var(--text); }
+.toc-item a.is-active { color: var(--accent); border-left-color: var(--accent); }
+.toc-level-1 a { color: var(--text-2); }
+
+/* H3 links sit one step quieter, so the two levels read apart at a glance. */
+.toc-level-2 a { padding-left: var(--sp-4); font-size: 12.5px; }
+
+.toc-progress {
+  height: 2px; margin-top: var(--sp-4); border-radius: 2px;
+  overflow: hidden; background: var(--line);
+}
+
+/* app.js writes `style.width = "N%"`; width (not scaleX) keeps that honest. */
+.toc-progress > span {
+  display: block; width: 0; height: 100%;
+  background-color: var(--accent); transition: width var(--dur-1) linear;
+}
+
+/* Footer */
+
+.site-footer { border-top: 1px solid var(--line); }
+
+.footer-inner {
+  display: flex; flex-wrap: wrap; justify-content: space-between;
+  gap: var(--sp-1) var(--sp-5); max-width: 1320px; margin-inline: auto;
+  padding: var(--sp-5) clamp(12px, 2.5vw, 24px); color: var(--text-3);
+  font-size: 12.5px; font-weight: 500; line-height: 1.5; letter-spacing: .01em;
+}
+
+.footer-meta, .footer-license { margin: 0; }
+.footer-license a { color: var(--text-2); }
+.footer-license a:hover { color: var(--accent); }
+
+/* Two columns: 900–1199 — the TOC leaves the rail, joins the flow */
+
+@media (min-width: 900px) {
+  .shell {
+    display: grid; grid-template-columns: 240px minmax(0, 1fr);
+    grid-template-areas: "nav toc" "nav main";
+    align-items: start; gap: 0 var(--sp-6); max-width: 1100px;
+  }
+
+  /* `sticky`, not `fixed`: the page stays the scrollport, so the footer remains
+     reachable and Ctrl+F can still find text above the fold. */
+  .nav {
+    position: sticky; top: var(--header-h); grid-area: nav; inset: auto;
+    width: auto; max-height: calc(100vh - var(--header-h));
+    padding: var(--sp-5) var(--sp-3) var(--sp-6) 0; overflow-y: auto;
+    background-color: transparent; box-shadow: none;
+    transform: none; transition: none;
+  }
+
+  .nav-scrim, .nav-scrim[hidden] { display: none; }
+
+  /* Two classes: layout.css loads before components.css, so one class could not
+     out-weigh the .icon-btn display rule in the later sheet. */
+  .icon-btn.nav-toggle, .icon-btn.nav-close { display: none; }
+
+  .toc {
+    display: block; grid-area: toc; padding: var(--sp-5) 0 var(--sp-3);
+    border-bottom: 1px solid var(--line);
+  }
+
+  /* Collapsed reading aid: two columns of links, not a 60-row list. */
+  .toc-list { columns: 2; column-gap: var(--sp-5); }
+
+  .main { grid-area: main; padding: var(--sp-6) 0 var(--sp-8); }
+  .header-inner { padding-inline: clamp(16px, 2.5vw, 32px); }
+}
+
+/* Three columns: ≥1200 — nav │ main (≤72ch) │ toc */
+
+@media (min-width: 1200px) {
+  .shell {
+    max-width: 1320px;
+    /* 264 = --nav-w, 220 = --toc-w; written literally to match §3.4. */
+    grid-template-columns: 264px minmax(0, 1fr) 220px;
+    grid-template-areas: "nav main toc"; gap: 40px;
+  }
+
+  .nav { padding-right: 0; scrollbar-width: thin; }
+
+  .toc {
+    position: sticky; top: var(--header-h); width: var(--toc-w);
+    max-height: calc(100vh - var(--header-h));
+    padding: var(--sp-6) 0 var(--sp-8); overflow-y: auto;
+    border-bottom: 0; scrollbar-width: thin;
+  }
+
+  .toc-list { columns: 1; }
+}
+
+/* Narrow phones: the header sheds labels, never function */
+
+@media (max-width: 519px) {
+  .version-chip { display: none; }
+  .footer-inner { flex-direction: column; }
+}
+
+/* §3.1.5 / §3.7: all motion off, anchors jump instantly. */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 1ms !important; animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important; scroll-behavior: auto !important;
+  }
+}
+
+/* components.css */
+/* Components — prose rhythm, code, tables, callouts, cards, pager, search (§3.5).
+   layout.css owns position; this sheet owns appearance. Kept dense on purpose:
+   the four sheets share a 40 KB budget (§10.1). */
+
+/* Prose rhythm (§3.3) */
+
+.prose { font-size: 15px; line-height: 1.75; }
+
+/* One owner for block spacing: 16 px between blocks, headings override. Declared
+   first so every component rule below wins a tie. */
+.prose > * { margin-block: 0 var(--sp-4); }
+.prose > :first-child { margin-block-start: 0; }
+.prose > h2 { margin-block: var(--sp-7) var(--sp-3); }
+.prose > h3 { margin-block: 28px var(--sp-2); }
+.prose h2 { font-size: clamp(21px, 2.2vw, 25px); line-height: 1.35; font-weight: 600;
+  letter-spacing: -.005em; color: var(--text); }
+.prose h3 { font-size: 17px; line-height: 1.45; font-weight: 600; color: var(--text); }
+
+/* Zero specificity on purpose: cards / steps / nav opt out with one class rule
+   instead of fighting these defaults. */
+:where(ul, ol) { margin: 0; padding-left: 1.35em; }
+:where(li + li) { margin-top: var(--sp-2); }
+:where(li) > :where(ul, ol) { margin-top: var(--sp-2); }
+:where(li)::marker { color: var(--text-3); }
+.prose strong { font-weight: 600; color: var(--text); }
+
+/* In-prose links stay underlined: recognisability beats quiet styling (§3.6). */
+.prose a { text-decoration: underline; text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.prose a:hover { text-decoration-color: currentColor; }
+.prose hr { margin-block: var(--sp-6); border: 0; border-top: 1px solid var(--line); }
+
+/* Page head */
+
+.page-head { margin-block: 0 var(--sp-6); }
+.page-eyebrow { margin: 0 0 var(--sp-2); color: var(--text-3); font-size: 12.5px;
+  font-weight: 500; line-height: 1.5; letter-spacing: .01em; }
+.page-title { margin: 0 0 var(--sp-3); color: var(--text);
+  font-size: clamp(28px, 3.4vw, 38px); line-height: 1.25; font-weight: 600;
+  letter-spacing: -.015em; }
+.page-summary { margin: 0 0 var(--sp-3); color: var(--text-2); font-size: 15px;
+  line-height: 1.75; }
+.page-meta { display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--sp-1) var(--sp-2); margin: 0; color: var(--text-3); font-size: 12.5px;
+  font-weight: 500; line-height: 1.5; letter-spacing: .01em; }
+.dot { color: var(--text-3); opacity: .6; }
+
+/* Template ledes: one quiet line that sets expectations before the body. */
+.hub-lede, .steps-lede, .flags-lede, .events-lede { margin-block: 0 var(--sp-4);
+  padding-left: var(--sp-3); border-left: 2px solid var(--line); color: var(--text-2);
+  font-size: 14.5px; line-height: 1.7; }
+
+/* Buttons and icons */
+
+.icon { display: inline-block; flex: none; vertical-align: -.15em; }
+.icon-btn { display: inline-flex; align-items: center; justify-content: center;
+  min-width: 44px; min-height: 44px; padding: 0 var(--sp-2); border: 0;
+  border-radius: var(--radius); background-color: transparent; color: var(--text-2);
+  cursor: pointer; transition: var(--t-color); }
+.icon-btn:hover { color: var(--text);
+  background-color: color-mix(in srgb, var(--text) 8%, transparent); }
+.icon-btn .icon { width: 20px; height: 20px; }
+
+/* The theme button ships both glyphs; the theme attribute picks one. */
+[data-theme="dark"] .icon-sun { display: none; }
+[data-theme="light"] .icon-moon { display: none; }
+
+.search-btn { display: inline-flex; align-items: center; gap: var(--sp-2);
+  min-width: 44px; min-height: 44px; padding: 0 var(--sp-2) 0 var(--sp-3);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background-color: transparent; color: var(--text-2); font-family: var(--font-sans);
+  font-size: 13px; cursor: pointer;
+  transition: color var(--dur-1) linear, border-color var(--dur-1) linear; }
+.search-btn:hover { color: var(--text); border-color: var(--text-3); }
+.search-btn .icon { width: 16px; height: 16px; }
+.search-btn-kbd { padding: 3px 5px; border: 1px solid var(--line);
+  border-radius: var(--radius-sm); color: var(--text-3);
+  font-family: var(--font-mono); font-size: 11px; line-height: 1; }
+
+.copy-btn { position: relative; display: inline-flex; align-items: center; gap: 5px;
+  min-height: 30px; margin-left: auto; padding: 0 var(--sp-2);
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background-color: transparent; color: var(--text-3); font-family: var(--font-sans);
+  font-size: 12px; cursor: pointer;
+  transition: color var(--dur-1) linear, background-color var(--dur-1) linear; }
+/* Visual height 30 px, hit area 44 px (§3.4): thin head, thumb still lands. */
+.copy-btn::after { content: ""; position: absolute; inset: -7px -6px; }
+.copy-btn:hover { color: var(--text);
+  background-color: color-mix(in srgb, var(--text) 8%, transparent); }
+.copy-btn .icon { width: 14px; height: 14px; }
+.copy-label { font-size: 11.5px; letter-spacing: .01em; }
+.icon-external { width: 12px; height: 12px; margin-left: .25em; opacity: .7; }
+
+.h2-plain { margin: 0 0 var(--sp-2); font-size: 17px; line-height: 1.45;
+  font-weight: 600; color: var(--text); }
+/* A nested H2 (see-also) must beat the prose H2 type scale above. */
+.prose .h2-plain { margin-block: var(--sp-6) var(--sp-2); font-size: 17px;
+  line-height: 1.45; }
+
+/* Inline code and keys */
+
+code, kbd, pre { font-family: var(--font-mono); }
+:not(pre) > code { padding: .12em .35em; border-radius: var(--radius-sm);
+  background-color: var(--elevated); color: var(--text); font-size: .875em;
+  overflow-wrap: anywhere; }
+kbd { display: inline-block; min-width: 1.7em; padding: 1px 5px;
+  border: 1px solid var(--line); border-bottom-width: 2px;
+  border-radius: var(--radius-sm); background-color: var(--surface);
+  color: var(--text-2); font-size: 11.5px; line-height: 1.4; text-align: center;
+  white-space: nowrap; }
+
+/* Code blocks */
+
+.code-block { margin-inline: 0; overflow: hidden; border-radius: var(--radius);
+  background-color: var(--elevated); }
+.code-head { display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2) var(--sp-1) var(--sp-3);
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+  color: var(--text-3); font-size: 12px; line-height: 1.6; }
+.code-lang { color: var(--text-3); font-family: var(--font-mono); font-size: 11px;
+  letter-spacing: .06em; text-transform: uppercase; }
+.code-title { overflow: hidden; color: var(--text-2); font-size: 12.5px;
+  text-overflow: ellipsis; white-space: nowrap; }
+.code { margin: 0; padding: var(--sp-3) var(--sp-4); overflow-x: auto;
+  background-color: transparent; color: var(--c-out); font-size: 13px;
+  line-height: 1.65; tab-size: 2; }
+/* Ring drawn inside the scroll box so overflow never clips it. */
+.code:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.code-line.is-hl { display: block; margin-inline: calc(var(--sp-4) * -1);
+  padding-inline: var(--sp-4);
+  background-color: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+/* 12 semantic classes, one measured --c-* each (§3.2). */
+.tok-key { color: var(--c-key); }
+.tok-str { color: var(--c-str); }
+.tok-num { color: var(--c-num); }
+.tok-com { color: var(--c-com); font-style: italic; }
+.tok-fn { color: var(--c-fn); }
+.tok-type { color: var(--c-type); }
+.tok-attr { color: var(--c-attr); }
+.tok-punct { color: var(--c-punct); }
+.tok-add { color: var(--c-add); }
+.tok-del { color: var(--c-del); }
+.tok-flag { color: var(--c-flag); }
+.tok-out { color: var(--c-out); }
+
+.import-line, .signature-block { margin-block: 0 var(--sp-4); }
+.import-line .code-title, .signature-block .code-title { color: var(--text-3); }
+
+/* Tables */
+
+.table-wrap { overflow-x: auto; border: 1px solid var(--line);
+  border-radius: var(--radius); }
+.table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.6; }
+.table caption { padding: var(--sp-2) var(--sp-3); color: var(--text-3);
+  font-size: 12.5px; font-weight: 500; line-height: 1.5; letter-spacing: .01em;
+  text-align: left; caption-side: top; }
+.table th { position: sticky; top: 0; z-index: 1; padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--line); background-color: var(--surface);
+  color: var(--text-3); font-size: 12.5px; font-weight: 500; line-height: 1.5;
+  letter-spacing: .01em; text-align: left; white-space: nowrap; }
+.table td { padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+  color: var(--text-2); vertical-align: top; }
+/* Rows never fall under 40 px: tables stay thumb-usable (§3.1.4). */
+.table tbody tr { height: 40px; }
+.table tbody tr:last-child td { border-bottom: 0; }
+/* Zebra is a 2 % surface wash, not a second border (§3.5). */
+.table tbody tr:nth-child(even) {
+  background-color: color-mix(in srgb, var(--surface) 55%, transparent); }
+.table.is-dense td, .table.is-dense th { padding: var(--sp-1) var(--sp-2);
+  font-size: 13px; }
+.params td:first-child { white-space: nowrap; }
+.params td code { font-size: 12.5px; }
+.req { color: var(--warn); font-weight: 600; }
+.muted { color: var(--text-3); }
+.param-source { display: block; margin-top: 2px; color: var(--text-3);
+  font-size: 12.5px; line-height: 1.5; }
+
+/* Callouts */
+
+.callout { padding: var(--sp-3) var(--sp-4); border-left: 2px solid var(--accent);
+  border-radius: 0 var(--radius) var(--radius) 0; background-color: var(--surface); }
+.callout-note { border-left-color: var(--accent); }
+.callout-tip { border-left-color: var(--ok); }
+.callout-warn { border-left-color: var(--warn); }
+.callout-danger { border-left-color: var(--bad); }
+.callout-title { display: flex; align-items: center; gap: var(--sp-2);
+  margin: 0 0 var(--sp-1); color: var(--accent); font-size: 14px; font-weight: 600;
+  line-height: 1.5; }
+.callout-tip .callout-title { color: var(--ok); }
+.callout-warn .callout-title { color: var(--warn); }
+.callout-danger .callout-title { color: var(--bad); }
+.callout-title .icon { width: 16px; height: 16px; }
+.callout-body { color: var(--text-2); font-size: 14.5px; line-height: 1.7; }
+
+/* Steps */
+
+/* Native markers keep the `start` attribute working; a CSS counter would not. */
+.steps { padding-left: 1.6em; }
+.step + .step { margin-top: var(--sp-5); }
+.step-title { margin: 0 0 var(--sp-1); color: var(--text); font-size: 15px;
+  font-weight: 600; line-height: 1.5; }
+.step-body { color: var(--text-2); font-size: 14.5px; line-height: 1.7; }
+.step .code-block { margin-top: var(--sp-3); }
+
+/* Cards */
+
+.cards { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-3);
+  margin: 0; padding: 0; list-style: none; }
+.cards-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.cards-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.card { border-radius: var(--radius); background-color: var(--surface);
+  transition: background-color var(--dur-1) linear; }
+.card:hover, .card:focus-within { background-color: var(--elevated); }
+.card-link { display: flex; flex-direction: column; gap: var(--sp-1);
+  height: 100%; padding: var(--sp-4); color: inherit; text-decoration: none; }
+.card-link:hover { color: inherit; }
+/* The badge must shrink to its text instead of stretching across the card. */
+.card-link .badge { align-self: flex-start; }
+.card-title { color: var(--text); font-size: 15px; font-weight: 600; line-height: 1.5; }
+.card-desc { color: var(--text-2); font-size: 13.5px; line-height: 1.6; }
+/* A dashed edge says "not published yet" without spending a colour (§9.4). */
+.card.is-pending { border: 1px dashed var(--line); background-color: transparent; }
+.card.is-pending .pending { display: flex; flex-direction: column;
+  gap: var(--sp-1); padding: var(--sp-4); }
+
+/* Key/value list */
+
+.kv { display: grid; grid-template-columns: minmax(6em, max-content) minmax(0, 1fr);
+  gap: var(--sp-2) var(--sp-4); font-size: 14px; line-height: 1.6; }
+.kv dt { color: var(--text-3); }
+.kv dd { margin: 0; color: var(--text-2); }
+
+/* Before / after diff */
+
+.diff { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-2); }
+.diff-side { overflow: hidden; border-radius: var(--radius);
+  background-color: var(--elevated); }
+.diff-label { margin: 0; padding: var(--sp-1) var(--sp-3);
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+  font-size: 12px; font-weight: 500; line-height: 1.6; letter-spacing: .01em; }
+.diff-before .diff-label { color: var(--c-del); }
+.diff-after .diff-label { color: var(--c-add); }
+.diff-side .code { padding: var(--sp-2) var(--sp-3); font-size: 12.5px; }
+
+/* Directory tree */
+
+.tree { color: var(--c-out); white-space: pre; }
+.tree-comment { color: var(--c-com); }
+.tree-block .code-title { color: var(--text-2); font-family: var(--font-mono);
+  font-size: 12.5px; }
+
+/* Quote */
+
+.quote { margin: var(--sp-5) 0; padding-left: var(--sp-4);
+  border-left: 2px solid var(--line); color: var(--text-2); }
+.quote p { margin: 0; font-size: 15px; }
+.quote cite { display: block; margin-top: var(--sp-1); color: var(--text-3);
+  font-size: 12.5px; font-style: normal; }
+
+/* Event card */
+
+.event-card { padding: var(--sp-4); border-radius: var(--radius);
+  background-color: var(--surface); }
+.event-card .event-head { display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--sp-2); margin: 0 0 var(--sp-1); font-size: 15px; font-weight: 600;
+  line-height: 1.45; }
+.event-type { padding: 0; background-color: transparent; color: var(--text);
+  font-size: 14px; }
+.event-sub { color: var(--text-3); font-family: var(--font-mono); font-size: 13px;
+  font-weight: 400; }
+.event-when { margin: 0 0 var(--sp-2); color: var(--text-2); font-size: 14px;
+  line-height: 1.6; }
+.event-fields { display: flex; flex-direction: column; gap: var(--sp-1);
+  margin: 0; padding: 0; list-style: none; }
+.event-fields > li { display: grid;
+  grid-template-columns: minmax(7em, max-content) minmax(5em, max-content) minmax(0, 1fr);
+  gap: var(--sp-2); align-items: baseline; font-size: 13px; line-height: 1.6; }
+.event-field-type { color: var(--text-3); font-family: var(--font-mono);
+  font-size: 12px; }
+.event-field-desc { color: var(--text-2); }
+/* JSON on the page floor: the darkest layer reads as "program output". */
+.event-example { margin: var(--sp-3) 0 0; padding: var(--sp-2) var(--sp-3);
+  overflow-x: auto; border-radius: var(--radius-sm); background-color: var(--bg);
+  color: var(--c-out); font-size: 12.5px; line-height: 1.6; }
+
+/* Badges and pending markers */
+
+.badge { display: inline-flex; align-items: center; min-height: 20px; padding: 0 6px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background-color: var(--elevated); color: var(--text-3); font-size: 11.5px;
+  font-weight: 500; line-height: 1.5; white-space: nowrap; }
+.badge-warn { border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background-color: color-mix(in srgb, var(--warn) 12%, transparent);
+  color: var(--warn); }
+.pending { color: var(--text-3); cursor: default; }
+.pending-tag { display: inline-block; margin-left: 6px; padding: 0 5px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  color: var(--text-3); font-size: 11px; font-weight: 500; line-height: 1.6;
+  white-space: nowrap; }
+
+/* Pager */
+
+.page-nav, .pager { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-3); max-width: var(--content-max); margin: var(--sp-8) auto 0; }
+.pager-link { display: flex; align-items: center; gap: var(--sp-2);
+  min-height: 44px; padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  color: var(--text-2); transition: var(--t-color); }
+.pager-link:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  background-color: var(--surface); color: var(--text); }
+.pager-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pager-dir { color: var(--text-3); font-size: 12.5px; font-weight: 500;
+  line-height: 1.5; letter-spacing: .01em; }
+.pager-title { overflow: hidden; color: var(--text); font-size: 14px;
+  font-weight: 600; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
+.pager-prev { grid-column: 1; }
+.pager-next { grid-column: 2; justify-content: flex-end; text-align: right; }
+.pager-next .pager-text { align-items: flex-end; }
+
+/* Sources and see-also */
+
+.sources { max-width: var(--content-max); margin: var(--sp-8) auto 0;
+  padding-top: var(--sp-4); border-top: 1px solid var(--line); }
+.sources-list { display: flex; flex-direction: column; gap: var(--sp-1);
+  margin: 0; padding: 0; list-style: none; }
+.source-ref { color: var(--text-2); font-size: 12.5px; line-height: 1.6; }
+.source-ref code { padding: 0; background-color: transparent; color: inherit;
+  font-size: 12.5px; }
+.source-ref:hover code { color: var(--accent); }
+.see-also { margin-top: var(--sp-7); padding-top: var(--sp-4);
+  border-top: 1px solid var(--line); }
+.see-also-list { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4);
+  margin: 0; padding: 0; list-style: none; font-size: 14px; }
+
+/* Back to top */
+
+.to-top { position: fixed; right: clamp(12px, 2vw, 24px);
+  bottom: clamp(12px, 2vw, 24px); z-index: 60; display: inline-flex;
+  align-items: center; justify-content: center; width: 44px; height: 44px;
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  background-color: var(--elevated); color: var(--text-2);
+  box-shadow: var(--shadow); cursor: pointer; opacity: 0; visibility: hidden;
+  transform: translateY(8px);
+  transition: var(--t-move), visibility var(--dur-2) linear; }
+.to-top:hover { color: var(--text); }
+/* app.js adds exactly this class once the page scrolled past 600 px. */
+.to-top.is-visible { opacity: 1; visibility: visible; transform: none; }
+
+.noscript-note { max-width: var(--content-max); margin: var(--sp-4) auto;
+  padding: var(--sp-2) var(--sp-3); border-left: 2px solid var(--warn);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background-color: var(--elevated); color: var(--text-2); font-size: 13px;
+  line-height: 1.6; }
+
+/* Search dialog */
+
+.modal { position: fixed; inset: 0; z-index: 100; display: flex;
+  align-items: flex-start; justify-content: center;
+  padding: 8vh var(--sp-4) var(--sp-4); }
+.modal[hidden] { display: none; }
+/* A scrim, not a blackout: the page stays legible behind the panel. */
+.modal-backdrop { position: absolute; inset: 0; background-color: rgb(4 7 12 / .62); }
+.modal-panel { position: relative; display: flex; flex-direction: column;
+  width: min(640px, 100%); max-height: 84vh; padding: var(--sp-1);
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  background-color: var(--elevated); box-shadow: var(--shadow);
+  animation: panel-in var(--dur-3) var(--ease); }
+
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+.search-box { display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-1) var(--sp-1) var(--sp-3);
+  border-bottom: 1px solid var(--line); color: var(--text-3); }
+.search-box .icon { width: 18px; height: 18px; }
+.search-box input { flex: 1 1 auto; min-width: 0; padding: var(--sp-2) 0;
+  border: 0; border-radius: var(--radius-sm); background-color: transparent;
+  color: var(--text); font-family: var(--font-sans); font-size: 15px;
+  line-height: 1.5; }
+.search-box input::placeholder { color: var(--text-3); }
+.search-count { min-height: 22px; margin: 0; padding: var(--sp-2) var(--sp-3) 0;
+  color: var(--text-3); font-size: 12.5px; font-weight: 500; line-height: 1.5;
+  letter-spacing: .01em; }
+.search-results { margin: 0; padding: var(--sp-1); overflow-y: auto;
+  min-height: 0; list-style: none; }
+/* app.js renders li.search-hit; .search-result is the same row by contract. */
+.search-result, .search-hit { border-radius: var(--radius);
+  transition: background-color var(--dur-1) linear; }
+.search-result.is-active, .search-hit.is-active {
+  background-color: color-mix(in srgb, var(--accent) 16%, transparent); }
+.search-hit-link { display: block; padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius); color: inherit; }
+.search-hit-link:hover { color: inherit;
+  background-color: color-mix(in srgb, var(--text) 6%, transparent); }
+.search-hit-title { color: var(--text); font-size: 14px; font-weight: 600;
+  line-height: 1.5; }
+.search-hit-group, .search-hit-section { margin-left: var(--sp-2);
+  color: var(--text-3); font-size: 11.5px; font-weight: 500; }
+.search-hit-snippet, .search-hit-x { display: -webkit-box; margin-top: 2px;
+  overflow: hidden; color: var(--text-2); font-size: 13px; line-height: 1.6;
+  -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+mark { padding: 0 .1em; border-radius: 2px;
+  background-color: color-mix(in srgb, var(--accent) 28%, transparent);
+  color: inherit; }
+.search-hint { display: flex; align-items: center; gap: var(--sp-1); margin: 0;
+  padding: var(--sp-2) var(--sp-3); border-top: 1px solid var(--line);
+  color: var(--text-3); font-size: 12px; line-height: 1.5; }
+
+/* Content components at narrower widths */
+
+@media (max-width: 1199px) {
+  .cards-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 899px) {
+  .diff { grid-template-columns: minmax(0, 1fr); }
+  .event-fields > li { grid-template-columns: minmax(0, 1fr); gap: 0; }
+}
+
+@media (max-width: 519px) {
+  .search-btn-text, .search-btn-kbd { display: none; }
+  .cards-2, .cards-3 { grid-template-columns: minmax(0, 1fr); }
+  /* <520 px: tables scroll sideways, first column stays a landmark (§3.4). */
+  .table-wrap { overflow-x: auto; }
+  .table th:first-child, .table td:first-child { position: sticky; left: 0;
+    background-color: var(--bg); }
+  .table tbody tr:nth-child(even) td:first-child {
+    background-color: color-mix(in srgb, var(--surface) 55%, var(--bg)); }
+  .page-nav, .pager { grid-template-columns: minmax(0, 1fr); }
+  .pager-next { grid-column: 1; justify-content: flex-start; text-align: left; }
+  .pager-next .pager-text { align-items: flex-start; }
+  .kv { grid-template-columns: minmax(0, 1fr); gap: var(--sp-1); }
+  .kv dt { color: var(--text-2); font-weight: 600; }
+}
+
+/* Component lists reset last so no earlier rule re-adds prose spacing. */
+.cards > li, .event-fields > li, .search-results > li, .sources-list > li,
+.see-also-list > li, .nav-list > li, .toc-list > li { margin-top: 0; }
+
+/* print.css */
+/* Print (§9.5). Paper has no hover, no scroll and no dark mode: keep the words,
+   drop every affordance, force the light palette so ink is spent on text. */
+
+@page { margin: 18mm; }
+
+@media print {
+  /* Force the recorded light pairs whatever theme the reader used (§3.2).
+     html[data-theme] outranks the [data-theme="light"] block regardless of the
+     order the four sheets are concatenated in. */
+  :root,
+  html[data-theme] {
+    color-scheme: light;
+    --bg: #FFFFFF;
+    --surface: #FFFFFF;
+    --elevated: #F4F5F8;
+    --line: #C9D0DB;
+    --text: #000000;
+    --text-2: #24303F;
+    --text-3: #3E4A5C;
+    --accent: #18406F;
+    --accent-2: #12335A;
+    --ok: #14603F;
+    --warn: #6B420B;
+    --bad: #8A2020;
+    --c-key: #4F2A84;
+    --c-str: #1F4E28;
+    --c-num: #5C3D06;
+    --c-com: #3E4A5C;
+    --c-fn: #18406F;
+    --c-type: #134C45;
+    --c-attr: #4B3308;
+    --c-punct: #24303F;
+    --c-add: #14603F;
+    --c-del: #8A2020;
+    --c-flag: #12335A;
+    --c-out: #24303F;
+  }
+
+  /* Anything that exists only to be clicked, scrolled or searched disappears. */
+  .site-header,
+  .nav,
+  .nav-scrim,
+  .toc,
+  .search-btn,
+  .icon-btn,
+  .copy-btn,
+  .to-top,
+  .modal,
+  .skip-link,
+  .site-footer,
+  .search-hint,
+  .noscript-note,
+  noscript { display: none !important; }
+
+  html,
+  body {
+    background: #FFFFFF !important;
+    color: #000000 !important;
+    font-size: 11pt;
+    line-height: 1.5;
+    letter-spacing: 0;
+    scroll-behavior: auto;
+  }
+
+  /* One column, full width: a printed page has no sidebar to reserve. */
+  .shell,
+  .main,
+  .prose,
+  .sources,
+  .see-also,
+  .page-nav,
+  .pager {
+    display: block;
+    width: auto;
+    max-width: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .page-title { font-size: 20pt; line-height: 1.2; }
+  .prose h2 { font-size: 14pt; line-height: 1.3; break-after: avoid; }
+  .prose h3 { font-size: 12pt; break-after: avoid; }
+  .page-head,
+  .event-card,
+  .callout,
+  .card,
+  .step,
+  .diff-side { break-inside: avoid; }
+  .code-block,
+  .table-wrap { break-inside: avoid; }
+
+  /* A printed line that runs off the page is simply gone — pre-wrap is the only
+     honest choice here, and it also removes horizontal scroll containers. */
+  .code,
+  .event-example { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+  .table-wrap,
+  .code-block,
+  .diff-side,
+  .event-example { overflow: visible !important; }
+
+  .table { font-size: 9.5pt; }
+  .table th { position: static; background: transparent; color: var(--text-2); }
+  .table tbody tr { height: auto; }
+  .table tbody tr:nth-child(even) { background: transparent; }
+  .code-line.is-hl { background: transparent; }
+
+  /* Internal links print bare (the page order is the navigation on paper);
+     external ones print their target so the reference survives (§9.5). */
+  a { color: #000000; text-decoration: underline; }
+  a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 9pt; }
+  .icon-external { display: none; }
+  .source-ref, .source-ref code { color: var(--text-2); }
+
+  .badge, .pending-tag, kbd { border: 1px solid var(--line); background: transparent; }
+}

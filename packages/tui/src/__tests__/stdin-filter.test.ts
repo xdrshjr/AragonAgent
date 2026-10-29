@@ -1,0 +1,1129 @@
+import { describe, expect, it, vi } from 'vitest';
+import { PassThrough } from 'node:stream';
+import { createStdinFilter, tryCreateStdinFilter } from '../input/stdin-filter.js';
+import type { MouseEvent } from '../input/mouse-events.js';
+import { enterAltScreen } from '../ui/screen.js';
+import {
+  ENTER_NEWLINE_FRAME,
+  PASTE_CLOSE,
+  PASTE_MARKER_RESCAN_TTL_MS,
+  PASTE_MAX_BYTES,
+  PASTE_OPEN,
+} from '../input/limits.js';
+import { ENTER_SEQUENCES } from '../input/enter-sequences.js';
+
+/** Written as an escape, not a raw byte, so an editor that stripped the control
+ *  character could not leave a test that asserts nothing and still passes. */
+const ESC = '\u001B';
+const sgr = (b: number, x: number, y: number): string => `${ESC}[<${b};${x};${y}M`;
+
+const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+/**
+ * A wait that CANNOT let a timer fire. "Still held" assertions must use this,
+ * not `tick()`: both the 0 ms tick and the 12 ms pending-flush timer are
+ * macrotasks, and a worker preempted between `write` and the tick can resume
+ * with the flush already due, flipping the assertion under suite load (seen
+ * once in a 266-file run). Microtasks drain before every timer callback, so
+ * the hold is deterministically still open here.
+ */
+const stillHeld = (): Promise<void> => Promise.resolve();
+
+describe('DEL normalization outside paste', () => {
+  it.each([true, false])('keeps CSI Delete but normalizes DEL and split Alt+DEL, paste=%s', (paste) => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste });
+    const sink = drain(filter);
+    try {
+      stream.emit('data', '\x7f');
+      stream.emit('data', '\x1b[3~');
+      stream.emit('data', '\x1b');
+      stream.emit('data', '\x7f');
+      expect(sink.text()).toBe('\x08\x1b[3~\x1b\x08');
+    } finally { filter.dispose(); }
+  });
+});
+
+describe('输入流顺序和结束边界', () => {
+  it('拒绝块尾部未闭合的 bracketed paste 继续吞到结束标记，不泄漏后续内容', () => {
+    const { stream } = fakeStdin();
+    const warn = vi.fn();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true }, undefined, warn);
+    const sink = drain(filter);
+    try {
+      stream.emit('data', `${'x'.repeat(PASTE_MAX_BYTES + 1)}\x1b[13u\x1b[200~first`);
+      stream.emit('data', 'second\x1b[201~\r');
+      expect(sink.text()).toBe('');
+      expect(warn).toHaveBeenCalledTimes(1);
+      stream.emit('data', 'next');
+      expect(sink.text()).toBe('next');
+    } finally { filter.dispose(); }
+  });
+
+  it.each(['burst', 'bracketed'])('%s 超限时整块正文及提交都拒绝，下一次输入仍可用', (kind) => {
+    vi.useFakeTimers();
+    const { stream } = fakeStdin();
+    const warn = vi.fn();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true }, undefined, warn);
+    const sink = drain(filter);
+    const body = 'x'.repeat(PASTE_MAX_BYTES + 1);
+    const paste = kind === 'bracketed' ? `\x1b[200~${body}\x1b[201~` : body;
+    try {
+      stream.emit('data', `before\x1b[13;2u${paste}\x1b[13utail\x1b[13;`);
+      vi.runAllTimers();
+      expect(sink.text()).toBe('');
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+      stream.emit('data', 'next');
+      stream.emit('data', '\r');
+      expect(sink.text()).toBe('next\r');
+    } finally {
+      filter.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(ENTER_SEQUENCES)('$meaning 的全部拆包点与完整输入一致', ({ seq, to }) => {
+    vi.useFakeTimers();
+    try {
+      for (let cut = 1; cut < seq.length; cut += 1) {
+        const { stream } = fakeStdin();
+        const filter = createStdinFilter(stream, { mouse: true, paste: true });
+        const sink = drain(filter);
+        stream.emit('data', 'a\nb');
+        stream.emit('data', seq.slice(0, cut));
+        vi.advanceTimersByTime(1);
+        stream.emit('data', seq.slice(cut));
+        expect(sink.text(), `cut ${cut}`).toBe(`${PASTE_OPEN}a\nb${PASTE_CLOSE}${to}`);
+        filter.dispose();
+      }
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+  it.each([true, false])('过滤外部 NUL，paste=%s', (paste) => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste });
+    const sink = drain(filter);
+    stream.emit('data', '\0');
+    stream.emit('data', 'n');
+    expect(sink.text()).toBe('n');
+    filter.dispose();
+  });
+
+  it('显式修饰值 1 保留 Enter 的 CR 兼容', () => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true });
+    const sink = drain(filter);
+    stream.emit('data', '\x1b[13;1u');
+    expect(sink.text()).toBe('\r');
+    filter.dispose();
+  });
+
+  it.each(['\x1b[13;2u', '\x1b\r'])('burst 后 %j 不泄漏帧正文', (key) => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true });
+    const sink = drain(filter);
+    stream.emit('data', 'a\nb');
+    stream.emit('data', key);
+    expect(sink.text()).toBe(`${PASTE_OPEN}a\nb${PASTE_CLOSE}${ENTER_NEWLINE_FRAME}`);
+    filter.dispose();
+  });
+
+  it.each(['a\nb\x1b[13;', '\x1b[200~a\nb\x1b[20'])('EOF 排空 pending 并且幂等：%j', (raw) => {
+    vi.useFakeTimers();
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true });
+    const sink = drain(filter);
+    try {
+      stream.emit('data', raw);
+      stream.emit('end');
+      const ended = sink.text();
+      // The torn tail (an unfinished CSI) is a SEQUENCE, so draining it leaves
+      // the text and no parameter bytes. What this case is really about --
+      // draining synchronously, clearing the timers, and staying idempotent
+      // after `end` -- is unchanged.
+      expect(ended).toBe(`${PASTE_OPEN}a\nb${PASTE_CLOSE}`);
+      expect(vi.getTimerCount()).toBe(0);
+      stream.emit('close');
+      stream.emit('data', 'late');
+      vi.runAllTimers();
+      expect(sink.text()).toBe(ended);
+    } finally {
+      filter.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it('idle pending 在 EOF 同步排空，dispose 则丢弃且无迟到输出', () => {
+    vi.useFakeTimers();
+    try {
+      for (const dispose of [false, true]) {
+        const { stream } = fakeStdin();
+        const filter = createStdinFilter(stream, { mouse: true, paste: true });
+        const sink = drain(filter);
+        stream.emit('data', '\x1b[13;');
+        if (dispose) filter.dispose();
+        stream.emit('end');
+        stream.emit('close');
+        stream.emit('data', 'late');
+        vi.runAllTimers();
+        expect(sink.text()).toBe(dispose ? '' : '\x1b[13;');
+        expect(vi.getTimerCount()).toBe(0);
+        filter.dispose();
+      }
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+/**
+ * T-22 -- THE MOUSE HALF OF THIS FILE IS UNCHANGED, VERBATIM.
+ *
+ * `{ mouse: true, paste: false }` is byte-for-byte the v0.6.3 filter, so every
+ * assertion below this line reads exactly as it did before the rename, and a
+ * regression in the mouse path fails here rather than in a new case someone
+ * might read as "the new feature is slightly different".
+ */
+const createMouseFilter = (real: NodeJS.ReadStream) =>
+  createStdinFilter(real, { mouse: true, paste: false });
+const tryCreateMouseFilter = (real: NodeJS.ReadStream, onError?: (reason: string) => void) =>
+  tryCreateStdinFilter(real, { mouse: true, paste: false }, onError);
+
+/**
+ * A stand-in for `process.stdin` carrying exactly the surface Ink reads off it
+ * (`isTTY` / `setRawMode` / `ref` / `unref`), so these tests never put the real
+ * terminal into raw mode.
+ */
+function fakeStdin() {
+  const stream = new PassThrough();
+  const calls = { setRawMode: [] as boolean[], ref: 0, unref: 0, pause: 0 };
+  Object.assign(stream, {
+    isTTY: true,
+    setRawMode: (mode: boolean) => {
+      calls.setRawMode.push(mode);
+      return stream;
+    },
+    ref: () => {
+      calls.ref += 1;
+      return stream;
+    },
+    unref: () => {
+      calls.unref += 1;
+      return stream;
+    },
+  });
+  const realPause = stream.pause.bind(stream);
+  Object.assign(stream, {
+    pause: () => {
+      calls.pause += 1;
+      return realPause();
+    },
+  });
+  return { stream: stream as unknown as NodeJS.ReadStream, calls };
+}
+
+/** Collect everything the wrapper hands to Ink. */
+function drain(filter: { stdin: NodeJS.ReadStream }): { text: () => string } {
+  let out = '';
+  (filter.stdin as unknown as PassThrough).on('data', (chunk: Buffer | string) => {
+    out += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+  });
+  return { text: () => out };
+}
+
+describe('createMouseFilter', () => {
+  it('forwards ordinary keystrokes byte-for-byte to the wrapped stream', async () => {
+    const { stream } = fakeStdin();
+    const filter = createMouseFilter(stream);
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write('hello');
+    (stream as unknown as PassThrough).write(`${ESC}[A`); // an arrow key
+    await tick();
+
+    expect(sink.text()).toBe(`hello${ESC}[A`);
+    filter.dispose();
+  });
+
+  it('forwards CSI Z (Shift+Tab) untouched, in one chunk and torn in two', async () => {
+    // The mode toggle's byte path had NO test until the same bug was reported
+    // twice (shift-tab-mode-toggle-still-dead-on-windows, section 3.8). `\x1b[Z`
+    // enters the same `ESC`-holding state machine every mouse report does, and
+    // `matchReport` classifying it as `none` is the only thing that lets it out.
+    // Swallowing it here would be indistinguishable, from the user's chair, from
+    // the console never delivering it - the exact bug this file sits next to.
+    const { stream } = fakeStdin();
+    const filter = createMouseFilter(stream);
+    const sink = drain(filter);
+    const seen: MouseEvent[] = [];
+    filter.source.subscribe((e) => seen.push(e));
+
+    (stream as unknown as PassThrough).write(`${ESC}[Z`);
+    await tick();
+    expect(sink.text()).toBe(`${ESC}[Z`);
+
+    // Torn across chunks, because a real console splits wherever it likes and a
+    // filter that only handles the whole-sequence case still eats the key.
+    (stream as unknown as PassThrough).write(ESC);
+    await tick();
+    (stream as unknown as PassThrough).write('[Z');
+    await tick();
+
+    expect(sink.text()).toBe(`${ESC}[Z${ESC}[Z`);
+    expect(seen).toHaveLength(0); // never mistaken for a wheel event
+    filter.dispose();
+  });
+
+  it('never forwards a mouse report to the wrapped stream', async () => {
+    // I-1. A leak here is not a lost feature — it is `[<64;40;12M` typed into
+    // the user's message, which is worse than the bug being fixed.
+    const { stream } = fakeStdin();
+    const filter = createMouseFilter(stream);
+    const sink = drain(filter);
+    const seen: MouseEvent[] = [];
+    filter.source.subscribe((e) => seen.push(e));
+
+    (stream as unknown as PassThrough).write(`a${sgr(64, 3, 4)}b${sgr(0, 1, 1)}c`);
+    await tick();
+
+    expect(sink.text()).toBe('abc');
+    expect(sink.text()).not.toContain('[<');
+    // TWO events, not one, since tui-selection-and-scroll-follow §4.4.2: the
+    // second report is a left-button PRESS, and the channel now carries buttons
+    // as well as wheel notches so the selection controller can see them. What
+    // this case is actually about — I-1, that not one byte of either report
+    // reaches the wrapped stream — is unchanged and asserted two lines up.
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toMatchObject({ kind: 'wheel', dir: 'up', x: 3, y: 4 });
+    expect(seen[1]).toMatchObject({ kind: 'press', button: 0, x: 1, y: 1 });
+    filter.dispose();
+  });
+
+  it('reassembles a report torn across two chunks without leaking its tail', async () => {
+    const { stream } = fakeStdin();
+    const filter = createMouseFilter(stream);
+    const sink = drain(filter);
+    const seen: MouseEvent[] = [];
+    filter.source.subscribe((e) => seen.push(e));
+
+    const report = sgr(65, 20, 7);
+    (stream as unknown as PassThrough).write(report.slice(0, 5));
+    await stillHeld();
+    expect(sink.text()).toBe('');
+    (stream as unknown as PassThrough).write(report.slice(5));
+    await tick();
+
+    expect(sink.text()).toBe('');
+    expect(seen).toEqual([
+      { kind: 'wheel', dir: 'down', x: 20, y: 7, shift: false, alt: false, ctrl: false },
+    ]);
+    filter.dispose();
+  });
+
+  it('releases a held ESC to Ink once no further data arrives', async () => {
+    // Esc aborts a run, so it must not be held hostage waiting for a `[` that
+    // is never coming. Worst-case latency is the 12 ms flush timer.
+    const { stream } = fakeStdin();
+    const filter = createMouseFilter(stream);
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write(ESC);
+    await stillHeld();
+    expect(sink.text()).toBe('');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(sink.text()).toBe(ESC);
+    filter.dispose();
+  });
+
+  it('delegates setRawMode / ref / unref to the real stream', () => {
+    // Ink calls all three on whatever stream it is handed; a wrapper that
+    // reimplemented them instead would silently stop putting the TERMINAL into
+    // raw mode (R-5).
+    const { stream, calls } = fakeStdin();
+    const filter = createMouseFilter(stream);
+    const inkView = filter.stdin as unknown as {
+      isTTY: boolean;
+      setRawMode(m: boolean): void;
+      ref(): void;
+      unref(): void;
+    };
+
+    expect(inkView.isTTY).toBe(true);
+    inkView.ref();
+    inkView.setRawMode(true);
+    inkView.setRawMode(false);
+    inkView.unref();
+
+    expect(calls.ref).toBe(1);
+    expect(calls.setRawMode).toEqual([true, false]);
+    expect(calls.unref).toBe(1);
+    filter.dispose();
+  });
+
+  it('reports isTTY through a live getter, not a snapshot', () => {
+    // `isRawModeSupported()` reads this; a snapshot taken at construction would
+    // make Ink throw instead of degrading when stdin is not a terminal.
+    const { stream } = fakeStdin();
+    const filter = createMouseFilter(stream);
+    const inkView = filter.stdin as unknown as { isTTY: boolean };
+    expect(inkView.isTTY).toBe(true);
+    (stream as unknown as { isTTY: boolean }).isTTY = false;
+    expect(inkView.isTTY).toBe(false);
+    filter.dispose();
+  });
+
+  it('ends the wrapper when the real stdin closes', async () => {
+    // P2-7: otherwise Ink's reader waits forever on a stream that will never
+    // produce another byte.
+    const { stream } = fakeStdin();
+    const filter = createMouseFilter(stream);
+    let ended = false;
+    (filter.stdin as unknown as PassThrough).on('end', () => {
+      ended = true;
+    });
+    (filter.stdin as unknown as PassThrough).resume();
+
+    (stream as unknown as PassThrough).end();
+    await tick();
+    await tick();
+    expect(ended).toBe(true);
+    filter.dispose();
+  });
+
+  it('dispose removes the data listener and stops holding the stream open', async () => {
+    // I-7: a live `'data'` listener on stdin keeps the event loop alive and
+    // `aragon` would never return to the shell.
+    const { stream, calls } = fakeStdin();
+    const filter = createMouseFilter(stream);
+    const sink = drain(filter);
+
+    expect((stream as unknown as PassThrough).listenerCount('data')).toBe(1);
+    filter.dispose();
+    expect((stream as unknown as PassThrough).listenerCount('data')).toBe(0);
+    expect(calls.unref).toBe(1);
+    expect(calls.pause).toBe(1);
+
+    (stream as unknown as PassThrough).write('after');
+    await tick();
+    expect(sink.text()).toBe('');
+  });
+
+  it('dispose is idempotent', () => {
+    const { stream } = fakeStdin();
+    const filter = createMouseFilter(stream);
+    expect(() => {
+      filter.dispose();
+      filter.dispose();
+      filter.dispose();
+    }).not.toThrow();
+  });
+
+  it('unsubscribing stops delivery without disturbing the passthrough', async () => {
+    const { stream } = fakeStdin();
+    const filter = createMouseFilter(stream);
+    const sink = drain(filter);
+    const seen: MouseEvent[] = [];
+    const off = filter.source.subscribe((e) => seen.push(e));
+    off();
+
+    (stream as unknown as PassThrough).write(`x${sgr(64, 1, 1)}`);
+    await tick();
+    expect(seen).toEqual([]);
+    expect(sink.text()).toBe('x');
+    filter.dispose();
+  });
+});
+
+/**
+ * I-8 / P0-1 — the one invariant whose violation is a WIRING ORDER rather than
+ * a function's behaviour, and the reason `AltScreenOptions.mouse` is defined as
+ * "a filter is installed" rather than "the user wants mouse support".
+ *
+ * The harness below is `runInteractive`-shaped: build the filter, then derive
+ * the screen options from whether it exists. Its failure mode is silent —
+ * no exception, no log line, just garbage appearing in a draft — so a manual
+ * smoke pass on a machine where construction happens to succeed cannot
+ * substitute for it.
+ */
+describe('I-8: reporting is never enabled without a filter in front of Ink', () => {
+  function fakeStdout() {
+    const writes: string[] = [];
+    const stdout = {
+      isTTY: true,
+      write(s: string) {
+        writes.push(s);
+        return true;
+      },
+    } as unknown as NodeJS.WriteStream;
+    return { stdout, all: () => writes.join('') };
+  }
+
+  it('enterAltScreen is never asked for mouse:true when the filter failed to build', () => {
+    const { stream } = fakeStdin();
+    const broken = vi.fn(() => {
+      throw new Error('no raw mode here');
+    });
+    const onError = vi.fn();
+
+    // Stands in for `createMouseFilter` throwing inside `tryCreateMouseFilter`.
+    const filter = ((): ReturnType<typeof tryCreateMouseFilter> => {
+      try {
+        broken();
+        return tryCreateMouseFilter(stream, onError);
+      } catch {
+        return null;
+      }
+    })();
+    expect(filter).toBeNull();
+
+    const { stdout, all } = fakeStdout();
+    enterAltScreen(stdout, { mouse: filter !== null }).restore();
+
+    expect(all()).not.toContain('\x1b[?1000h');
+    expect(all()).not.toContain('\x1b[?1006h');
+  });
+
+  it('tryCreateMouseFilter returns null and reports the reason instead of throwing', () => {
+    const onError = vi.fn();
+    // A stream with no `on` at all is the shape of "this is not a stdin".
+    const notAStream = {} as unknown as NodeJS.ReadStream;
+    expect(tryCreateMouseFilter(notAStream, onError)).toBeNull();
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it('enables the pair only once a filter really exists', () => {
+    const { stream } = fakeStdin();
+    const filter = tryCreateMouseFilter(stream);
+    expect(filter).not.toBeNull();
+
+    const { stdout, all } = fakeStdout();
+    enterAltScreen(stdout, { mouse: filter !== null });
+    expect(all()).toContain('\x1b[?1000h');
+    expect(all()).toContain('\x1b[?1006h');
+    filter?.dispose();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Paste framing (tui-paste-handling section 5.1, T-16..T-21)
+// ---------------------------------------------------------------------------
+
+const OPEN = '\u0000[';
+const CLOSE = '\u0000]';
+const BEGIN = `${ESC}[200~`;
+const END = `${ESC}[201~`;
+
+const pasteFilter = (
+  real: NodeJS.ReadStream,
+  features: Partial<{ mouse: boolean; paste: boolean }> = {},
+) => createStdinFilter(real, { mouse: true, paste: true, ...features });
+
+describe('createStdinFilter — Enter-family rewrite (tui-shift-enter-copy-queue 3.4)', () => {
+  const NL = '\u0000n';
+
+  it('rewrites a standalone CSI-u Shift+Enter to the newline frame', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write(`${ESC}[13;2u`);
+    await tick();
+
+    expect(sink.text()).toBe(NL);
+    filter.dispose();
+  });
+
+  it('rewrites a sequence that shares its chunk with leading keystrokes', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write(`ab${ESC}[13;5u`);
+    await tick();
+
+    expect(sink.text()).toBe(`ab${NL}`);
+    filter.dispose();
+  });
+
+  it('rewrites Alt+Enter (ESC CR) -- the Tier 2 classifier must not eat it', async () => {
+    // `classifyChunk` calls any chunk longer than one character that contains
+    // a line break a PASTE; without the rewrite-first placement this key would
+    // be buffered as a paste body and its ESC stripped, silently swallowing it.
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write(`${ESC}\r`);
+    await tick();
+
+    expect(sink.text()).toBe(NL);
+    filter.dispose();
+  });
+
+  it('rewrites the modifier-less CSI-u Enter back to a PLAIN CR', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write(`${ESC}[13u`);
+    await tick();
+
+    expect(sink.text()).toBe('\r');
+    filter.dispose();
+  });
+
+  it('reassembles a sequence torn across two chunks (the keep = max hold)', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+    const pipe = stream as unknown as PassThrough;
+
+    pipe.write(`${ESC}[13;`);
+    await stillHeld();
+    expect(sink.text()).toBe(''); // nothing leaks while the hold is open
+    pipe.write('2u');
+    await tick();
+
+    expect(sink.text()).toBe(NL);
+    filter.dispose();
+  });
+
+  it('does NOT rewrite inside a bracketed paste body (I-3 discipline)', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write(`${BEGIN}${ESC}[13;2u${END}`);
+    await tick();
+
+    // A look-alike in pasted text is content, not a key: nothing is REWRITTEN
+    // into a newline frame. It is still a control SEQUENCE, so payload cleaning
+    // removes it whole -- which is why the sink gets no frame at all (an empty
+    // payload is not emitted).
+    expect(sink.text()).toBe('');
+    filter.dispose();
+  });
+
+  it('still rewrites in a --no-paste session', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream, { paste: false });
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write(`${ESC}[13;2u`);
+    await tick();
+
+    expect(sink.text()).toBe(NL);
+    filter.dispose();
+  });
+});
+
+describe('createStdinFilter — paste framing', () => {
+  it('T-16: frames a bracketed paste and emits zero mouse events', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+    const seen: MouseEvent[] = [];
+    filter.source.subscribe((e) => seen.push(e));
+
+    (stream as unknown as PassThrough).write(`${BEGIN}a\r\nb${END}`);
+    await tick();
+
+    expect(sink.text()).toBe(`${OPEN}a\nb${CLOSE}`);
+    expect(seen).toHaveLength(0);
+    filter.dispose();
+  });
+
+  it('T-17: reassembles a paste split across five writes, one cutting the end marker', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+    const pipe = stream as unknown as PassThrough;
+
+    for (const part of [BEGIN, 'one\r\n', 'two\r\n', `three${ESC}[20`, '1~']) {
+      pipe.write(part);
+      await tick();
+    }
+
+    expect(sink.text()).toBe(`${OPEN}one\ntwo\nthree${CLOSE}`);
+    filter.dispose();
+  });
+
+  it('T-18: a payload containing a mouse report survives INTACT and emits nothing (I-3)', async () => {
+    // The most likely thing a TUI-dev-tool user pastes is a terminal log, and
+    // eating the bytes that look like SGR reports would corrupt their data with
+    // nothing on screen to say so.
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+    const seen: MouseEvent[] = [];
+    filter.source.subscribe((e) => seen.push(e));
+
+    (stream as unknown as PassThrough).write(`${BEGIN}log ${ESC}[<0;12;5M tail${END}`);
+    await tick();
+
+    // The REPORT is not consumed as a report -- no `MouseEvent` is emitted, and
+    // the surrounding text keeps its order. The bytes themselves are a control
+    // SEQUENCE, so `sanitisePaste` removes it whole instead of leaving
+    // `[<0;12;5M` behind as visible garbage.
+    expect(sink.text()).toBe(`${OPEN}log  tail${CLOSE}`);
+    expect(seen).toHaveLength(0);
+    filter.dispose();
+  });
+
+  it('T-18b: suspends mouse parsing inside a Tier 2 burst as well (P1-7)', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+    const seen: MouseEvent[] = [];
+    filter.source.subscribe((e) => seen.push(e));
+    const pipe = stream as unknown as PassThrough;
+
+    pipe.write('first line\r\n'); // classified as a paste -> the burst opens
+    await tick();
+    pipe.write(`second ${ESC}[<0;12;5M line`); // arrives inside the window
+    await new Promise((r) => setTimeout(r, 40));
+
+    expect(seen).toHaveLength(0);
+    expect(sink.text()).toBe(`${OPEN}first line\nsecond  line${CLOSE}`);
+    filter.dispose();
+  });
+
+  it('T-19: classifies by chunk shape when no marker arrives', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write('foo\r\nbar');
+    await new Promise((r) => setTimeout(r, 40));
+    expect(sink.text()).toBe(`${OPEN}foo\nbar${CLOSE}`);
+    filter.dispose();
+
+    // ...and three separate keystrokes are three pass-through writes, not a
+    // frame. Ordinary typing never enters the burst window, so it never pays it.
+    const typed = fakeStdin();
+    const typing = pasteFilter(typed.stream);
+    const typedSink = drain(typing);
+    for (const ch of ['f', 'o', 'o']) {
+      (typed.stream as unknown as PassThrough).write(ch);
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    expect(typedSink.text()).toBe('foo');
+    expect(typedSink.text()).not.toContain(OPEN);
+    typing.dispose();
+  });
+
+  it('T-20: coalesces a burst arriving as three writes into ONE frame', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+    const pipe = stream as unknown as PassThrough;
+
+    pipe.write('alpha\r\n');
+    pipe.write('beta\r\n');
+    pipe.write('gamma');
+    await new Promise((r) => setTimeout(r, 40));
+
+    expect(sink.text()).toBe(`${OPEN}alpha\nbeta\ngamma${CLOSE}`);
+    expect(sink.text().split(OPEN)).toHaveLength(2);
+    filter.dispose();
+  });
+
+  it('T-21: force-flushes an unterminated paste and returns to idle (I-4)', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+    const pipe = stream as unknown as PassThrough;
+
+    pipe.write(`${BEGIN}stuck`);
+    await stillHeld();
+    expect(sink.text()).toBe('');
+
+    await new Promise((r) => setTimeout(r, 2_100));
+    expect(sink.text()).toBe(`${OPEN}stuck${CLOSE}`);
+
+    // Back in `idle`: input is never wedged, which is the whole of I-4.
+    pipe.write('x');
+    await new Promise((r) => setTimeout(r, 40));
+    expect(sink.text()).toBe(`${OPEN}stuck${CLOSE}x`);
+    filter.dispose();
+  }, 10_000);
+
+  it('flushes an open burst FIRST when a bracketed paste starts (P2-4)', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write(`aa\r\nbb${BEGIN}cc${END}`);
+    await tick();
+
+    expect(sink.text()).toBe(`${OPEN}aa\nbb${CLOSE}${OPEN}cc${CLOSE}`);
+    filter.dispose();
+  });
+
+  it('consumes a stray end marker rather than typing it into the draft (I-16)', async () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write(`a${END}b`);
+    await new Promise((r) => setTimeout(r, 40));
+
+    expect(sink.text()).toBe('ab');
+    expect(sink.text()).not.toContain('[201~');
+    filter.dispose();
+  });
+
+  it('refuses an over-limit paste through the bridge and writes NO frame (D-11 / AC-9)', async () => {
+    const notify = vi.fn();
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true }, { notify });
+    const sink = drain(filter);
+    const pipe = stream as unknown as PassThrough;
+
+    pipe.write(BEGIN);
+    // 3 MiB, above the 2 MiB single-paste ceiling.
+    for (let i = 0; i < 3; i += 1) {
+      pipe.write('x'.repeat(1024 * 1024));
+      await tick();
+    }
+    pipe.write(END);
+    await tick();
+
+    expect(sink.text()).toBe('');
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0]![0]).toBe('warn');
+    expect(String(notify.mock.calls[0]![1])).toContain('Paste too large');
+    expect(String(notify.mock.calls[0]![1])).toContain('2.0 MB');
+    filter.dispose();
+  }, 20_000);
+
+  it('with { mouse: false } it never parses a mouse report (step 0 / P0-1)', async () => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true });
+    const sink = drain(filter);
+    const seen: MouseEvent[] = [];
+    filter.source.subscribe((e) => seen.push(e));
+
+    (stream as unknown as PassThrough).write(`a${sgr(64, 3, 4)}b`);
+    await new Promise((r) => setTimeout(r, 40));
+
+    // Neither consumed nor emitted: a `--no-mouse` session never wrote `?1000h`,
+    // so no real report can arrive and the parser could only ever eat pasted
+    // bytes that happen to look like one.
+    expect(seen).toHaveLength(0);
+    expect(sink.text()).toContain('[<64;3;4M');
+    filter.dispose();
+  });
+
+  it('with { paste: false } it frames nothing at all (AC-6)', async () => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: true, paste: false });
+    const sink = drain(filter);
+
+    (stream as unknown as PassThrough).write('foo\r\nbar');
+    await new Promise((r) => setTimeout(r, 40));
+
+    expect(sink.text()).toBe('foo\r\nbar');
+    filter.dispose();
+  });
+});
+
+/**
+ * Defect 2 / B3 A'' -- THE TORN-MARKER RESCUE.
+ *
+ * A paste whose marker ESC lands in a read event of its own is ordinary on a
+ * Windows console, over SSH and inside tmux under load. The 12 ms pending flush
+ * releases that ESC (the Esc key must not be held hostage) and, before the
+ * rescue, nothing recognised the `[200~hello world` that followed -- `indexOf`
+ * needs the ESC -- so the marker was typed into the draft.
+ */
+describe('createStdinFilter -- torn paste marker rescue (defect 2)', () => {
+  /** Past `PENDING_FLUSH_MS` (12 ms), so the lone ESC is really released first. */
+  const AFTER_FLUSH_MS = 20;
+
+  const tornFilter = () => {
+    const { stream } = fakeStdin();
+    const filter = pasteFilter(stream);
+    return { stream, filter, sink: drain(filter) };
+  };
+
+  it('rescans a late BEGIN fragment instead of typing `[200~` into the draft', () => {
+    vi.useFakeTimers();
+    try {
+      const { stream, filter, sink } = tornFilter();
+      stream.emit('data', ESC);
+      vi.advanceTimersByTime(AFTER_FLUSH_MS); // the lone ESC reaches Ink as a key
+      stream.emit('data', '[200~hello world');
+      stream.emit('data', END);
+      // The marker CHARACTERS never become text. The leading ESC is the key
+      // press this filter had already written and cannot retract (§R-4.1).
+      expect(sink.text()).toBe(`${ESC}${OPEN}hello world${CLOSE}`);
+      expect(sink.text()).not.toContain('[200~');
+      filter.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('rescans a late END fragment instead of typing `[201~` (I-16)', () => {
+    vi.useFakeTimers();
+    try {
+      const { stream, filter, sink } = tornFilter();
+      stream.emit('data', ESC);
+      vi.advanceTimersByTime(AFTER_FLUSH_MS);
+      stream.emit('data', '[201~');
+      expect(sink.text()).toBe(ESC); // the key press, nothing else
+      expect(sink.text()).not.toContain('[201~');
+      filter.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not swallow a fragment the chunk did not complete at the junction', () => {
+    // The rescue fires only when this chunk FINISHES the released head into a
+    // whole marker. A marker further along a chunk is ordinary text: consuming
+    // it would delete characters the user really typed (see the literal case
+    // below), so that fragment keeps its bytes and only its ESC is missing.
+    vi.useFakeTimers();
+    try {
+      const { stream, filter, sink } = tornFilter();
+      stream.emit('data', ESC);
+      vi.advanceTimersByTime(AFTER_FLUSH_MS);
+      stream.emit('data', 'x[201~y');
+      expect(sink.text()).toBe(`${ESC}x[201~y`);
+      filter.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('leaves the fragment alone once the rescue window has expired', () => {
+    vi.useFakeTimers();
+    try {
+      const { stream, filter, sink } = tornFilter();
+      stream.emit('data', ESC);
+      vi.advanceTimersByTime(PASTE_MARKER_RESCAN_TTL_MS + 50);
+      stream.emit('data', '[200~hello world');
+      vi.runAllTimers();
+      // Nothing is swallowed: the released text comes through as typed.
+      expect(sink.text()).toBe(`${ESC}[200~hello world`);
+      filter.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('never rewrites a literal `[200~` typed with no lone ESC before it', () => {
+    vi.useFakeTimers();
+    try {
+      const { stream, filter, sink } = tornFilter();
+      stream.emit('data', 'a[200~b');
+      vi.runAllTimers();
+      expect(sink.text()).toBe('a[200~b');
+      filter.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('still reassembles a marker torn inside itself (`[20` then `1~`)', () => {
+    vi.useFakeTimers();
+    try {
+      const { stream, filter, sink } = tornFilter();
+      stream.emit('data', `${ESC}[20`);
+      stream.emit('data', '1~');
+      // The carried-prefix hold already covers this split; the rescue must not
+      // disturb it (an unconsumed END is a literal `[201~` in the draft).
+      expect(sink.text()).toBe('');
+      filter.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('is disabled entirely with { paste: false }', () => {
+    vi.useFakeTimers();
+    try {
+      const { stream } = fakeStdin();
+      const filter = createStdinFilter(stream, { mouse: false, paste: false });
+      const sink = drain(filter);
+      stream.emit('data', ESC);
+      vi.advanceTimersByTime(AFTER_FLUSH_MS);
+      stream.emit('data', '[200~hello world');
+      // No framing is on, so nothing may be recognised and nothing swallowed.
+      expect(sink.text()).toBe(`${ESC}[200~hello world`);
+      filter.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+/**
+ * R-2 -- THE BYPASS. A single-line paste carrying ESC fails BOTH rules of
+ * `classifyChunk` (no line break; a control byte other than TAB), so it used to
+ * travel the keystroke path with `sanitisePaste` never called. On the real
+ * component that produced either a draft holding `[38;2;18;52;86m` beside a
+ * LIVE ESC or an uncaught TypeError inside Ink's key parser.
+ */
+describe('R-2: an unframed single-line paste still takes the cleaning path', () => {
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 40));
+
+  it.each([
+    ['a truecolour SGR', `${ESC}[38;2;18;52;86mconst x = 1;${ESC}[0m`, 'const x = 1;'],
+    ['a short SGR pair', `${ESC}[32mINFO${ESC}[0m build ok, all 42 checks passed`,
+      'INFO build ok, all 42 checks passed'],
+    ['a bold-red SGR', `${ESC}[1;31mfailed${ESC}[0m at step 7`, 'failed at step 7'],
+    ['an OSC title', `${ESC}]0;a window title${'\u0007'}after`, 'after'],
+  ])('frames and cleans %s', async (_name, wire, expected) => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: true, paste: true });
+    const sink = drain(filter);
+    try {
+      (stream as unknown as PassThrough).write(wire as string);
+      await settle();
+      // Framed, cleaned, and -- the point of the whole fix -- with NO ESC and no
+      // parameter bytes left for Ink or the model to trip over.
+      expect(sink.text()).toBe(`${OPEN}${expected}${CLOSE}`);
+      expect(sink.text()).not.toContain(ESC);
+    } finally { filter.dispose(); }
+  });
+
+  it('leaves a real arrow-key burst on the keystroke path', async () => {
+    // Boundary 2 of R-2: an arrow key never ends in `m`, so nothing is framed.
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true });
+    const sink = drain(filter);
+    try {
+      (stream as unknown as PassThrough).write(`${ESC}[A${ESC}[B`);
+      await settle();
+      expect(sink.text()).toBe(`${ESC}[A${ESC}[B`);
+    } finally { filter.dispose(); }
+  });
+
+  it('is inert with paste OFF, which is the documented opt-out', async () => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: false });
+    const sink = drain(filter);
+    try {
+      const wire = `${ESC}[32mINFO${ESC}[0m build ok`;
+      (stream as unknown as PassThrough).write(wire);
+      await settle();
+      expect(sink.text()).toBe(wire);
+    } finally { filter.dispose(); }
+  });
+});
+
+/**
+ * R-4 -- win32-input-mode records INSIDE a frame. Translating them is data
+ * fidelity: without it each pasted character arrives as 15 visible digits, and
+ * with a whole-sequence stripper but no translation it would silently VANISH.
+ */
+describe('R-4: win32 records inside a frame behave like the ones outside it', () => {
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 40));
+  const down = (vk: number, char: number): string => `${ESC}[${vk};0;${char};1;0;1_`;
+  const up = (vk: number, char: number): string => `${ESC}[${vk};0;${char};0;0;1_`;
+
+  it('in-frame records are translated to their characters', async () => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true, enhancedKeys: true });
+    const sink = drain(filter);
+    try {
+      (stream as unknown as PassThrough).write(
+        `${BEGIN}${down(65, 97)}${up(65, 97)}${down(66, 98)}${up(66, 98)}${END}`,
+      );
+      await settle();
+      expect(sink.text()).toBe(`${OPEN}ab${CLOSE}`);
+      expect(sink.text()).not.toContain('[65;0;');
+    } finally { filter.dispose(); }
+  });
+
+  it('in-frame and out-of-frame records produce the same characters', async () => {
+    const viaFrame = async (wire: string): Promise<string> => {
+      const { stream } = fakeStdin();
+      const filter = createStdinFilter(stream, { mouse: false, paste: true, enhancedKeys: true });
+      const sink = drain(filter);
+      try {
+        (stream as unknown as PassThrough).write(wire);
+        await settle();
+        return sink.text();
+      } finally { filter.dispose(); }
+    };
+    const records = `${down(65, 97)}${up(65, 97)}${down(66, 98)}${up(66, 98)}`;
+    expect(await viaFrame(`${BEGIN}${records}${END}`)).toBe(`${OPEN}ab${CLOSE}`);
+    expect(await viaFrame(records)).toBe('ab');
+  });
+
+  it('leaves ordinary text alone when enhancedKeys is off', async () => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true });
+    const sink = drain(filter);
+    try {
+      (stream as unknown as PassThrough).write(`${BEGIN}a\tb${END}`);
+      await settle();
+      // The TAB survives: it is indentation, and the RENDERERS expand it.
+      expect(sink.text()).toBe(`${OPEN}a\tb${CLOSE}`);
+    } finally { filter.dispose(); }
+  });
+});
+
+describe('cursor position report (native-scroll anchor probe)', () => {
+  const CPR = (row: number): string => `${ESC}[${row};1R`;
+
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 20));
+
+  it('strips_cursor_position_report_in_native_mode', async () => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true, cursorReport: true });
+    const sink = drain(filter);
+    try {
+      (stream as unknown as PassThrough).write(`a${CPR(12)}b`);
+      await settle();
+      expect(sink.text()).toBe('ab');
+    } finally { filter.dispose(); }
+  });
+
+  it('keeps_cursor_report_when_the_feature_is_off', async () => {
+    // `app` mode must stay byte-for-byte identical (I-A8): with the feature off the
+    // report travels exactly as it did before this feature existed.
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true });
+    const sink = drain(filter);
+    try {
+      (stream as unknown as PassThrough).write(CPR(12));
+      await settle();
+      expect(sink.text()).toBe(CPR(12));
+    } finally { filter.dispose(); }
+  });
+
+  it('never lets a pasted report reach the draft either', async () => {
+    // A body is DATA, so the CPR test runs AFTER the paste tests and the paste
+    // path owns the bytes. Measured: `sanitisePaste` strips the sequence, so the
+    // report cannot become `12;1R` in the composer from either direction.
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true, cursorReport: true });
+    const sink = drain(filter);
+    try {
+      (stream as unknown as PassThrough).write(`${PASTE_OPEN}log line${CPR(12)}${PASTE_CLOSE}`);
+      await settle();
+      expect(sink.text()).toContain('log line');
+      expect(sink.text()).not.toContain('12;1R');
+    } finally { filter.dispose(); }
+  });
+
+  it('holds_a_torn_cursor_report_while_expecting', async () => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true, cursorReport: true });
+    const sink = drain(filter);
+    try {
+      filter.setExpectingCursorReport(true);
+      (stream as unknown as PassThrough).write(`${ESC}[12`);
+      // The probe window outlives the 12 ms pending flush on purpose.
+      await settle();
+      expect(sink.text()).toBe('');
+      (stream as unknown as PassThrough).write(';1R');
+      await settle();
+      expect(sink.text()).toBe('');
+    } finally { filter.dispose(); }
+  });
+
+  it('flushes_a_torn_report_once_the_probe_settles', async () => {
+    const { stream } = fakeStdin();
+    const filter = createStdinFilter(stream, { mouse: false, paste: true, cursorReport: true });
+    const sink = drain(filter);
+    try {
+      filter.setExpectingCursorReport(true);
+      (stream as unknown as PassThrough).write(`${ESC}[12`);
+      await settle();
+      filter.setExpectingCursorReport(false);
+      // A terminal that answered with something else must not cost the keyboard:
+      // the held bytes become ordinary text straight away.
+      expect(sink.text()).toBe(`${ESC}[12`);
+    } finally { filter.dispose(); }
+  });
+});

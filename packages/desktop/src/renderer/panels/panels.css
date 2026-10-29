@@ -1,0 +1,83 @@
+/* Inspector panels. Tokens only; status is always text + glyph, never colour alone. */
+.panel { display: grid; gap: var(--space-3); padding: var(--space-3); align-content: start; }
+.panel-empty { padding: var(--space-6) var(--space-4); text-align: center; color: var(--fg-light); }
+.panel-empty-title { color: var(--fg-default); font-weight: 600; margin: 0 0 var(--space-1); }
+.panel-empty p { margin: 0 0 var(--space-2); }
+.panel-block { border: 1px solid var(--border-default); border-radius: var(--radius-card); padding: var(--space-3); }
+.panel-block-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); }
+.panel-block-head h3 { margin: 0; flex: 1; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-light); }
+.panel-aside { color: var(--fg-lighter); font-size: 12px; }
+.panel-note { margin: var(--space-1) 0 0; color: var(--fg-lighter); font-size: 12px; }
+.panel-error { margin: var(--space-1) 0 0; color: var(--destructive); font-size: 12px; overflow-wrap: anywhere; }
+.panel-actions { display: flex; gap: var(--space-2); margin-top: var(--space-2); flex-wrap: wrap; }
+
+/* Changes */
+.change-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.change-row { display: flex; align-items: center; border-radius: var(--radius-control); }
+.change-row:hover, .change-row[data-selected='true'] { background: var(--bg-surface-300); }
+.change-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--space-2); height: var(--control-lg); padding: 0 var(--space-2); text-align: left; }
+.change-status { width: 18px; height: 18px; display: inline-grid; place-items: center; flex: none; border-radius: 4px; font: 600 11px / 1 var(--font-mono); border: 1px solid var(--border-strong); }
+.change-status[data-status='A'] { color: var(--brand); border-color: var(--brand); }
+.change-status[data-status='M'] { color: var(--warning); border-color: var(--warning); }
+.change-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.change-stat { color: var(--fg-lighter); font: 11px var(--font-mono); flex: none; }
+.patch { border: 1px solid var(--border-default); border-radius: var(--radius-card); overflow: auto; max-height: 420px; font: var(--text-code) / var(--leading-code) var(--font-mono); }
+.patch-hunk-head { padding: 2px var(--space-2); background: var(--bg-surface-300); color: var(--fg-lighter); }
+.patch-line { display: flex; white-space: pre; }
+.patch-num { width: 40px; flex: none; text-align: right; padding-right: var(--space-2); color: var(--fg-muted); }
+.patch-text { flex: 1; }
+.patch-line[data-kind='add'] { background: var(--brand-soft); }
+.patch-line[data-kind='del'] { background: var(--destructive-soft); }
+
+/* Plan */
+.plan-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+.plan-item { display: flex; align-items: flex-start; gap: var(--space-2); }
+.plan-glyph { flex: none; margin-top: 3px; color: var(--fg-lighter); }
+.plan-glyph[data-status='completed'], .plan-glyph[data-status='passed'] { color: var(--brand); }
+.plan-glyph[data-status='failed'] { color: var(--destructive); }
+.plan-glyph[data-status='in_progress'] { color: var(--info); }
+.plan-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.plan-item[data-status='completed'] .plan-text { color: var(--fg-light); text-decoration: line-through; }
+.plan-state { flex: none; font-size: 11px; color: var(--fg-lighter); }
+.plan-check, .plan-evidence { color: var(--fg-lighter); font-size: 12px; margin: 2px 0 0; }
+
+/* Agents */
+.agent-list, .job-list, .ctx-hist-list, .gov-runs { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-3); }
+.agent-row, .job-row, .ctx-hist, .gov-run { padding-top: var(--space-3); border-top: 1px solid var(--border-default); }
+.agent-row:first-child, .job-row:first-child, .ctx-hist:first-child, .gov-run:first-child { padding-top: 0; border-top: 0; }
+.agent-head, .job-head, .ctx-hist-head, .gov-run-main { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.agent-name, .job-id { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-desc { margin: var(--space-1) 0 0; color: var(--fg-light); overflow-wrap: anywhere; }
+.agent-stats { margin: 2px 0 0; color: var(--fg-lighter); font-size: 12px; }
+.agent-summary { margin: var(--space-1) 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Jobs */
+.job-time { margin-left: auto; color: var(--fg-lighter); font-size: 12px; }
+.job-cmd { display: block; margin-top: var(--space-1); font: var(--text-code) var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-light); }
+.job-meta { margin: 2px 0 0; color: var(--fg-lighter); font-size: 12px; overflow-wrap: anywhere; }
+.job-log, .gov-report {
+  margin: var(--space-2) 0 0; padding: var(--space-2); max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  border: 1px solid var(--border-default); border-radius: var(--radius-control); background: var(--bg-default); font: var(--text-code) / var(--leading-code) var(--font-mono);
+}
+
+/* Context */
+.ctx-gauge { display: flex; align-items: center; gap: var(--space-4); }
+.ctx-ring-track { stroke: var(--bg-surface-300); }
+.ctx-ring-fill { stroke: var(--brand); }
+.ctx-pct { margin: 0; font-size: 22px; font-weight: 600; }
+.ctx-usage { display: grid; grid-template-columns: 1fr auto; gap: 4px var(--space-4); margin: 0; }
+.ctx-usage dt { color: var(--fg-lighter); }
+.ctx-usage dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.ctx-summary { white-space: pre-wrap; overflow-wrap: anywhere; margin: var(--space-1) 0 0; }
+
+/* Governance */
+.gov-goal { margin: 0; overflow-wrap: anywhere; color: var(--fg-light); flex: 1; min-width: 0; }
+.gov-pipeline { list-style: none; display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-2); margin: var(--space-2) 0; padding: 0; font-size: 12px; }
+.gov-pipeline li { padding: 2px 8px; border: 1px solid var(--border-strong); border-radius: 9px; color: var(--fg-lighter); }
+.gov-pipeline li[data-state='active'] { border-color: var(--brand); color: var(--fg-default); font-weight: 600; }
+.gov-pipeline li[data-state='done'] { color: var(--fg-light); }
+.gov-step-state { font-size: 11px; color: var(--fg-lighter); }
+.gov-roster { width: 100%; border-collapse: collapse; font-size: 12px; }
+.gov-roster th, .gov-roster td { text-align: left; padding: 4px 0; border-top: 1px solid var(--border-default); font-weight: 400; }
+.gov-roster thead th { color: var(--fg-lighter); border-top: 0; }
+.gov-role { color: var(--fg-lighter); }

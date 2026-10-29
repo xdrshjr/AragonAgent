@@ -1,0 +1,14 @@
+/* Prompt picker. */
+.pp { display: grid; gap: var(--space-2); }
+.pp-list { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow-y: auto; border: 1px solid var(--border-default); border-radius: var(--radius-card); }
+.pp-item { display: grid; gap: 2px; padding: var(--space-2) var(--space-3); cursor: pointer; border-top: 1px solid var(--border-default); }
+.pp-item:first-child { border-top: 0; }
+.pp-item[data-active='true'] { background: var(--bg-surface-300); box-shadow: inset 2px 0 0 var(--brand); }
+.pp-item-title { display: flex; align-items: center; gap: var(--space-2); font-weight: 500; }
+.pp-star { color: var(--warning); flex: none; }
+.pp-item-sub { color: var(--fg-lighter); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pp-note, .pp-hint { margin: 0; color: var(--fg-lighter); font-size: 12px; }
+.pp-note { padding: var(--space-3) 0; }
+.pp-fill { display: grid; gap: var(--space-3); }
+.pp-fill-title { margin: 0; font-size: 14px; }
+.pp-preview pre { margin: var(--space-2) 0 0; max-height: 200px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--space-2); border: 1px solid var(--border-default); border-radius: var(--radius-control); background: var(--bg-default); font: var(--text-code) / var(--leading-code) var(--font-mono); }

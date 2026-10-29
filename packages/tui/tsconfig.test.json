@@ -1,0 +1,34 @@
+{
+  // Typecheck the TEST tree, which `tsconfig.json` deliberately excludes so the
+  // build never emits fixtures (todo-plan-followthrough §3.8 / W3).
+  //
+  // WITHOUT THIS FILE THE TEST TREE IS UNTYPED IN PRACTICE: vitest transpiles
+  // without typechecking, so a required-field widening breaks every fixture that
+  // builds the widened type while `npm run build` and `npm test` are BOTH green.
+  // That hole cost round 1 two separate incidents in one feature.
+  //
+  // THE CHILD'S `exclude` REPLACES THE PARENT'S rather than extending it, which
+  // is precisely what pulls `**/__tests__/**` back in. Do not "tidy" this by
+  // dropping the key: without it the inherited exclusions apply and this config
+  // checks exactly the same files `tsconfig.json` already does.
+  //
+  // `types: ["node"]` and NOT `vitest/globals`: every test file in this package
+  // imports `{ describe, it, expect, vi }` from 'vitest' explicitly, so nothing
+  // relies on ambient globals.
+  //
+  // `noEmit` matters on BOTH invocations of the `typecheck` script: without it
+  // the check writes into `dist/` and races the build.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
+}
