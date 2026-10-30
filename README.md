@@ -96,7 +96,7 @@ and package.**
 
 ### a) Desktop app (Windows installer)
 
-If you just want the app and not a build toolchain, download `AragonAgent.Setup.0.0.1.exe` from the
+If you just want the app and not a build toolchain, download `AragonAgent.Setup.0.1.0.exe` from the
 [releases page](https://github.com/xdrshjr/AragonAgent/releases/latest) — `/releases/latest` always
 points at the newest release. It is an NSIS installer for **Windows x64**.
 

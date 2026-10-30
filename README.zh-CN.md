@@ -85,7 +85,7 @@ UI 通过 CLI 的 `host/` facade 与引擎通信，那是一条有文档、有�
 ### a) 桌面应用（Windows 安装包）
 
 如果只想用应用、不想装一套构建工具链，直接从
-[Releases 页面](https://github.com/xdrshjr/AragonAgent/releases/latest) 下载 `AragonAgent.Setup.0.0.1.exe`
+[Releases 页面](https://github.com/xdrshjr/AragonAgent/releases/latest) 下载 `AragonAgent.Setup.0.1.0.exe`
 即可 —— `/releases/latest` 永远指向最新一版。这是一个面向 **Windows x64** 的 NSIS 安装包。
 
 - **按用户安装，不需要管理员权限。** 它装在你自己的用户目录下，不会请求提权。
