@@ -89,9 +89,17 @@ sent and the main-process log tail in `test-results/<case>/`.
 The launcher removes `ELECTRON_RUN_AS_NODE` (see "Two environment traps"), so the suite also runs from a
 shell that exports it.
 
+**It does not need the machine to be quiet.** Electron keys its single-instance lock to the `userData` directory, so a test
+run that shared the default one would quit at once whenever an installed or development copy of the app is open (the
+symptom was "Target page, context or browser has been closed", with `Unable to move the cache` in the log). The launcher
+therefore starts every run with `--e2e-user-data=<home>/electron-user-data`. The directory is derived from the run's own
+home, so two instances started on the *same* home still collide on the lock (single-instance behavior stays testable)
+while different tests never do. If a launch still dies on startup, the error now says which of "stale `dist/`",
+"single-instance lock" or "port in use" is the likely cause. Never end the other process to make a test pass.
+
 ### Build flavors
 
-| Flavor | What it is | Test switches (`--e2e`, `--e2e-fault`, `--e2e-feed`, `--e2e-restore-window`) |
+| Flavor | What it is | Test switches (`--e2e`, `--e2e-fault`, `--e2e-feed`, `--e2e-restore-window`, `--e2e-user-data`) |
 |---|---|---|
 | `dev` | running from source | read |
 | `e2e` | a packaged build the harness may drive | read |
@@ -108,6 +116,32 @@ scenario wants. The geometry scenarios (`test/e2e/lifecycle.e2e.ts`) add `--e2e-
 restore / persist path. After a **renderer crash** Playwright's `Page` object stays "crashed" even though
 Electron has reloaded the window, so those scenarios read and drive the page through the main process
 (`webContents.executeJavaScript` / `sendInputEvent`) instead.
+
+## Attachments, images and tool calls
+
+- **Adding things.** Paste (`Ctrl/Cmd+V`), drag and drop, the `+` menu ("Add images and files", "Paste image from clipboard"),
+  or `Ctrl/Cmd+U`. Pictures are shrunk to what a model accepts and shown as chips; `@image1` in the text refers to one.
+  Removing a chip can be undone for eight seconds ("Undo"), and a chip's eye button previews the picture exactly as it will be sent.
+- **Formats.** PNG, JPEG, GIF and WebP go as they are when they already fit. BMP, AVIF, ICO and SVG are converted to PNG in the
+  window first (an SVG is drawn through an `<img>`: its scripts and outside references never run). HEIC / HEIF / TIFF cannot be
+  decoded by Chromium, so they stay file references and the chip says the model gets the path only.
+- **Clipboard.** If a paste carries a picture the page cannot see (some screenshot tools put only a bare bitmap on the clipboard),
+  the main process reads it with Electron's clipboard module - image only, on demand, never polled. "Paste image from clipboard"
+  in the `+` menu does the same by hand.
+- **Models that cannot see images.** The banner above the box says so *before* sending. If a provider refuses a picture anyway, the
+  error row offers "This model cannot see images - resend as file paths" (records the decision, waits for the host to acknowledge
+  it, then resends). For a model the catalog says reads images, only a one-off resend is offered, because the cause is more likely
+  a gateway. Decisions are listed, and can be taken back, in **Settings > General > Image input**.
+- **Tool calls in plain language.** Unless Developer mode is on (Settings > General, or the hidden `Ctrl/Cmd+Shift+D`). Three or more
+  finished reads / searches / folder listings in a row fold into one line that opens in place; edits, commands, failures and
+  anything still running are never folded. Switch it off in Settings > General ("Fold runs of reading and searching"). Tools served
+  by an MCP server (`mcp__<server>__<tool>`) show where they came from.
+
+| Switch | Effect |
+|---|---|
+| `ARAGON_DESKTOP_ATTACHMENTS=0` (environment, any build) | Hides paste / drop / pick / `@image` and the clipboard entry. Only the exact string `0` turns it off. Pictures already in a conversation still show. |
+| Settings > General > "Fold runs of reading and searching" | Stored in `desktop-state.json` (`groupToolRuns`), not in `config.json`. |
+| Developer mode | Every call is shown as its own raw card; nothing is folded or renamed. |
 
 ## Package
 
@@ -226,6 +260,11 @@ the harness attaching, so it reads high against the in-app figure.
 - A crash restores the last **checkpoint**, which is written a moment after a turn ends; a host that dies
   inside that moment loses that turn (the window re-attaches on its own once the host is back).
 - macOS and Linux packages are built and smoke-tested in CI only (unsigned); there is no E2E on Linux.
+- Pictures are kept inline in the session file, so a long screenshot-heavy session grows by the size of its pictures. The
+  benchmark `B-5` writes a checkpoint holding eight ~1 MiB pictures (about 11 MB) in ~35 ms against a 150 ms budget; if that ever
+  goes red the fix is to reference a staged copy instead, which changes the session file and needs its own design.
+- A refused-picture recovery adds a new message after the failed one; there is no host command to replace the failed turn, so the
+  failed turn stays above it as history (the notice says so).
 - Syntax highlighting in code blocks is a small built-in tokenizer, not Shiki.
 - Unsent drafts survive a reload or a renderer crash but **not** quitting the app: they are kept in `sessionStorage` on purpose (a draft
   may hold a pasted secret, and nothing the user has not chosen to send is written to disk).

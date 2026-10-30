@@ -9,6 +9,8 @@
  */
 
 import type { Entry } from '@aragon-agent/tui/model/agent/reducer';
+import type { AttachmentMeta } from '@aragon-agent/tui/model/agent/attachment-meta';
+import { formatBytes } from '../../shared/attachments.js';
 
 export interface ExportOptions {
   includeToolOutput: boolean;
@@ -59,11 +61,24 @@ function truncateOutput(text: string): { text: string; truncated: boolean } {
     : { text: text.slice(0, TOOL_OUTPUT_LIMIT), truncated: true };
 }
 
+/**
+ * One quoted line per attachment: its reference, display name, kind and size. Never the bytes and
+ * never a path on the exporter's machine (an export is meant to be shared).
+ */
+export function attachmentLines(attachments: readonly AttachmentMeta[] | undefined): string {
+  if (!attachments || attachments.length === 0) return '';
+  const lines = attachments.map((a) => {
+    const size = a.kind === 'folder' ? '' : `, ${formatBytes(a.size)}`;
+    return `> 📎 ${a.ref} — ${oneLine(a.name)} (${a.kind}${size})`;
+  });
+  return `\n\n${lines.join('\n')}`;
+}
+
 type Render = (entry: never, options: ExportOptions) => string | null;
 
 const KIND_RENDERERS: { [K in Entry['kind']]: (entry: Extract<Entry, { kind: K }>, options: ExportOptions) => string | null } = {
-  user: (entry) => `## You\n\n${entry.text}`,
-  queued: (entry) => `## You *(queued)*\n\n${entry.text}`,
+  user: (entry) => `## You\n\n${entry.text}${attachmentLines(entry.attachments)}`,
+  queued: (entry) => `## You *(queued)*\n\n${entry.text}${attachmentLines(entry.attachments)}`,
   assistant: (entry, options) => {
     const parts = ['## Assistant', ''];
     if (options.includeThinking && entry.thinking) parts.push('<details><summary>Thinking</summary>', '', entry.thinking, '', '</details>', '');

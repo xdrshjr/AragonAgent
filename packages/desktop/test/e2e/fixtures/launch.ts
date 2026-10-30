@@ -11,7 +11,7 @@
  * only in non-release builds (see `src/main/e2e-support.ts`).
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -122,6 +122,39 @@ function modelConfig(mockUrl: string, extra: Record<string, unknown>): Record<st
   };
 }
 
+/**
+ * Turn Playwright's bare "Target page, context or browser has been closed" into a sentence that names
+ * the likely cause. Only the message changes; the failure still propagates.
+ */
+export function explainLaunchFailure(error: unknown, context: { sourceNewerThanDist: boolean }): Error {
+  const original = error instanceof Error ? error : new Error(String(error));
+  const message = original.message;
+  const hints: string[] = [];
+  if (context.sourceNewerThanDist) {
+    hints.push('dist/ is older than src/: run `npm run build -w packages/desktop` first.');
+  }
+  if (/Target page, context or browser has been closed|process exited|exited with code/i.test(message)) {
+    hints.push('The app quit right after starting. Another AragonAgent instance probably holds the single-instance lock for this userData; the harness passes --e2e-user-data=<home>/electron-user-data to avoid that, so check that flag took effect.');
+  }
+  if (/EADDRINUSE|address already in use/i.test(message)) {
+    hints.push('A port is already in use: look for an orphaned electron / mock-LLM process.');
+  }
+  if (hints.length === 0) return original;
+  const explained = new Error([message, '', 'Likely cause:', ...hints.map((hint) => `- ${hint}`)].join('\n'));
+  explained.cause = original;
+  return explained;
+}
+
+/** True when any file under `src/` is newer than the compiled main entry (a stale `dist/` runs old code). */
+function sourceIsNewerThanDist(): boolean {
+  try {
+    const built = statSync(join(desktopRoot, 'dist', 'main', 'index.js')).mtimeMs;
+    return statSync(join(desktopRoot, 'src', 'main', 'index.ts')).mtimeMs > built;
+  } catch {
+    return false;
+  }
+}
+
 export async function launchApp(options: LaunchOptions = {}): Promise<Launched> {
   const home = mkdtempSync(join(tmpdir(), 'aragon-e2e-home-'));
   const workDir = mkdtempSync(join(tmpdir(), 'aragon-e2e-work-'));
@@ -141,14 +174,23 @@ export async function launchApp(options: LaunchOptions = {}): Promise<Launched> 
 
   const packaged = process.env.ARAGON_E2E_APP;
   const electronPath = createRequire(import.meta.url)('electron') as string;
-  const app = await electron.launch({
-    executablePath: packaged ?? electronPath,
-    args: [...(packaged ? [] : ['.']), '--e2e', ...(options.args ?? [])],
-    cwd: desktopRoot,
-    env: launchEnvironment(home),
-    timeout: 90_000,
-  });
-  const window = await app.firstWindow();
+  // Derived from `home`, not random: two instances started on the SAME home still collide on the lock
+  // (so single-instance behavior stays testable), while different tests never share one.
+  const userDataDir = join(home, 'electron-user-data');
+  let app: ElectronApplication;
+  let window: Page;
+  try {
+    app = await electron.launch({
+      executablePath: packaged ?? electronPath,
+      args: [...(packaged ? [] : ['.']), '--e2e', `--e2e-user-data=${userDataDir}`, ...(options.args ?? [])],
+      cwd: desktopRoot,
+      env: launchEnvironment(home),
+      timeout: 90_000,
+    });
+    window = await app.firstWindow();
+  } catch (error) {
+    throw explainLaunchFailure(error, { sourceNewerThanDist: !packaged && sourceIsNewerThanDist() });
+  }
   const logs: string[] = [];
   window.on('console', (message) => { if (message.type() === 'error' || message.type() === 'warning') logs.push(`${message.type()}: ${message.text()} @${message.location().url}:${message.location().lineNumber}`); });
   window.on('pageerror', (error) => logs.push(`pageerror: ${error.message}`));

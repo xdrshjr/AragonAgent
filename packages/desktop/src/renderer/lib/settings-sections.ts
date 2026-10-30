@@ -49,12 +49,14 @@ const GENERAL: SectionSpec = {
     },
     bool('reducedMotion', 'settings.field.reducedMotion'),
     bool('hints', 'settings.field.hints'),
+    bool('developerMode', 'settings.dev.label', { hintKey: 'settings.dev.hint' }),
   ],
   clamp: (raw: Raw) => ({
     theme: clampTheme(raw.theme, DEFAULT_CONFIG.theme),
     density: clampDensity(raw.density, DEFAULT_CONFIG.density),
     reducedMotion: asBool(raw.reducedMotion, DEFAULT_CONFIG.reducedMotion),
     hints: asBool(raw.hints, DEFAULT_CONFIG.hints),
+    developerMode: asBool(raw.developerMode, DEFAULT_CONFIG.developerMode),
   }),
 };
 

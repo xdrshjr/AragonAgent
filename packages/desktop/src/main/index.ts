@@ -31,6 +31,7 @@ import { createElectronLauncher } from './electron-launcher.js';
 import { loadEngine, type Engine } from './engine-loader.js';
 import { registerIpc, type Services } from './ipc-handlers.js';
 import { createLogger } from './logging.js';
+import { collectAttachmentGarbage } from './attachment-paths.js';
 import { NativeBridge } from './native-bridge.js';
 import { createProcessReaper } from './process-reaper.js';
 import { APP_ORIGIN, installProtocols, registerSchemes } from './protocols.js';
@@ -123,6 +124,8 @@ async function main(): Promise<void> {
     await runSmoke();
     return;
   }
+  // Before the lock: the lock is keyed to userData, so a test run must not share it with an open instance.
+  if (E2E.userDataDir) app.setPath('userData', E2E.userDataDir);
   if (!app.requestSingleInstanceLock()) {
     app.quit();
     return;
@@ -312,6 +315,13 @@ function attachEngine(services: Services, engine: Engine, where: ReturnType<type
 
   void index.refresh();
   setInterval(() => void index.refresh(), 5000).unref();
+  // Staged attachments of sessions that are gone and untouched for 30 days. Off the startup path.
+  setTimeout(() => {
+    try {
+      const live = new Set(engine.sessions.scanSessionFiles().map((file) => file.id));
+      collectAttachmentGarbage({ homeRoot, liveSessions: live });
+    } catch { /* housekeeping only */ }
+  }, 60_000).unref();
   app.on('will-quit', () => { watcher.stop(); index.dispose(); });
 }
 

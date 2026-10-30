@@ -10,6 +10,7 @@ import { useUi } from '../store/ui-store.js';
 import { Button } from '../ui/primitives.js';
 import { DesktopPrefs } from './DesktopPrefs.js';
 import { ForcedFanout } from './ForcedFanout.js';
+import { ImageInputSection } from './ImageInputSection.js';
 import { SectionForm } from './SectionForm.js';
 
 export function GeneralPage() {
@@ -17,6 +18,7 @@ export function GeneralPage() {
     <div className="set-page">
       <SectionForm section={SECTIONS.general} />
       <DesktopPrefs />
+      <ImageInputSection />
     </div>
   );
 }

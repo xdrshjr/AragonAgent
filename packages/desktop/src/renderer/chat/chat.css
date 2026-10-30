@@ -77,6 +77,13 @@
 .tool[data-failed='true'] { border-color: var(--destructive); }
 .tool-head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: var(--control-lg); padding: 0 var(--space-3); text-align: left; color: var(--fg-light); }
 .tool-head:hover { background: var(--bg-surface-200); }
+/* A folded run of reads / searches: lighter than a card, because it is a summary and not an event. */
+.tool-group-head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: var(--control-lg); padding: 0 var(--space-3); text-align: left; color: var(--fg-light); border-radius: var(--radius-card); }
+.tool-group-head:hover { background: var(--bg-surface-200); }
+.tool-group-head:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+.tool-group-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-light); }
+.tool-group-members { display: grid; gap: var(--space-1); padding-left: var(--space-4); border-left: 1px solid var(--border-default); margin-left: var(--space-3); }
+.tool-origin { flex: none; padding: 0 6px; border-radius: 999px; background: var(--bg-surface-300); color: var(--fg-lighter); font-size: 11px; line-height: 18px; }
 .tool-name { font-weight: 500; color: var(--fg-default); flex: none; }
 .tool-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; }
 .tool-count { color: var(--fg-lighter); font-family: var(--font-ui); }
@@ -200,6 +207,14 @@
 .toast[data-level='error'] { border-color: var(--destructive); }
 .toast[data-level='warn'] { border-color: var(--warning); }
 .toast[data-level='success'] { border-color: var(--brand); }
+.notice-hint { margin: var(--space-1) 0 0; color: var(--fg-lighter); font-size: 12px; }
+.toast-action { align-items: center; }
+.toast-action-button {
+  flex: none; padding: 2px var(--space-2); border: 0; border-radius: var(--radius-control, 6px); background: transparent;
+  color: var(--brand); font: inherit; font-weight: 500; cursor: pointer;
+}
+.toast-action-button:hover { background: var(--bg-surface-400, var(--bg-surface-300)); }
+.toast-action-button:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
 
 /* ---- Session menu, export, find (desktop-app-v1-2) -------------------------------------- */
 .menu-popover { min-width: 240px; padding: var(--space-1); }
@@ -237,3 +252,80 @@
 ::highlight(find-match) { background-color: var(--warning-soft); color: inherit; }
 ::highlight(find-current) { background-color: var(--warning); color: var(--brand-fg); }
 .row[data-find-current='true'] { outline: 1px solid var(--warning); outline-offset: -1px; border-radius: var(--radius-control); }
+
+/* ---- Attachments under a user bubble ---------------------------------------------------- */
+.att-strip { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; max-width: 85%; }
+.att-thumbs { display: flex; gap: 6px; flex-wrap: nowrap; justify-content: flex-end; }
+/* Fixed height: the virtual list's estimate (104 px with the gap) depends on it. */
+.att-thumb {
+  position: relative; height: 96px; max-width: 160px; min-width: 56px; padding: 0; overflow: hidden;
+  border: 1px solid var(--border-default); border-radius: var(--radius-card); background: var(--bg-surface-200);
+  cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+}
+.att-thumb:hover { border-color: var(--border-strong); }
+.att-thumb:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.att-thumb img { display: block; height: 100%; width: auto; max-width: 160px; object-fit: cover; }
+.att-thumb-empty { color: var(--fg-muted); display: inline-flex; padding: 0 16px; }
+.att-thumb-static { cursor: default; }
+.att-thumb[data-failed='true'] { border-color: var(--destructive); }
+.att-path-mark {
+  position: absolute; right: 4px; bottom: 4px; min-width: 18px; height: 18px; border-radius: 9px; padding: 0 4px;
+  background: var(--bg-surface-100); color: var(--fg-light); font-size: 11px; line-height: 18px; text-align: center;
+  border: 1px solid var(--border-default);
+}
+.att-more {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: rgb(0 0 0 / 0.55); color: #fff; font-size: 16px; font-weight: 600;
+}
+.att-pills { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.att-pill-file {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 240px; padding: 3px 8px; cursor: pointer;
+  border: 1px solid var(--border-default); border-radius: 999px; background: var(--bg-surface-200);
+  color: var(--fg-light); font-size: 12px;
+}
+.att-pill-file:hover { border-color: var(--border-strong); color: var(--fg-default); }
+.att-pill-file:focus-visible, .att-pill:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.att-pill-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-pill-size, .att-pill-more { color: var(--fg-muted); font-size: 11px; }
+/* The @imageN mention inside the bubble text. */
+.att-pill {
+  position: relative; display: inline-flex; align-items: center; gap: 3px; padding: 0 6px; margin: 0 1px;
+  border: 1px solid var(--border-default); border-radius: 999px; background: var(--bg-surface-200);
+  color: var(--fg-default); font: inherit; font-size: 0.92em; line-height: 1.5; cursor: pointer; vertical-align: baseline;
+}
+.att-pill:hover { border-color: var(--border-strong); }
+.att-pill-pop {
+  display: none; position: absolute; left: 0; bottom: calc(100% + 6px); z-index: 20; padding: 3px;
+  border: 1px solid var(--border-default); border-radius: var(--radius-card); background: var(--bg-surface-100);
+  box-shadow: var(--shadow-pop);
+}
+.att-pill-pop img { display: block; height: 96px; width: auto; max-width: 160px; border-radius: 5px; }
+.att-pill:hover .att-pill-pop, .att-pill:focus-visible .att-pill-pop { display: block; }
+
+/* ---- Lightbox ---------------------------------------------------------------------------- */
+.lightbox { display: flex; flex-direction: column; gap: var(--space-2); min-width: min(720px, 80vw); }
+.lightbox-bar { display: flex; align-items: center; gap: 2px; }
+.lightbox-spacer { flex: 1; }
+.lightbox-count { min-width: 84px; text-align: center; color: var(--fg-lighter); font-size: 12px; font-variant-numeric: tabular-nums; }
+.lightbox-stage {
+  position: relative; min-height: 240px; max-height: 70vh; overflow: auto; display: flex; align-items: center;
+  justify-content: center; background: var(--bg-surface-200); border-radius: var(--radius-card);
+}
+.lightbox-img { display: block; max-width: 100%; max-height: 70vh; object-fit: contain; }
+.lightbox-stage[data-actual='true'] { align-items: flex-start; justify-content: flex-start; }
+.lightbox-stage[data-actual='true'] .lightbox-img { max-width: none; max-height: none; }
+.lightbox-img[data-original='false'] { filter: saturate(0.9); opacity: 0.9; }
+.lightbox-loading { position: absolute; left: 12px; right: 12px; bottom: 12px; }
+.lightbox-note { margin: 0; color: var(--fg-lighter); font-size: 12px; }
+@media (prefers-reduced-motion: no-preference) {
+  .att-thumb img { animation: att-fade 120ms ease-out; }
+  @keyframes att-fade { from { opacity: 0; } to { opacity: 1; } }
+}
+
+/* ---- Tool voice ------------------------------------------------------------------------- */
+.tool-ident { display: block; margin: 0 0 6px; color: var(--fg-lighter); font-family: var(--font-mono); font-size: 12px; }
+.activity-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 2px; color: var(--fg-lighter); font-size: var(--text-ui);
+}
+.activity-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-clock { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--fg-muted); font-size: 12px; }

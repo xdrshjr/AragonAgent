@@ -10,7 +10,9 @@
 
 import { AlertTriangle, ShieldAlert } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from 'react';
-import { useT } from '../i18n/index.js';
+import { getLanguage, useT } from '../i18n/index.js';
+import { voiceTitle } from '../lib/tool-voice-i18n.js';
+import { useUi } from '../store/ui-store.js';
 import { dangerKinds, detectDanger, segmentSummary, type DangerMatch } from '../lib/chat-danger.js';
 import { sessionStore } from '../store/session-store.js';
 import { ANSWER_LIMITS } from '../../shared/port-protocol.js';
@@ -79,6 +81,11 @@ export function ApprovalCard(props: {
   const t = useT();
   const { request, sessionId } = props;
   const { tool, summary } = request.req;
+  const developer = useUi((state) => state.developerMode);
+  // The badge names the action in plain words; the summary below it (the exact command, path or
+  // diff header) is the safety-relevant text and is NEVER rephrased; "always allow" names the
+  // exact tool it grants, so it keeps the identifier.
+  const toolLabel = developer ? tool : voiceTitle(tool, 'friendly', getLanguage());
   const armed = useArmed();
   const [reason, setReason] = useState('');
   const denyRef = useRef<HTMLButtonElement | null>(null);
@@ -110,7 +117,7 @@ export function ApprovalCard(props: {
       <div className="approval-head">
         <ShieldAlert size={16} strokeWidth={1.5} aria-hidden="true" />
         <strong id={`approval-title-${request.id}`}>{t('chat.approval.title')}</strong>
-        <Badge>{tool}</Badge>
+        <Badge>{toolLabel}</Badge>
         {props.waiting > 0 ? <span className="approval-queue">{t('chat.approval.waiting', { n: props.waiting })}</span> : null}
       </div>
       {matches.length > 0 ? (

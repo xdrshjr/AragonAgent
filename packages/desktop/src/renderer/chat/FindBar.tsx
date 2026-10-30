@@ -63,7 +63,9 @@ export function FindBar({ sessionId, transcript }: { sessionId: string; transcri
     let frame = 0;
     let tries = 0;
     const apply = (): void => {
-      const row = document.querySelector(`.transcript [data-index="${match.entryIndex}"]`);
+      // A plain entry is its own row (`data-id`); a member folded into a group is a child of the group's row.
+      const id = entry?.id ?? '';
+      const row = document.querySelector(`.transcript [data-id="${id}"], .transcript [data-entry-id="${id}"]`);
       if (!row) {
         tries += 1;
         if (tries < MOUNT_FRAMES) frame = requestAnimationFrame(apply);

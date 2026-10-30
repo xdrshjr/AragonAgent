@@ -2,10 +2,21 @@ import { useEffect, useRef, useState } from 'react';
 import { useT } from '../i18n/index.js';
 import { describeFailure } from '../lib/chat-results.js';
 import { sessionStore } from '../store/session-store.js';
+import type { AttachmentDraft } from './attachments/attachment-draft-store.js';
 import type { MentionState } from './MentionMenu.js';
 
 /** Typing pauses this long before a search goes out (a keystroke per request would flood the host). */
 export const MENTION_DEBOUNCE_MS = 120;
+
+/**
+ * The attachments an `@query` can point at: by reference name (`@im` finds image1) or by file
+ * name. Failed ones are left out - there is nothing to reference.
+ */
+export function filterAttachmentMentions(items: readonly AttachmentDraft[], query: string): AttachmentDraft[] {
+  const needle = query.toLowerCase();
+  return items.filter((item) => item.status !== 'error'
+    && (needle === '' || item.ref.startsWith(needle) || item.name.toLowerCase().includes(needle)));
+}
 
 const IDLE: MentionState = { status: 'idle', paths: [], truncated: false };
 

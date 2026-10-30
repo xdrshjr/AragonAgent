@@ -50,7 +50,7 @@ function conversation(): ViewAction[] {
 let host: FakeHost;
 
 beforeEach(() => { host = mountSession({ view: reduce(conversation()) }); });
-afterEach(() => { cleanup(); unmountSession(); });
+afterEach(() => { cleanup(); unmountSession(); useUi.setState({ developerMode: false }); });
 
 describe('Transcript entry kinds', () => {
   it('renders user, assistant (as markdown), thinking, tool, service, compaction and notice entries', () => {
@@ -72,6 +72,8 @@ describe('Transcript entry kinds', () => {
   });
 
   it('expands a bash card to its command and ANSI output, and collapses it again', () => {
+    // The raw tool label is the developer-mode wording; friendly mode is covered by ToolCard.voice.
+    useUi.setState({ developerMode: true });
     render(<Transcript sessionId="s1" />);
     const head = screen.getByRole('button', { name: /bash/ });
     expect(head.getAttribute('aria-expanded')).toBe('false');
@@ -83,6 +85,7 @@ describe('Transcript entry kinds', () => {
   });
 
   it('shows the change counts on an edit card and a diff, unified or side by side, on expand', () => {
+    useUi.setState({ developerMode: true });
     render(<Transcript sessionId="s1" />);
     const head = screen.getByRole('button', { name: /edit_file/ });
     expect(head.textContent).toContain('+1');

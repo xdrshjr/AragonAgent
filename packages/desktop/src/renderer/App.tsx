@@ -97,7 +97,9 @@ export function App() {
       const [appInfo, desktopState] = await Promise.all([ipcValue('app:info'), ipcValue('desktop-state:get')]);
       if (cancelled) return;
       setInfo(appInfo);
+      useUi.getState().setAttachmentsEnabled(appInfo.features?.attachments !== false);
       setState(desktopState);
+      useUi.getState().setGroupToolRuns(desktopState.groupToolRuns);
       setLanguage(resolveLanguage(desktopState.language, navigator.language));
       const ui = useUi.getState();
       const window0 = desktopState.windows[0];

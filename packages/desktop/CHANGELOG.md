@@ -4,6 +4,27 @@
 milestone of the desktop app contains.
 
 ## Unreleased
+- **The packaged app starts again.** The main process resolves attachment ids through the ledger module that
+  the session host also uses, and `electron-builder.yml` shipped `dist/main/**` and `dist/shared/**` only: in a packaged
+  build the import died before the first window (a modal "Error" and no host, invisible in development). `dist/host/attachment-ledger.js`
+  is now packaged, and `verify-bundle` check 8c fails the build when the main process imports anything the asar does not carry.
+
+- **Attachments and tool calls, finished**:
+  - The real-window E2E suite now runs on a machine that has another copy of the app open (Electron `userData` is isolated per run
+    with `--e2e-user-data`, a test switch that does not exist in a release build); a launch that dies explains its likely cause.
+    Running it for the first time found that the suite's own PNG fixture was corrupt.
+  - Removing an attachment can be undone; a chip can be previewed; "Paste image from clipboard" and a clipboard fallback for pictures
+    the page's paste event cannot see; BMP / AVIF / ICO / SVG are accepted (converted to PNG); HEIC / TIFF say they go by path only.
+  - When a provider refuses a picture: one button that records "this model cannot see images", waits for the host, and resends as paths
+    (a model the catalog says reads images only gets a one-off resend). Settings > General > Image input lists and restores these decisions.
+  - Runs of three or more finished reads / searches / folder listings fold into one line; an MCP tool shows its server. Both off in
+    Developer mode; folding has its own switch.
+  - `ARAGON_DESKTOP_ATTACHMENTS=0` turns the attachment feature off for a window or a machine.
+  - Core-adjacent: the name-based image-support guess is one exported table (`IMAGE_VENDOR_PRIORS`) that can only say yes or unknown.
+  - Benchmark `B-5` (checkpoint with eight pictures) added.
+- Attachments and images in the composer (paste, drop, pick; `@image1` references), model image-support check before sending,
+  thumbnails and a lightbox in the transcript, queued and retried messages keep their attachments; tool calls read in plain
+  language ("Hunting for retry policy") unless Developer mode is on (Settings > General, or the hidden `Ctrl/Cmd+Shift+D`).
 
 - Electron shell on the shared engine: one `utilityProcess` per session, host-owned view state mirrored to the window over a `MessagePort`,
   config/sessions/prompts shared with the terminal through `~/.aragon-agent` (compare-and-swap writes, unknown keys preserved, live

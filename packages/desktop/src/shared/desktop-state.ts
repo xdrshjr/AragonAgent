@@ -40,6 +40,11 @@ export interface DesktopState {
   recentWorkspaces: string[];
   language: LanguageSetting;
   enterToSend: boolean;
+  /**
+   * Fold runs of read-only tool calls into one expandable row. A desktop preference (this file),
+   * NOT a `config.json` key: that file belongs to the engine and the terminal reads it.
+   */
+  groupToolRuns: boolean;
   maxLiveHosts: number;
   parkAfterIdleMinutes: number;
   dismissedHints: string[];
@@ -54,6 +59,11 @@ export interface DesktopState {
   };
   /** "Always allow this tool for this session". Ends with the session; never crosses sessions. */
   sessionAllowedTools: Record<string, string[]>;
+  /**
+   * The user's own word on whether a model reads images, keyed `provider/model`. It outranks
+   * every table (the tables go stale the day a model ships). At most `LIMITS.imageOverrides` rows.
+   */
+  imageInputOverrides: Record<string, 'on' | 'off'>;
   /** Fields this build does not know, kept verbatim. */
   extras: Record<string, unknown>;
 }
@@ -75,14 +85,27 @@ export const LIMITS = {
   maxLiveHosts: { min: 2, max: 12, fallback: 6 },
   parkAfterIdleMinutes: { min: 0, max: 24 * 60, fallback: 15 },
   recentWorkspaces: 20,
+  imageOverrides: 64,
+  imageOverrideKeyChars: 200,
   windows: 8,
   openSessions: 24,
 } as const;
 
 const KNOWN_KEYS = new Set([
-  'schema', 'windows', 'recentWorkspaces', 'language', 'enterToSend', 'maxLiveHosts',
-  'parkAfterIdleMinutes', 'dismissedHints', 'update', 'sessionAllowedTools',
+  'schema', 'windows', 'recentWorkspaces', 'language', 'enterToSend', 'groupToolRuns', 'maxLiveHosts',
+  'parkAfterIdleMinutes', 'dismissedHints', 'update', 'sessionAllowedTools', 'imageInputOverrides',
 ]);
+
+const normalizeImageOverrides = (value: unknown): Record<string, 'on' | 'off'> => {
+  const out: Record<string, 'on' | 'off'> = {};
+  if (!isRecord(value)) return out;
+  for (const [key, setting] of Object.entries(value)) {
+    if (Object.keys(out).length >= LIMITS.imageOverrides) break;
+    if (key.length === 0 || key.length > LIMITS.imageOverrideKeyChars) continue;
+    if (setting === 'on' || setting === 'off') out[key] = setting;
+  }
+  return out;
+};
 const INSPECTOR_TABS: readonly InspectorTab[] = ['changes', 'plan', 'agents', 'jobs', 'context', 'governance'];
 
 export function clampNumber(value: unknown, range: { min: number; max: number; fallback: number }): number {
@@ -156,11 +179,13 @@ export function defaultDesktopState(): DesktopState {
     recentWorkspaces: [],
     language: 'auto',
     enterToSend: true,
+    groupToolRuns: true,
     maxLiveHosts: LIMITS.maxLiveHosts.fallback,
     parkAfterIdleMinutes: LIMITS.parkAfterIdleMinutes.fallback,
     dismissedHints: [],
     update: { channel: 'stable', lastCheckedAt: 0, skippedVersion: null, enabled: true, feedUrl: null },
     sessionAllowedTools: {},
+    imageInputOverrides: {},
     extras: {},
   };
 }
@@ -185,6 +210,7 @@ export function normalizeDesktopState(input: unknown): DesktopState {
     recentWorkspaces: stringList(input.recentWorkspaces, LIMITS.recentWorkspaces),
     language: input.language === 'en' || input.language === 'zh-CN' ? input.language : 'auto',
     enterToSend: input.enterToSend !== false,
+    groupToolRuns: input.groupToolRuns !== false,
     maxLiveHosts: clampNumber(input.maxLiveHosts, LIMITS.maxLiveHosts),
     parkAfterIdleMinutes: clampNumber(input.parkAfterIdleMinutes, LIMITS.parkAfterIdleMinutes),
     dismissedHints: stringList(input.dismissedHints, 200),
@@ -196,6 +222,7 @@ export function normalizeDesktopState(input: unknown): DesktopState {
       feedUrl: typeof update.feedUrl === 'string' && update.feedUrl.length > 0 && update.feedUrl.length <= 2048 ? update.feedUrl : null,
     },
     sessionAllowedTools: allowed,
+    imageInputOverrides: normalizeImageOverrides(input.imageInputOverrides),
     extras,
   };
 }

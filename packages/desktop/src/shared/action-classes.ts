@@ -27,7 +27,8 @@ export const ACTION_CLASSES: Record<ViewAction['type'], ActionClass> = {
   dismissToast: 'local',
   toggleThinking: 'local',
   // The terminal's display-only developer-mode switch: renderer-owned view state in the
-  // same family as `toggleThinking`. The desktop host never dispatches either.
+  // same family as `toggleThinking`. The desktop host never dispatches either: the desktop
+  // keeps developer mode as ONE global renderer flag (`useUi().developerMode`), not per session.
   toggleDeveloperMode: 'local',
   setDeveloperMode: 'local',
   toggleExpand: 'local',

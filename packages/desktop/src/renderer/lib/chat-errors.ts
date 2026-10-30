@@ -15,9 +15,13 @@ export type ErrorCondition =
   | 'auth'
   | 'rate-limit'
   | 'context-overflow'
-  | 'no-response';
+  | 'no-response'
+  | 'image-refused';
 
-export type ErrorAction = 'open-models' | 'retry' | 'compact-retry';
+export type ErrorAction = 'open-models' | 'retry' | 'compact-retry' | 'send-as-paths' | 'no-image-retry';
+
+/** What the host's tables and the user's own override say about the session's model. */
+export type ImageSupport = 'yes' | 'no' | 'unknown';
 
 export interface ErrorClassification {
   condition: ErrorCondition;
@@ -27,7 +31,22 @@ export interface ErrorClassification {
 /** Opening words of the engine's "run produced nothing" notice. */
 const NO_RESPONSE_PREFIX = 'The run ended without producing a response';
 
+/**
+ * A 400 that complains about the SIZE of a picture is not "this model cannot see images": it is
+ * solved by sending a smaller one, and marking the model as blind for it would be a wrong, lasting
+ * decision. Checked before the image-refused rule matches.
+ */
+const IMAGE_SIZE_COMPLAINT =
+  /too large|too big|exceeds?\b|size limit|maximum (?:image |file |request )?(?:size|dimension|resolution)|payload|\b\d+(?:\.\d+)?\s?(?:mb|kb|bytes)\b|\bdimensions?\b/i;
+
 const RULES: ReadonlyArray<{ condition: ErrorCondition; test: RegExp; actions: ErrorAction[] }> = [
+  {
+    // A provider refusing a request because of a picture in it ("invalid_request ... image ...").
+    // Deliberately narrow: it needs both an invalid-request word and an image word.
+    condition: 'image-refused',
+    test: /(invalid[_ ]request|\b400\b|bad request).*\b(image|images|vision|multimodal|image_url)\b|\b(image|images|vision|multimodal)\b.*(not supported|unsupported|does not support|cannot)/i,
+    actions: ['send-as-paths', 'retry'],
+  },
   {
     // preflight: `No API key for "x"`, `Provider "x" has no adapter`; plus the stable code name.
     condition: 'model-not-configured',
@@ -58,9 +77,29 @@ const RULES: ReadonlyArray<{ condition: ErrorCondition; test: RegExp; actions: E
 
 export function classifyErrorNotice(text: string): ErrorClassification | null {
   for (const rule of RULES) {
+    if (rule.condition === 'image-refused' && IMAGE_SIZE_COMPLAINT.test(text)) continue;
     if (rule.test.test(text)) return { condition: rule.condition, actions: rule.actions };
   }
   return null;
+}
+
+/**
+ * The buttons to show, given what is known about the model.
+ *
+ * A refused picture on a model that is `unknown` / `no` gets the single "this model cannot see
+ * images" recovery (it records that and resends as paths). On a `yes` model the refusal more likely
+ * comes from a gateway that drops images, so only the one-off resend is offered and nothing is
+ * written down about the model (completion spec R-1, RV-6).
+ */
+export function actionsFor(classification: ErrorClassification, support: ImageSupport): ErrorAction[] {
+  if (classification.condition !== 'image-refused' || support === 'yes') return classification.actions;
+  return classification.actions.map((action) => (action === 'send-as-paths' ? 'no-image-retry' : action));
+}
+
+/** A line of small print under the buttons, as an i18n key, or null. */
+export function noticeHintKey(classification: ErrorClassification, support: ImageSupport): string | null {
+  if (classification.condition !== 'image-refused') return null;
+  return support === 'yes' ? 'chat.error.hint.gateway' : 'chat.error.hint.newMessage';
 }
 
 /**

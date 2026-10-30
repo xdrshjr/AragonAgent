@@ -18,7 +18,9 @@ import { closeSession, openSession, reconnectSession } from '../store/actions.js
 import { sessionStore, useSession, useSessionList } from '../store/session-store.js';
 import { writeSnapshot } from '../store/session-restore.js';
 import { workspaceLabel } from '../store/sessions-list-store.js';
+import { useConfig } from '../store/config-store.js';
 import { useUi } from '../store/ui-store.js';
+import { pushToast } from '../chat/hooks.js';
 import { LIMITS, type InspectorTab } from '../../shared/desktop-state.js';
 import { Tab, TabsList, Tabs, Tooltip } from '../ui/overlay.js';
 import { BrandMark } from '../ui/BrandMark.js';
@@ -87,6 +89,9 @@ function SessionPane(props: { sessionId: string }) {
   return <SessionView sessionId={props.sessionId} />;
 }
 
+/** How long the developer-mode hotkey's confirmation stays up. */
+const DEV_TOAST_MS = 1500;
+
 export function AppShell(props: { recentWorkspaces: string[]; noModelBanner: ReactNode }) {
   const t = useT();
   const isMac = platform() === 'darwin';
@@ -119,6 +124,12 @@ export function AppShell(props: { recentWorkspaces: string[]; noModelBanner: Rea
     { combo: 'mod+j', handler: () => ui.setInspectorOpen(!ui.inspectorOpen) },
     { combo: 'mod+b', handler: () => ui.setSidebarOpen(!ui.sidebarOpen) },
     { combo: 'mod+shift+b', handler: () => ui.setInspectorTab('agents') },
+    // Hidden on purpose: not in the shortcut sheet or the palette. Memory only, never written to disk.
+    { combo: 'mod+shift+d', handler: () => {
+      useUi.getState().toggleDeveloperMode();
+      const { developerMode, activeSessionId } = useUi.getState();
+      if (activeSessionId) pushToast(activeSessionId, 'info', t(developerMode ? 'chat.dev.on' : 'chat.dev.off'), DEV_TOAST_MS);
+    } },
     { combo: 'mod+p', handler: () => ui.setPromptPickerOpen(true) },
     { combo: 'mod+,', handler: () => ui.openSettings() },
     { combo: 'mod+/', handler: () => ui.setShortcutsOpen(true) },
@@ -127,8 +138,13 @@ export function AppShell(props: { recentWorkspaces: string[]; noModelBanner: Rea
       combo: `mod+${index + 1}`,
       handler: () => { const target = mirrors[index]; if (target) ui.setActiveSession(target.id); },
     })),
-  ], [ui, mirrors, openFolder]);
+  ], [ui, mirrors, openFolder, t]);
   useHotkeys(hotkeys, isMac);
+
+  // `config.json`'s developerMode seeds the window-wide flag, and follows it when the file changes
+  // (the Settings toggle writes there). The hotkey flips the flag in memory without touching it.
+  const configuredDeveloperMode = useConfig((state) => state.result?.view?.developerMode) === true;
+  useEffect(() => { useUi.getState().setDeveloperMode(configuredDeveloperMode); }, [configuredDeveloperMode]);
 
   useEffect(() => { document.documentElement.dataset.platform = platform(); }, []);
 
@@ -159,6 +175,11 @@ export function AppShell(props: { recentWorkspaces: string[]; noModelBanner: Rea
           {activeCwd ? <><span aria-hidden="true">›</span><strong>{workspaceLabel(activeCwd)}</strong></> : null}
         </div>
         <div className="titlebar-spacer" />
+        {ui.developerMode ? (
+          <span className="dev-chip" role="status" aria-label={t('chat.dev.chipLabel')} title={t('chat.dev.chipLabel')}>
+            {t('chat.dev.chip')}
+          </span>
+        ) : null}
         <UpdateBadge />
         <button className="search-trigger" onClick={() => ui.setPaletteOpen(true)}>
           <Search size={13} aria-hidden="true" /> <span>{t('shell.title.search')}</span>

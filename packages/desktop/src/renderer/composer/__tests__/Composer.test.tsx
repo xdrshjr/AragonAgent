@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mountSession, unmountSession, type FakeHost } from '../../chat/__tests__/kit.js';
 import { clearDrafts } from '../../lib/chat-drafts.js';
@@ -311,7 +311,11 @@ describe('Composer restoring a withdrawn message', () => {
 
 describe('Composer dropping files', () => {
   function drop(box: HTMLElement, files: Array<{ name: string }>): void {
-    fireEvent.drop(box.closest('.composer')!, { dataTransfer: { files, types: ['Files'] } });
+    // Shift keeps the pre-attachments behaviour: the path is inserted as text. jsdom has no
+    // DragEvent, so the modifier is attached by hand.
+    const event = createEvent.drop(box.closest('.composer')!, { dataTransfer: { files, types: ['Files'] } });
+    Object.defineProperty(event, 'shiftKey', { value: true });
+    fireEvent(box.closest('.composer')!, event);
   }
   const withPaths = (paths: Record<string, string>) => {
     (window.aragon as unknown as { pathForFile: (file: { name: string }) => string }).pathForFile =

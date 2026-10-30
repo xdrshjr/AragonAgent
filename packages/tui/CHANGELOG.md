@@ -2,6 +2,14 @@
 
 All notable changes to `@aragon-agent/tui` are documented here.
 
+## Unreleased
+
+### Added
+- **Attachment metadata on transcript entries.** `Entry` `user`/`queued` carry optional `attachments`
+  (`model/agent/attachment-meta`: types, read-side validation, `attachmentSummaryLine`). The terminal shows one
+  dim `[image: name]` row under such a message and is otherwise unchanged. `ui/tool-voice` exports
+  `KNOWN_VOICE_TOOLS`, `PHRASE_VOICE_TOOLS` and `THINKING_WORD_COUNT` so a translated table can be parity-tested.
+
 ## 0.1.0
 
 ### Added

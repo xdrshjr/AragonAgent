@@ -12,10 +12,17 @@ import {
 import type { Entry } from '@aragon-agent/tui/model/agent/reducer';
 import { useT } from '../i18n/index.js';
 import type { ErrorAction } from '../lib/chat-errors.js';
+import {
+  groupOfEntry, groupToolRuns, isToolGroup, rowIndexOfEntry, type TranscriptRow,
+} from '../lib/chat-tool-groups.js';
 import { useSession, type PendingSend } from '../store/session-store.js';
+import { useUi } from '../store/ui-store.js';
+import { ActivityRow } from './ActivityRow.js';
+import { useVoice } from '../lib/voice.js';
 import { PendingSendRow } from './PendingSendRow.js';
 import { Button } from '../ui/primitives.js';
 import { runErrorAction } from './error-actions.js';
+import { ToolGroupCard } from './tools/ToolGroupCard.js';
 import { TranscriptItem } from './TranscriptItem.js';
 import { useVirtualScroll } from './use-virtual-scroll.js';
 
@@ -41,9 +48,9 @@ function MeasuredRow(props: { id: string; index: number; observer: ResizeObserve
 }
 
 /** 1-based position of each queued entry among the queued ones (0 for every other kind). */
-function queueNumbers(entries: readonly Entry[]): number[] {
+function queueNumbers(rows: readonly TranscriptRow[]): number[] {
   let count = 0;
-  return entries.map((entry) => (entry.kind === 'queued' ? ++count : 0));
+  return rows.map((row) => (row.kind === 'queued' ? ++count : 0));
 }
 
 const NO_ENTRIES: Entry[] = [];
@@ -59,25 +66,58 @@ export const Transcript = forwardRef<TranscriptHandle, { sessionId: string; tail
   const dropped = useSession(sessionId, (mirror) => mirror?.view?.droppedEntries) ?? 0;
   const pendingSends = useSession(sessionId, (mirror) => mirror?.pendingSends) ?? NO_SENDS;
 
-  const scroll = useVirtualScroll(entries);
+  const { voiceMode } = useVoice();
+  const groupingOn = useUi((state) => state.groupToolRuns);
+  const expandedGroups = useUi((state) => state.expandedToolGroups);
+  // The list is ROWS, not entries: a run of finished reads / searches is one row. With the feature
+  // off (or in developer mode) this is the entries array itself, so nothing downstream changes.
+  const rows = useMemo(
+    () => groupToolRuns(entries, { enabled: groupingOn, voiceMode, expanded: expandedGroups }),
+    [entries, groupingOn, voiceMode, expandedGroups],
+  );
+  const scroll = useVirtualScroll(rows);
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+  const entriesRef = useRef(entries);
+  entriesRef.current = entries;
   useImperativeHandle(handle, () => ({
-    resumeFollow: scroll.resume, scrollToEntry: scroll.scrollToIndex, isFollowing: scroll.isFollowing,
+    resumeFollow: scroll.resume,
+    // Find hands over an ENTRY index; the list is indexed by row. A match folded into a group opens
+    // that group first (the row is only worth scrolling to once its members exist).
+    scrollToEntry: (entryIndex: number): void => {
+      const entry = entriesRef.current[entryIndex];
+      if (!entry) return;
+      const group = groupOfEntry(rowsRef.current, entry.id);
+      if (group && !group.expanded) useUi.getState().expandToolGroup(group.id);
+      scroll.scrollToIndex(rowIndexOfEntry(rowsRef.current, entry.id));
+    },
+    isFollowing: scroll.isFollowing,
   }), [scroll.resume, scroll.scrollToIndex, scroll.isFollowing]);
-  const queued = useMemo(() => queueNumbers(entries), [entries]);
+  const queued = useMemo(() => queueNumbers(rows), [rows]);
   const onErrorAction = useCallback((action: ErrorAction): void => {
     void runErrorAction(sessionId, action, t);
   }, [sessionId, t]);
 
-  const rows: ReactNode[] = [];
+  const visibleRows = rows;
+  const rendered: ReactNode[] = [];
   for (let index = scroll.range.start; index < scroll.range.end; index += 1) {
-    const entry = entries[index];
-    if (!entry) continue;
-    rows.push(
-      <MeasuredRow key={entry.id} id={entry.id} index={index} observer={scroll.observer}>
+    const row = visibleRows[index];
+    if (!row) continue;
+    if (isToolGroup(row)) {
+      rendered.push(
+        <MeasuredRow key={row.id} id={row.id} index={index} observer={scroll.observer}>
+          <ToolGroupCard sessionId={sessionId} group={row} expandedIds={expandedIds} voiceMode={voiceMode} />
+        </MeasuredRow>,
+      );
+      continue;
+    }
+    rendered.push(
+      <MeasuredRow key={row.id} id={row.id} index={index} observer={scroll.observer}>
         <TranscriptItem
-          sessionId={sessionId} entry={entry} expanded={expandedIds?.[entry.id] === true}
+          sessionId={sessionId} entry={row} expanded={expandedIds?.[row.id] === true}
           thinkingVisible={thinkingVisible} running={running} queueNumber={queued[index] ?? 0}
-          canRetry={!running && index >= entries.length - 2} onErrorAction={onErrorAction} />
+          canRetry={!running && index >= visibleRows.length - 2} voiceMode={voiceMode}
+          onErrorAction={onErrorAction} />
       </MeasuredRow>,
     );
   }
@@ -91,9 +131,10 @@ export const Transcript = forwardRef<TranscriptHandle, { sessionId: string; tail
           {dropped > 0 ? <div className="trimmed">{t('chat.trimmed', { n: dropped })}</div> : null}
           {entries.length === 0 ? <div className="transcript-empty">{t('chat.empty')}</div> : null}
           <div aria-hidden="true" style={{ height: scroll.topSpace }} />
-          {rows}
+          {rendered}
           <div aria-hidden="true" style={{ height: scroll.bottomSpace }} />
           {pendingSends.map((send) => <PendingSendRow key={send.localId} sessionId={sessionId} send={send} />)}
+          <ActivityRow sessionId={sessionId} voiceMode={voiceMode} />
           {props.tail}
         </div>
       </div>

@@ -9,6 +9,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { ipc } from '../api.js';
 import { resolveLanguage, setLanguage, useT } from '../i18n/index.js';
 import { clampNumber, LIMITS, type DesktopState, type LanguageSetting } from '../../shared/desktop-state.js';
+import { useUi } from '../store/ui-store.js';
 import { Input, Select, Switch } from '../ui/primitives.js';
 
 function NumberPref(props: {
@@ -94,6 +95,16 @@ export function DesktopPrefs() {
           <div className="set-row-control">
             <Switch id="desk-enter" label={t('settings.field.enterToSend')} checked={state.enterToSend}
               onCheckedChange={(checked) => void patch({ enterToSend: checked })} />
+          </div>
+        </div>
+        <div className="set-row">
+          <div className="set-row-label">
+            <label htmlFor="desk-group">{t('settings.field.groupToolRuns')}</label>
+            <div className="set-hint">{t('settings.hint.groupToolRuns')}</div>
+          </div>
+          <div className="set-row-control">
+            <Switch id="desk-group" label={t('settings.field.groupToolRuns')} checked={state.groupToolRuns}
+              onCheckedChange={(checked) => { useUi.getState().setGroupToolRuns(checked); void patch({ groupToolRuns: checked }); }} />
           </div>
         </div>
         <NumberPref id="desk-hosts" label={t('settings.field.maxLiveHosts')} hint={t('settings.hint.maxLiveHosts')}

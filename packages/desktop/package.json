@@ -1,6 +1,6 @@
 {
   "name": "@aragon-agent/desktop",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "description": "AragonAgent Desktop - the Electron front end for the aragon engine. Never published: it ships as an installer, not as an npm package.",
   "license": "MIT",

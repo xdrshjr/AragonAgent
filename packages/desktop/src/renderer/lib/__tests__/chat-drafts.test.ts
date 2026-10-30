@@ -5,13 +5,35 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  MAX_STORED_DRAFT_BYTES, clearDrafts, discardDraft, forgetMemoryDrafts, getDraft, makeChip, setDraft,
+  MAX_STORED_DRAFT_BYTES, clearDrafts, discardDraft, forgetMemoryDrafts, getDraft, makeChip, setDraft, setDraftRefs,
 } from '../chat-drafts.js';
 
 const KEY = (id: string): string => `aragon.draft.v1.${id}`;
 
 beforeEach(() => { sessionStorage.clear(); clearDrafts(); });
 afterEach(() => { vi.restoreAllMocks(); });
+
+describe('attachment references in the draft', () => {
+  it('survive a reload as light references, and a text edit does not drop them', () => {
+    setDraftRefs('s1', [{ ref: 'file1', kind: 'file', name: 'run.log', path: 'C:\\work\\run.log' }]);
+    setDraft('s1', { text: 'see @file1', chips: [] }); // the text writer knows nothing about refs
+    forgetMemoryDrafts();
+    expect(getDraft('s1')).toMatchObject({ text: 'see @file1', refs: [{ ref: 'file1', path: 'C:\\work\\run.log' }] });
+  });
+
+  it('clearing them with the text removes the stored draft entirely', () => {
+    setDraftRefs('s1', [{ ref: 'file1', kind: 'file', name: 'a', path: '/a' }]);
+    setDraftRefs('s1', []);
+    expect(sessionStorage.getItem(KEY('s1'))).toBeNull();
+  });
+
+  it('ignores a malformed stored reference instead of failing the whole draft', () => {
+    sessionStorage.setItem(KEY('s1'), JSON.stringify({
+      text: 't', chips: [], refs: [{ nope: 1 }, { ref: 'file1', kind: 'file', name: 'a', path: '/a' }],
+    }));
+    expect(getDraft('s1').refs).toEqual([{ ref: 'file1', kind: 'file', name: 'a', path: '/a' }]);
+  });
+});
 
 describe('draft persistence in sessionStorage', () => {
   it('a draft written now is readable by a reloaded page (memory gone, storage kept)', () => {

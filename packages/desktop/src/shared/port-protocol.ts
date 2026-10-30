@@ -14,6 +14,7 @@ import type { AgentMode } from '@aragon-agent/tui/model/agent/agent-mode';
 import type { InvocationCard } from '@aragon-agent/tui/model/agent/invocation-card';
 import type { Posture } from '@aragon-agent/tui/model/governance/posture';
 import type { NormalizedPlan, NormalizedQuestion } from '@aragon-agent/tui/model/tools/human-input';
+import type { ImageInputView, ImageMode, SubmitAttachment } from './attachments.js';
 
 export const PROTOCOL_VERSION = 1;
 
@@ -40,6 +41,8 @@ export interface SessionMetaView {
   governanceUnavailable: string | null;
   /** Skill-style slash commands the composer menu should offer. */
   slashCommands: { name: string; description: string; aliases?: string[] }[];
+  /** Can the active model read images? Recomputed on every snapshot, so a model switch refreshes it. */
+  imageInput: ImageInputView;
 }
 
 export interface ApprovalPreview {
@@ -108,6 +111,8 @@ export type CommandErrorCode =
   | 'already_delivered'
   /** `queue.cancel`: no such queued message (already receipted, withdrawn or never existed). */
   | 'not_found'
+  /** `submit`: no text and every attachment was refused, so there was nothing to send. */
+  | 'attachment_rejected'
   | 'internal'
   | 'port_closed';
 
@@ -121,7 +126,16 @@ export interface ModelPatchDto {
 }
 
 export type HostCommand =
-  | { c: 'submit'; text: string; invocation?: InvocationCard }
+  | { c: 'submit'; text: string; invocation?: InvocationCard;
+      /** Absent = byte-identical to a pre-attachments submit. */
+      attachments?: SubmitAttachment[]; imageMode?: ImageMode }
+  /** Fetch an attachment's bytes (lightbox, withdrawn queue message, "send as path" retry). */
+  | { c: 'attachment.read'; id: string }
+  /**
+   * The user's word that `key` (`provider/model`) does or does not read images; `null` clears it.
+   * The host needs it so request-time projection agrees with the composer's banner.
+   */
+  | { c: 'image.override'; key: string; value: 'on' | 'off' | null }
   | { c: 'slash'; name: string; args: string }
   | { c: 'abort' }
   | { c: 'force-stop' }

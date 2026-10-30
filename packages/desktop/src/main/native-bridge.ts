@@ -10,11 +10,12 @@
  * lexical check - hence `realpath` first.
  */
 
-import { existsSync, realpathSync } from 'node:fs';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { copyFileSync, existsSync, realpathSync } from 'node:fs';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { BrowserWindow, Notification, app, dialog, shell } from 'electron';
 import type { NotificationQueue } from './e2e-support.js';
 import { isSafeExternalUrl } from './protocols.js';
+import { lookupLedger, sessionAttachmentsDir, type LedgerEntry } from '../host/attachment-ledger.js';
 
 /** True when `child` is `parent` or lies beneath it, comparing whole path segments. */
 export function isInsideDir(parent: string, child: string): boolean {
@@ -102,6 +103,35 @@ export class NativeBridge {
       return true;
     }
     return (await shell.openPath(target)) === '';
+  }
+
+  /** The ledger row for an attachment of this session, or null. The id is the only input. */
+  private attachmentEntry(sessionId: string, attachmentId: string): LedgerEntry | null {
+    const dir = sessionAttachmentsDir(this.deps.homeRoot, sessionId);
+    const entry = dir ? lookupLedger(dir, attachmentId) : null;
+    return entry && existsSync(entry.path) ? entry : null;
+  }
+
+  revealAttachment(sessionId: string, attachmentId: string): boolean {
+    const entry = this.attachmentEntry(sessionId, attachmentId);
+    if (!entry) return false;
+    shell.showItemInFolder(entry.path);
+    return true;
+  }
+
+  /** Copy a STAGED attachment; a reference attachment is the user's own file and is not copied. */
+  async saveAttachment(
+    window: BrowserWindow | null, sessionId: string, attachmentId: string, suggestedName: string,
+  ): Promise<string | null | undefined> {
+    const entry = this.attachmentEntry(sessionId, attachmentId);
+    if (!entry || !entry.staged) return undefined;
+    const base = basename(suggestedName.replace(/[\\/]+/g, '/')) || entry.name;
+    const defaultPath = join(this.deps.sessionCwd(sessionId) ?? this.deps.homeRoot, base);
+    const options = { defaultPath };
+    const result = window ? await dialog.showSaveDialog(window, options) : await dialog.showSaveDialog(options);
+    if (result.canceled || !result.filePath) return null;
+    copyFileSync(entry.path, result.filePath);
+    return result.filePath;
   }
 
   async openExternal(url: string): Promise<boolean> {

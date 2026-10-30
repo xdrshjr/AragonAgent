@@ -9,4 +9,5 @@ export const BUDGETS: {
   readonly longTaskMaxMs: number;
   readonly bigTranscriptFirstPaintMs: number;
   readonly soakSlopeMbPerMin: number;
+  readonly checkpointWithImagesMs: number;
 };

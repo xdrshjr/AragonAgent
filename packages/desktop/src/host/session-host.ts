@@ -72,6 +72,8 @@ export interface SessionHostDeps {
   restoredAt?: number;
   initialEntries: Entry[];
   writer: SessionCheckpointWriter;
+  /** `<home>`: the attachment staging area lives under it. */
+  homeRoot?: string;
   /** Send a control-plane message to the main process. */
   control(message: HostControlMsg): void;
   slashCommands: { name: string; description: string; aliases?: string[] }[];
@@ -124,6 +126,7 @@ export class SessionHost {
       reloadConfig: () => this.applyConfigChange(true),
       writer: deps.writer,
       sessionId: deps.sessionId,
+      ...(deps.homeRoot ? { homeRoot: deps.homeRoot } : {}),
     });
     this.wire();
   }
@@ -241,7 +244,17 @@ export class SessionHost {
       postureCycle: [...controller.getPostureCycle()],
       governanceUnavailable: controller.getGovernanceUnavailableText(),
       slashCommands: this.deps.slashCommands,
+      imageInput: this.imageInput(),
     };
+  }
+
+  private imageInput(): SessionMetaView['imageInput'] {
+    const { controller } = this.deps;
+    // A controller without the capability (older host or a test double) reads as "cannot tell".
+    const found = controller.getImageSupport?.();
+    return found
+      ? { support: found.support, source: found.source, tokenEstimate: found.tokenEstimate }
+      : { support: 'unknown', source: 'heuristic', tokenEstimate: 1600 };
   }
 
   private sendSnapshot(): void {

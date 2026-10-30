@@ -37,6 +37,8 @@ export function isExcluded(entry: Entry): boolean {
 /** True when the reducer will never write to `entry` again. */
 export function isEntryStable(entry: Entry, runActive: boolean, isTail: boolean): boolean {
   switch (entry.kind) {
+    // `attachments` (desktop-attachments-and-tool-voice) is immutable once the entry exists;
+    // the one rewrite, `queued -> user`, moves it whole and never touches a promoted row.
     case 'user':
       return true;
     case 'notice':

@@ -17,15 +17,19 @@ import type { TermCapabilities } from '../capabilities.js';
 import { pickGlyphs } from '../glyphs.js';
 import { USER_ENTRY_MAX_ROWS } from '../composer-limits.js';
 import { expandTabs } from '../display-tab.js';
+import { attachmentSummaryLine, type AttachmentMeta } from '../../model/agent/attachment-meta.js';
 
 function UserEntryImpl({
   text,
   theme,
   caps,
+  attachments,
 }: {
   text: string;
   theme: Theme;
   caps: TermCapabilities;
+  /** Desktop-origin attachments degrade to ONE dim row; absent = byte-identical output. */
+  attachments?: readonly AttachmentMeta[];
 }): React.ReactElement {
   const glyphs = pickGlyphs(caps);
   // TAB IS EXPANDED HERE, AT THE RENDER BOUNDARY, AND NOWHERE ABOVE IT.
@@ -54,6 +58,9 @@ function UserEntryImpl({
         // The tail NAMES the number of hidden rows rather than hiding them
         // silently, which is what makes the cap honest (D-9 / R-10).
         <Text color={theme.muted}>{`${glyphs.ellipsis} +${hidden} more lines`}</Text>
+      )}
+      {attachments && attachments.length > 0 && (
+        <Text color={theme.muted} dimColor>{attachmentSummaryLine(attachments)}</Text>
       )}
     </Box>
   );

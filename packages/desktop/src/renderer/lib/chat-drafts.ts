@@ -14,9 +14,24 @@ export interface PasteChipData {
   lines: number;
 }
 
+/**
+ * An attachment REFERENCE that survives a reload: just enough to put a file/folder chip back
+ * (its path) or to tell the user an image was lost. Image bytes are never stored here - they live
+ * in memory only (`attachment-draft-store`), because a screenshot may contain a secret.
+ */
+export interface DraftRef {
+  ref: string;
+  kind: 'image' | 'file' | 'folder';
+  name: string;
+  /** file / folder only: the user's own absolute path. */
+  path?: string;
+}
+
 export interface Draft {
   text: string;
   chips: PasteChipData[];
+  /** Absent in drafts written before attachments existed; `setDraft` keeps what is there. */
+  refs?: DraftRef[];
 }
 
 /** A paste larger than either bound collapses into a chip instead of flooding the textarea. */
@@ -43,13 +58,21 @@ function isChip(value: unknown): value is PasteChipData {
     && typeof chip.text === 'string' && typeof chip.lines === 'number';
 }
 
+function isRef(value: unknown): value is DraftRef {
+  const ref = value as Partial<DraftRef> | null;
+  return typeof ref === 'object' && ref !== null && typeof ref.ref === 'string' && typeof ref.name === 'string'
+    && (ref.kind === 'image' || ref.kind === 'file' || ref.kind === 'folder')
+    && (ref.path === undefined || typeof ref.path === 'string');
+}
+
 function readStored(sessionId: string): Draft | null {
   try {
     const raw = storage()?.getItem(STORAGE_PREFIX + sessionId);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<Draft>;
     if (typeof parsed.text !== 'string' || !Array.isArray(parsed.chips) || !parsed.chips.every(isChip)) return null;
-    return { text: parsed.text, chips: parsed.chips };
+    const refs = Array.isArray(parsed.refs) ? parsed.refs.filter(isRef) : [];
+    return { text: parsed.text, chips: parsed.chips, ...(refs.length > 0 ? { refs } : {}) };
   } catch {
     return null;
   }
@@ -86,13 +109,22 @@ export function getDraft(sessionId: string): Draft {
 }
 
 export function setDraft(sessionId: string, draft: Draft): void {
-  if (draft.text === '' && draft.chips.length === 0) {
+  // The text/chips writer does not know about attachment references: keep the ones on record.
+  const refs = draft.refs ?? drafts.get(sessionId)?.refs ?? readStored(sessionId)?.refs;
+  const next: Draft = refs && refs.length > 0 ? { ...draft, refs } : { text: draft.text, chips: draft.chips };
+  if (next.text === '' && next.chips.length === 0 && !next.refs) {
     drafts.delete(sessionId);
     writeStored(sessionId, null);
     return;
   }
-  drafts.set(sessionId, draft);
-  writeStored(sessionId, draft);
+  drafts.set(sessionId, next);
+  writeStored(sessionId, next);
+}
+
+/** Record the attachment references of a session's draft (empty list = none). */
+export function setDraftRefs(sessionId: string, refs: DraftRef[]): void {
+  const current = drafts.get(sessionId) ?? readStored(sessionId) ?? EMPTY_DRAFT;
+  setDraft(sessionId, { text: current.text, chips: current.chips, refs });
 }
 
 /** Forget one session's draft (session closed or deleted). */

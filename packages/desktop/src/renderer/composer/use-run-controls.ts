@@ -6,6 +6,14 @@ import { useT } from '../i18n/index.js';
 import { composeMessage, type Draft } from '../lib/chat-drafts.js';
 import { describeFailure } from '../lib/chat-results.js';
 import { sessionStore } from '../store/session-store.js';
+import type { ImageMode } from '../../shared/attachments.js';
+import type { AttachmentDraft } from './attachments/attachment-draft-store.js';
+
+/** What rides along with the text: the READY attachments and how pictures should travel. */
+export interface SendExtras {
+  attachments: readonly AttachmentDraft[];
+  imageMode: ImageMode;
+}
 
 /** How long the "press Esc again" hint stays up - the host's own double-press window. */
 const ESC_HINT_MS = 1500;
@@ -17,14 +25,18 @@ export function useSend(sessionId: string, onSent: () => void) {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const send = useCallback(async (draft: Draft): Promise<boolean> => {
+  const send = useCallback(async (draft: Draft, extras?: SendExtras): Promise<boolean> => {
     const message = composeMessage(draft);
-    if (message.trim() === '' || sending) return false;
-    const typed = draft.chips.length === 0 ? TYPED_COMMAND.exec(message.trim()) : null;
+    const files = extras?.attachments ?? [];
+    // Attachments alone are a message (a screenshot with no caption is a fine thing to send).
+    if ((message.trim() === '' && files.length === 0) || sending) return false;
+    const typed = draft.chips.length === 0 && files.length === 0 ? TYPED_COMMAND.exec(message.trim()) : null;
     if (!typed) {
-      // An ordinary message becomes a grey bubble at once; from here the bubble owns the text and
-      // its failure (Retry / Edit), so the box can empty immediately without losing anything.
-      void sessionStore.sendMessage(sessionId, message);
+      // An ordinary message becomes a grey bubble at once; from here the bubble owns the text,
+      // the attachments and their failure (Retry / Edit), so the box can empty immediately.
+      void (files.length > 0
+        ? sessionStore.sendMessage(sessionId, message, files, extras?.imageMode ?? 'inline')
+        : sessionStore.sendMessage(sessionId, message));
       setError(null);
       onSent();
       return true;

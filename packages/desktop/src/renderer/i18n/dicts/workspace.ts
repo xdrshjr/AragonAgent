@@ -12,6 +12,7 @@ export const workspace = defineDict({
     'workspace.cmd.conflict': 'The session changed while you were doing this. Try again.',
     'workspace.cmd.already_delivered': 'The model already received this message.',
     'workspace.cmd.not_found': 'That item no longer exists.',
+    'workspace.cmd.attachment_rejected': 'None of the attachments could be sent.',
     'workspace.cmd.internal': 'Something went wrong inside the session.',
     'workspace.cmd.port_closed': 'The session is not connected. Reconnect it first.',
 
@@ -230,6 +231,7 @@ export const workspace = defineDict({
     'workspace.cmd.conflict': '操作期间会话发生了变化，请重试。',
     'workspace.cmd.already_delivered': '模型已经收到这条消息。',
     'workspace.cmd.not_found': '该项目已不存在。',
+    'workspace.cmd.attachment_rejected': '没有任何附件可以发送。',
     'workspace.cmd.internal': '会话内部出错了。',
     'workspace.cmd.port_closed': '会话未连接，请先重新连接。',
 

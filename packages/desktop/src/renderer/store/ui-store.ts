@@ -33,6 +33,30 @@ export interface UiState {
   exportSessionId: string | null;
   /** The session whose find bar is open, or null. */
   findSessionId: string | null;
+  /**
+   * Developer mode: raw tool names and arguments instead of the friendly voice. ONE flag for the
+   * whole window (not per session). Seeded from `config.json`; the hidden hotkey flips it in
+   * memory only and never writes the file.
+   */
+  developerMode: boolean;
+  /**
+   * Whether attachments are offered at all (`ARAGON_DESKTOP_ATTACHMENTS=0` turns them off). Seeded
+   * from `app:info`; ON until told otherwise, so the few milliseconds before it arrives - when the
+   * user cannot type yet - never hide the feature. Read at EVENT time, not cached by handlers.
+   */
+  attachmentsEnabled: boolean;
+  /** Fold runs of read-only tool calls (the `groupToolRuns` desktop preference). */
+  groupToolRuns: boolean;
+  /** Folded groups the reader opened, by group id. Window-level and in memory: not persisted. */
+  expandedToolGroups: ReadonlySet<string>;
+
+  setGroupToolRuns(on: boolean): void;
+  toggleToolGroup(id: string): void;
+  /** Open a group (a find match inside it); a no-op if it is already open. */
+  expandToolGroup(id: string): void;
+  setAttachmentsEnabled(on: boolean): void;
+  setDeveloperMode(on: boolean): void;
+  toggleDeveloperMode(): void;
 
   setExportSession(id: string | null): void;
   setFindSession(id: string | null): void;
@@ -51,6 +75,9 @@ export interface UiState {
   insertIntoComposer(text: string): void;
 }
 
+/** A primitive selector (zustand v5: never return a derived object). */
+export const selectAttachmentsEnabled = (state: UiState): boolean => state.attachmentsEnabled;
+
 export const useUi = create<UiState>((set) => ({
   activeSessionId: null,
   sidebarOpen: true,
@@ -67,7 +94,24 @@ export const useUi = create<UiState>((set) => ({
   composerInsert: null,
   exportSessionId: null,
   findSessionId: null,
+  developerMode: false,
+  attachmentsEnabled: true,
+  groupToolRuns: true,
+  expandedToolGroups: new Set<string>(),
 
+  setGroupToolRuns: (on) => set({ groupToolRuns: on }),
+  toggleToolGroup: (id) => set((state) => {
+    const next = new Set(state.expandedToolGroups);
+    if (!next.delete(id)) next.add(id);
+    return { expandedToolGroups: next };
+  }),
+  expandToolGroup: (id) => set((state) => {
+    if (state.expandedToolGroups.has(id)) return state;
+    return { expandedToolGroups: new Set(state.expandedToolGroups).add(id) };
+  }),
+  setAttachmentsEnabled: (on) => set({ attachmentsEnabled: on }),
+  setDeveloperMode: (on) => set({ developerMode: on }),
+  toggleDeveloperMode: () => set((state) => ({ developerMode: !state.developerMode })),
   setExportSession: (id) => set({ exportSessionId: id }),
   setFindSession: (id) => set({ findSessionId: id }),
   setActiveSession: (id) => set({ activeSessionId: id, view: 'session' }),

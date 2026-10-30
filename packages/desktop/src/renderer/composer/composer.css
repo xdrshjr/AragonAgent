@@ -74,3 +74,41 @@ button.status-chip:hover { background: var(--bg-surface-300); color: var(--fg-de
 .popup-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
 .popup-hint { color: var(--fg-lighter); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .popup-foot { color: var(--fg-lighter); font-size: 11px; padding: 4px 8px; }
+
+/* ---- Attachments ------------------------------------------------------------------------ */
+.att-drop-hint { margin: 6px 8px 0; padding: 10px 12px; border: 1px dashed var(--brand); border-radius: var(--radius-control); color: var(--brand); background: var(--brand-soft); font-size: 12px; text-align: center; }
+.att-tray { display: grid; gap: 4px; padding: 8px 8px 0; }
+.att-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.att-chip {
+  display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 260px; padding: 4px 4px 4px 4px;
+  border: 1px solid var(--border-default); border-radius: var(--radius-control); background: var(--bg-surface-200);
+}
+.att-chip:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+.att-chip[data-status='error'] { border-color: var(--destructive); }
+.att-chip[data-status='processing'] { opacity: 0.85; }
+.att-thumb { width: 36px; height: 36px; flex: none; border-radius: 4px; object-fit: cover; background: var(--bg-surface-300); animation: att-fade 120ms ease-out; }
+.att-thumb-icon { display: inline-flex; align-items: center; justify-content: center; color: var(--fg-light); }
+.att-meta { display: grid; min-width: 0; line-height: 1.25; }
+.att-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.att-sub { display: flex; gap: 6px; align-items: center; color: var(--fg-lighter); font-size: 11px; white-space: nowrap; }
+.att-ref { font-family: var(--font-mono); color: var(--fg-light); }
+.att-pathonly { overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
+.att-state { display: inline-flex; align-items: center; gap: 3px; }
+.att-error { color: var(--destructive); }
+.att-spin { animation: att-rotate 1s linear infinite; }
+.att-actions { display: flex; align-items: center; flex: none; opacity: 0.6; }
+.att-chip:hover .att-actions, .att-chip:focus-within .att-actions { opacity: 1; }
+.att-note { color: var(--fg-lighter); font-size: 11px; padding: 0 2px; }
+.att-mention-thumb { width: 20px; height: 20px; border-radius: 3px; object-fit: cover; flex: none; align-self: center; }
+.att-blocked, .att-dangling { padding: 4px 12px 0; font-size: 12px; color: var(--fg-lighter); }
+.att-blocked { color: var(--warning); }
+.att-banner { margin: 6px 8px 0; font-size: 12px; }
+.att-banner-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--fg-light); }
+.att-banner-warn { padding: 8px 10px; border: 1px solid var(--warning); border-radius: var(--radius-control); background: var(--bg-surface-200); display: grid; gap: 6px; }
+.att-banner-title { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--warning); }
+.att-banner-body { margin: 0; color: var(--fg-light); }
+.att-banner-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.att-remember { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-light); }
+@keyframes att-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes att-rotate { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .att-thumb, .att-spin { animation: none; } }

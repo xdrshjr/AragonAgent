@@ -16,6 +16,14 @@ import type { AgentController } from '@aragon-agent/cli/dist/host/controller-fac
 import { startIndexBuild, type InteractionCoordinator, type SessionCheckpointWriter } from '@aragon-agent/cli/dist/host/index.js';
 import type { CommandResult, HostCommand } from '../shared/port-protocol.js';
 import { searchFiles } from './file-search.js';
+import { buildSubmission, type BuiltSubmission } from './attachments.js';
+import { lookupLedger, sessionAttachmentsDir } from './attachment-ledger.js';
+import {
+  ATTACHMENT_READ_MAX_BYTES,
+  type AttachmentReadValue,
+  type SubmitResultValue,
+} from '../shared/attachments.js';
+import { readFile, stat } from 'node:fs/promises';
 
 export interface RouterDeps {
   controller: AgentController;
@@ -26,6 +34,8 @@ export interface RouterDeps {
   reloadConfig(): CommandResult;
   writer: SessionCheckpointWriter;
   sessionId: string;
+  /** Needed for attachments; hosts built without it simply refuse them. */
+  homeRoot?: string;
 }
 
 const ok = (value?: unknown): CommandResult => ({ ok: true, ...(value === undefined ? {} : { value }) });
@@ -34,7 +44,12 @@ const fail = (code: Extract<CommandResult, { ok: false }>['code'], message: stri
 
 const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 
+/** Inline image bytes of a message still waiting in the engine queue, so a withdrawal never loses them. */
+const MAX_RETAINED_MESSAGES = 16;
+
 export class CommandRouter {
+  private readonly retained = new Map<string, { id: string; bytes: Uint8Array }[]>();
+
   constructor(private readonly deps: RouterDeps) {}
 
   private get busy(): boolean {
@@ -53,10 +68,25 @@ export class CommandRouter {
         return ok();
 
       case 'submit': {
+        if (cmd.attachments?.length) return this.submitWithAttachments(cmd);
         const text = cmd.text.trim();
         if (text.length === 0) return fail('invalid_argument', 'The message is empty.');
         const outcome = interaction.submit(cmd.text);
         return outcome.accepted ? ok() : fail('rejected', outcome.reason ?? 'The message was not accepted.');
+      }
+
+      case 'attachment.read':
+        return this.readAttachment(cmd.id);
+
+      case 'image.override': {
+        if (cmd.key.length === 0 || cmd.key.length > 200 || !cmd.key.includes('/')) {
+          return fail('invalid_argument', 'The model key is not valid.');
+        }
+        if (cmd.value !== null && cmd.value !== 'on' && cmd.value !== 'off') {
+          return fail('invalid_argument', 'The override must be on, off or null.');
+        }
+        controller.setImageSupportOverride?.(cmd.key, cmd.value);
+        return ok();
       }
 
       case 'interrupt':
@@ -196,14 +226,103 @@ export class CommandRouter {
         // The engine queue is the one authority (spec R-V6): `withdrawn` only when the
         // envelope was still waiting. The text comes from the view's own pending record,
         // read BEFORE the action removes it, so the renderer can put it back in the composer.
-        const text = this.deps.readState().pendingSteering.find((item) => item.queueId === cmd.queueId)?.text;
+        const pending = this.deps.readState().pendingSteering.find((item) => item.queueId === cmd.queueId);
+        const text = pending?.text;
         const outcome = controller.withdrawQueuedUserMessage(cmd.queueId);
         if (outcome === 'delivered') return fail('already_delivered', 'The model has already received this message.');
         if (outcome === 'unknown' || text === undefined) return fail('not_found', 'That queued message no longer exists.');
         dispatch({ type: 'steerWithdrawn', queueId: cmd.queueId });
-        return ok({ text });
+        const attachments = pending?.attachments;
+        // Bytes the host kept for this message stay readable (by id) after the withdrawal.
+        return ok(attachments?.length
+          ? { text, attachmentIds: attachments.map((a) => a.id), attachments }
+          : { text });
       }
     }
+  }
+
+  private attachmentsDir(): string | null {
+    const { homeRoot, sessionId } = this.deps;
+    return homeRoot ? sessionAttachmentsDir(homeRoot, sessionId) : null;
+  }
+
+  /** Forget retained bytes for messages the engine has since accepted. */
+  private pruneRetained(): void {
+    const live = new Set(this.deps.readState().pendingSteering.map((item) => item.queueId));
+    for (const queueId of this.retained.keys()) if (!live.has(queueId)) this.retained.delete(queueId);
+  }
+
+  private async submitWithAttachments(
+    cmd: Extract<HostCommand, { c: 'submit' }>,
+  ): Promise<CommandResult> {
+    const { controller, interaction } = this.deps;
+    const dir = this.attachmentsDir();
+    if (!dir) return fail('unsupported', 'Attachments are not available in this session.');
+    let built: BuiltSubmission;
+    try {
+      built = await buildSubmission(
+        { text: cmd.text, attachments: cmd.attachments ?? [], imageMode: cmd.imageMode ?? 'inline' },
+        { dir, usage: () => controller.getImageUsageInHistory() },
+      );
+    } catch (error) {
+      const why = error instanceof Error ? error.message : String(error);
+      return fail('internal', `The attachments could not be prepared (${why}).`);
+    }
+    if (cmd.text.trim().length === 0 && built.metas.length === 0) {
+      return fail('attachment_rejected', 'None of the attachments could be sent.');
+    }
+    const outcome = interaction.submit(built.message, {
+      attachments: { ...(built.parts ? { parts: built.parts } : {}), metas: built.metas, displayText: cmd.text },
+    });
+    if (!outcome.accepted) return fail('rejected', outcome.reason ?? 'The message was not accepted.');
+    if (outcome.queueId && built.retained.length > 0) {
+      this.pruneRetained();
+      if (this.retained.size < MAX_RETAINED_MESSAGES) this.retained.set(outcome.queueId, built.retained);
+    }
+    const value: SubmitResultValue = {
+      attachments: built.metas,
+      dropped: built.dropped,
+      ...(built.downgraded.length > 0 ? { downgraded: built.downgraded } : {}),
+    };
+    return ok(value);
+  }
+
+  /** Bytes (or the user's path) for one attachment id of THIS session; anything else is not_found. */
+  private async readAttachment(id: string): Promise<CommandResult> {
+    for (const held of this.retained.values()) {
+      const hit = held.find((item) => item.id === id);
+      if (hit) return this.retainedValue(id, hit.bytes);
+    }
+    const dir = this.attachmentsDir();
+    const entry = dir ? lookupLedger(dir, id) : null;
+    if (!entry) return fail('not_found', 'That attachment is no longer available.');
+    if (!entry.staged) {
+      const value: AttachmentReadValue = { name: entry.name, kind: entry.kind, path: entry.path };
+      return ok(value);
+    }
+    try {
+      const info = await stat(entry.path);
+      if (info.size > ATTACHMENT_READ_MAX_BYTES) return fail('rejected', 'That attachment is too large to open.');
+      const bytes = await readFile(entry.path);
+      const value: AttachmentReadValue = {
+        name: entry.name, kind: entry.kind,
+        ...(entry.mediaType ? { mediaType: entry.mediaType } : {}),
+        bytes: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+      };
+      return ok(value);
+    } catch {
+      return fail('not_found', 'That attachment is no longer available.');
+    }
+  }
+
+  private retainedValue(id: string, bytes: Uint8Array): CommandResult {
+    const meta = this.deps.readState().pendingSteering.flatMap((item) => item.attachments ?? [])
+      .find((item) => item.id === id);
+    const value: AttachmentReadValue = {
+      name: meta?.name ?? 'image', kind: 'image',
+      bytes: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+    };
+    return ok(value);
   }
 
   /** A page of already-settled entries older than `before` (an index), for long histories. */

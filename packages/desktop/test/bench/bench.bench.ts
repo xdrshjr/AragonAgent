@@ -9,17 +9,18 @@
  *   B-2 streaming    P95 frame time and the longest task while the model streams at 200 tokens/s
  *   B-3 big session  first paint of a transcript of 5,000 entries
  *   B-4 soak         renderer + host memory slope over a loop of turns
+ *   B-5 checkpoint   writing a session file that holds eight ~1 MiB pictures (the engine's own writer)
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { arch as osArch, cpus, release as osRelease, totalmem, type as osType } from 'node:os';
+import { arch as osArch, cpus, release as osRelease, tmpdir, totalmem, type as osType } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'vitest';
 import { BUDGETS, frameDurations, percentile, slope, verdict } from '../../scripts/lib/bench-math.mjs';
 import { writeBigSession } from '../e2e/fixtures/big-session.js';
 import { launchApp } from '../e2e/fixtures/launch.js';
 
-const suites = (process.env.BENCH_SUITES ?? 'startup,stream,big,soak').split(',');
+const suites = (process.env.BENCH_SUITES ?? 'startup,stream,big,soak,checkpoint').split(',');
 const runs = Number(process.env.BENCH_RUNS ?? 5);
 const streamSeconds = Number(process.env.BENCH_STREAM_SECONDS ?? 10);
 const soakMinutes = Number(process.env.BENCH_SOAK_MINUTES ?? 1);
@@ -141,6 +142,37 @@ describe('desktop benchmarks', () => {
     };
     await app.close();
   }, (soakMinutes + 5) * 60_000);
+
+  when('checkpoint')('B-5 a checkpoint holding eight pictures', async () => {
+    // The engine's own session writer, with pictures in the history the way a long screenshot-heavy
+    // session has them. An image is kept inline in the file, so this is what every turn end pays.
+    const { saveSession } = await import('@aragon-agent/cli/dist/session/persist.js');
+    const dir = mkdtempSync(join(tmpdir(), 'aragon-bench-ckpt-'));
+    const picture = Buffer.alloc(1024 * 1024, 7).toString('base64'); // ~1.33 MiB of base64 text per picture
+    const messages = Array.from({ length: 8 }, (_unused, index) => ({
+      role: 'user' as const,
+      content: [{ type: 'text' as const, text: `screenshot ${index + 1}` }, { type: 'image' as const, mediaType: 'image/png', data: picture }],
+    }));
+    const samples: number[] = [];
+    let bytes = 0;
+    try {
+      for (let run = 0; run < Math.max(runs, 5); run += 1) {
+        const file = join(dir, `ckpt-${run}.json`);
+        const t0 = performance.now();
+        saveSession(file, { model: { providerId: 'acme', modelId: 'm-1' }, messages: messages as never, entries: [], todos: [] });
+        samples.push(performance.now() - t0);
+        bytes = statSync(file).size;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    results['B-5'] = {
+      pictures: 8, fileMb: Math.round((bytes / 2 ** 20) * 10) / 10,
+      writeMs: { p50: percentile(samples, 50), p95: percentile(samples, 95), samples },
+      verdict: verdict(percentile(samples, 95), BUDGETS.checkpointWithImagesMs),
+      note: 'If this is over budget the follow-up is to keep pictures out of the checkpoint (reference a staged copy and re-read it on resume); that changes the session file and needs its own design.',
+    };
+  }, 120_000);
 
   it('writes the report', () => {
     const dir = join(process.cwd(), 'bench-results');

@@ -16,6 +16,7 @@ export type Responder = (command: HostCommand) => CommandResult | Promise<Comman
 const DEFAULT_META: SessionMetaView = {
   sessionId: 's1', cwd: '/work/repo', provider: 'anthropic', model: 'test-model', resumed: false,
   postureCycle: ['build', 'plan'], governanceUnavailable: 'Governance is off.', slashCommands: [],
+  imageInput: { support: 'yes', source: 'catalog', tokenEstimate: 1600 },
 };
 
 export class FakeHost {

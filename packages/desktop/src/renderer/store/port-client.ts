@@ -132,15 +132,19 @@ export class SessionPort {
     this.handlers.onMessage(message);
   }
 
-  /** Send a command; always resolves (never rejects, never hangs). */
-  command(cmd: HostCommand): Promise<CommandResult> {
+  /**
+   * Send a command; always resolves (never rejects, never hangs). `timeoutMs` overrides the
+   * port's deadline for ONE command (a submit carrying attachment bytes needs longer). A timeout
+   * is only an answer to the caller: the command is never re-sent.
+   */
+  command(cmd: HostCommand, timeoutMs: number = this.timeoutMs): Promise<CommandResult> {
     if (this.closed) return Promise.resolve({ ok: false, code: 'port_closed', message: 'The session is not connected.' });
     const id = `c${this.nextId++}`;
     return new Promise<CommandResult>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         resolve({ ok: false, code: 'timeout', message: 'The session did not answer in time.' });
-      }, this.timeoutMs);
+      }, timeoutMs);
       this.pending.set(id, { resolve, timer });
       this.post({ v: 1, t: 'cmd', id, cmd });
     });

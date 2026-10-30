@@ -9,7 +9,7 @@
 
 import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { shell, type BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from 'electron';
+import { clipboard, nativeImage, shell, type BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from 'electron';
 import type { ConfigService } from './config-service.js';
 import type { DesktopStateStore } from './desktop-state-store.js';
 import type { Engine } from './engine-loader.js';
@@ -22,6 +22,9 @@ import type { SessionIndex } from './session-index.js';
 import type { SessionSupervisor } from './session-supervisor.js';
 import type { WindowManager } from './window-manager.js';
 import { isAllowedNavigation } from './protocols.js';
+import { attachmentsEnabledFrom } from './product-flags.js';
+import { createClipboardImageReader } from './clipboard-image.js';
+import { classifyStatPath, removeSessionAttachments } from './attachment-paths.js';
 import { mergeRendererWindows, rememberWorkspace } from '../shared/desktop-state.js';
 import {
   IPC_CHANNELS,
@@ -103,6 +106,16 @@ export function buildHandlers(services: Services): HandlerMap {
     get: () => services.state.get(),
     patch: (patch) => services.state.patch(patch),
   };
+  const clipboardImages = createClipboardImageReader(
+    {
+      read: async () => (await clipboard.read()).map((item) => ({
+        types: item.types,
+        // An `image/*` type resolves to a Blob; only the bookmark type resolves to anything else.
+        getType: (type: string) => item.getType(type) as Promise<Blob>,
+      })),
+    },
+    (bytes) => nativeImage.createFromBuffer(Buffer.from(bytes)),
+  );
   const needEngine = <T>(run: (engine: Engine, config: ConfigService) => T): IpcResult<T> | IpcResult<never> =>
     services.engine && services.config ? ok(run(services.engine, services.config)) : engineMissing(services);
 
@@ -123,6 +136,8 @@ export function buildHandlers(services: Services): HandlerMap {
         engineError: services.engineError,
         isPackaged: services.isPackaged,
         ...(services.state.corruptNotice ? { preferencesReset: true } : {}),
+        // A product switch, not a test switch, so it is read in every flavor (see product-flags.ts).
+        features: { attachments: attachmentsEnabledFrom(process.env) },
       };
       return ok(info);
     },
@@ -211,6 +226,8 @@ export function buildHandlers(services: Services): HandlerMap {
       if (!arg.confirm) return fail('invalid_argument', 'Deleting a session needs confirmation.');
       if (services.supervisor?.statusOf(arg.id)) await services.supervisor.close(arg.id);
       const removed = services.engine.sessions.removeSession(arg.id);
+      // The staged attachments belong to the session; a failure here must not undo the delete.
+      if (removed) removeSessionAttachments(services.engine.paths.getHomeRoot(), arg.id);
       void services.index?.refresh();
       return ok({ removed });
     },
@@ -270,6 +287,26 @@ export function buildHandlers(services: Services): HandlerMap {
     'native:open-path': async (arg) => (services.native
       ? ok({ opened: await services.native.openPath(arg.sessionId, arg.relPath, arg.reveal === true) })
       : fail('internal', 'Native features are unavailable.')),
+    'native:stat-path': (arg) => {
+      const result = classifyStatPath(arg.path);
+      return result.ok ? ok({ kind: result.kind, size: result.size }) : fail('invalid_argument', result.message);
+    },
+    'native:read-clipboard-image': async () => {
+      const outcome = await clipboardImages.read();
+      return outcome.ok ? ok(outcome.value) : fail(outcome.code, outcome.message);
+    },
+    'native:reveal-attachment': (arg) => (services.native
+      ? ok({ opened: services.native.revealAttachment(arg.sessionId, arg.attachmentId) })
+      : fail('internal', 'Native features are unavailable.')),
+    'native:save-attachment': async (arg, { window }) => {
+      if (!services.native) return fail('internal', 'Native features are unavailable.');
+      try {
+        const saved = await services.native.saveAttachment(window, arg.sessionId, arg.attachmentId, arg.suggestedName);
+        return saved === undefined ? fail('not_found', 'That attachment is no longer available.') : ok({ path: saved });
+      } catch {
+        return fail('write_failed', 'The attachment could not be saved.');
+      }
+    },
     'native:open-external': async (arg) => (services.native
       ? ok({ opened: await services.native.openExternal(arg.url) })
       : fail('internal', 'Native features are unavailable.')),

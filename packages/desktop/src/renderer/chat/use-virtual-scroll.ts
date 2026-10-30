@@ -8,7 +8,7 @@ import {
   useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MutableRefObject,
   type WheelEvent,
 } from 'react';
-import type { Entry } from '@aragon-agent/tui/model/agent/reducer';
+import type { TranscriptRow } from '../lib/chat-tool-groups.js';
 import {
   INITIAL_FOLLOW, onScroll, onUpGesture, resumeFollow, shouldShowJump, type FollowState, type ScrollMetrics,
 } from '../lib/chat-follow.js';
@@ -47,7 +47,7 @@ function metricsOf(element: HTMLElement): ScrollMetrics {
 
 /** Measured heights, the prefix sums built from them, and the observer that keeps them fresh. */
 function useRowHeights(
-  entries: readonly Entry[], scrollerRef: ScrollerRef, followRef: MutableRefObject<FollowState>,
+  entries: readonly TranscriptRow[], scrollerRef: ScrollerRef, followRef: MutableRefObject<FollowState>,
   anchorRef: MutableRefObject<number>,
 ): { offsets: number[]; observer: ResizeObserver | null } {
   const heights = useRef(new Map<string, number>());
@@ -169,7 +169,7 @@ function useFollow(scrollerRef: ScrollerRef, followRef: MutableRefObject<FollowS
   return { scrollTop, following, showJump, handlers, resume, pause };
 }
 
-export function useVirtualScroll(entries: readonly Entry[]): VirtualScroll {
+export function useVirtualScroll(entries: readonly TranscriptRow[]): VirtualScroll {
   const scrollerRef: ScrollerRef = useRef<HTMLDivElement | null>(null);
   const followRef = useRef<FollowState>(INITIAL_FOLLOW);
   const anchorRef = useRef(0);

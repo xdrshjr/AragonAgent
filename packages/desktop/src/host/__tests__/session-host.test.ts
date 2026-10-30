@@ -150,6 +150,32 @@ describe('attach and mirroring', () => {
   });
 });
 
+describe('image input capability in the snapshot meta', () => {
+  it('reads "cannot tell" from a controller without the capability, and a live answer when it has one', async () => {
+    const plain = make();
+    const first = connect();
+    plain.host.attach(first.hostEnd);
+    await settle();
+    const bare = (first.received[0] as Extract<HostMsg, { t: 'snap' }>).meta.imageInput;
+    expect(bare).toEqual({ support: 'unknown', source: 'heuristic', tokenEstimate: 1600 });
+
+    const { host, controller } = make();
+    let answer = { support: 'no' as const, source: 'catalog' as const, tokenEstimate: 1600 };
+    (controller as unknown as { getImageSupport: () => typeof answer }).getImageSupport = () => answer;
+    const second = connect();
+    host.attach(second.hostEnd);
+    await settle();
+    expect((second.received[0] as Extract<HostMsg, { t: 'snap' }>).meta.imageInput.support).toBe('no');
+    // A model switch re-sends the snapshot, so the next one carries the new answer with no new event type.
+    answer = { support: 'yes' as never, source: 'catalog', tokenEstimate: 1600 };
+    host.dispatch({ type: 'notice', level: 'info', text: 'x' });
+    const third = connect();
+    host.attach(third.hostEnd);
+    await settle();
+    expect((third.received[0] as Extract<HostMsg, { t: 'snap' }>).meta.imageInput.support).toBe('yes');
+  });
+});
+
 describe('renderer-only actions', () => {
   it('never enter host state; a host toast becomes an event instead', async () => {
     const { host } = make();

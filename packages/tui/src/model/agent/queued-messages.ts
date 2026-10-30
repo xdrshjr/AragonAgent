@@ -1,5 +1,6 @@
 import type { Entry } from './reducer.js';
 import type { InvocationCard } from './invocation-card.js';
+import type { AttachmentMeta } from './attachment-meta.js';
 
 /** Full user text retained until Core acknowledges its opaque ID. */
 export interface PendingSteering {
@@ -7,6 +8,8 @@ export interface PendingSteering {
   readonly text: string;
   /** Carried so the `queued -> user` rewrite keeps the card (tui-invocation-cards). */
   readonly invocation?: InvocationCard;
+  /** Carried so the `queued -> user` rewrite keeps the strip (attachments are metadata only). */
+  readonly attachments?: AttachmentMeta[];
 }
 
 /** Hide only active pending entries, using the same projection for measurement and paint. */
@@ -29,6 +32,7 @@ export function reconcileSteeringReceipt(options: {
       ? {
         id: entry.id, kind: 'user', text: entry.text,
         ...(entry.invocation ? { invocation: entry.invocation } : {}),
+        ...(entry.attachments ? { attachments: entry.attachments } : {}),
       } : entry);
   return { entries, pending: options.pending.filter((item) => !ids.has(item.queueId)), changed: true };
 }

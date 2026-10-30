@@ -6,6 +6,23 @@ function llmError(message: string, errorType?: string): Error {
   return Object.assign(new Error(message), errorType ? { errorType } : {});
 }
 
+describe('a provider refusing a picture', () => {
+  it('offers "send as file paths" only for a narrow invalid-request-about-images wording', () => {
+    for (const text of [
+      'invalid_request_error: messages.0.content.1: image input is not supported by this model',
+      'HTTP 400: This model does not support image inputs',
+      '400 Bad Request: unsupported content type image_url',
+    ]) {
+      expect(classifyErrorNotice(text)?.actions, text).toEqual(['send-as-paths', 'retry']);
+    }
+  });
+
+  it('does not claim ordinary failures that merely mention a picture', () => {
+    expect(classifyErrorNotice('Rate limited, retry in 5s')?.condition).toBe('rate-limit');
+    expect(classifyErrorNotice('The assistant described the image in detail.')).toBeNull();
+  });
+});
+
 describe('actionable error notices', () => {
   it("matches the engine's own wording for every stable condition", () => {
     const cases: Array<[string, string]> = [

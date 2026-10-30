@@ -13,6 +13,7 @@
 
 import process from 'node:process';
 import type { PendingSteering } from './queued-messages.js';
+import type { AttachmentMeta } from './attachment-meta.js';
 import { reconcileSteeringReceipt } from './queued-messages.js';
 import type { InvocationCard } from './invocation-card.js';
 import type {
@@ -114,7 +115,8 @@ export const DEFAULT_TOAST_TTL_MS = 2500;
 export type Entry =
   // `text` is the user-readable COMMAND LINE when `invocation` is set, never the prompt
   // that went to the model (I-2): nothing may feed `entry.text` back to a model.
-  | { id: string; kind: 'user'; text: string; invocation?: InvocationCard }
+  | { id: string; kind: 'user'; text: string; invocation?: InvocationCard;
+      attachments?: AttachmentMeta[] }
   /**
    * A message submitted while a run was in flight (tui-shift-enter-copy-queue
    * 5.2). It renders as `Queue: <first line>` and is rewritten IN PLACE, same
@@ -125,7 +127,8 @@ export type Entry =
    * NOT A LIVE TARGET: no id pointer in `ViewState` names it, so the trim
    * ring and the `appendEntry` assertions need no new member.
    */
-  | { id: string; kind: 'queued'; text: string; queueId?: string; invocation?: InvocationCard }
+  | { id: string; kind: 'queued'; text: string; queueId?: string; invocation?: InvocationCard;
+      attachments?: AttachmentMeta[] }
   | {
       id: string;
       kind: 'assistant';
@@ -659,13 +662,14 @@ export function initialViewState(seed: ViewStateSeed = {}): ViewState {
 // ---------------------------------------------------------------------------
 
 export type ViewAction =
-  | { type: 'submit'; text: string; invocation?: InvocationCard }
+  | { type: 'submit'; text: string; invocation?: InvocationCard; attachments?: AttachmentMeta[] }
   /**
    * `controller.steer` was accepted; append the persistent queue marker
    * (5.2.2). Dispatched from exactly one place -- `App.submitMessage`'s
    * running branch -- beside the `controller.steer` call it mirrors.
    */
-  | { type: 'steerQueued'; queueId: string; text: string; invocation?: InvocationCard }
+  | { type: 'steerQueued'; queueId: string; text: string; invocation?: InvocationCard;
+      attachments?: AttachmentMeta[] }
   | { type: 'steeringAccepted'; ids: readonly string[] }
   /**
    * The user withdrew a queued message before Core accepted it. Never dispatched by the
@@ -1302,6 +1306,7 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
       const entry: Entry = {
         id, kind: 'user', text: action.text,
         ...(action.invocation ? { invocation: action.invocation } : {}),
+        ...(action.attachments?.length ? { attachments: action.attachments } : {}),
       };
       return {
         ...state,
@@ -1328,6 +1333,7 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
       const entry: Entry = {
         id, kind: 'queued', queueId: action.queueId, text: action.text,
         ...(action.invocation ? { invocation: action.invocation } : {}),
+        ...(action.attachments?.length ? { attachments: action.attachments } : {}),
       };
       // NOTHING ELSE RESETS. This is not a new turn -- `turnProduced`,
       // `errorNoticed` and `aborted` describe the run that is still in
@@ -1339,6 +1345,7 @@ export function viewReducer(state: ViewState, action: ViewAction): ViewState {
         pendingSteering: [...state.pendingSteering, {
           queueId: action.queueId, text: action.text,
           ...(action.invocation ? { invocation: action.invocation } : {}),
+          ...(action.attachments?.length ? { attachments: action.attachments } : {}),
         }],
       };
     }

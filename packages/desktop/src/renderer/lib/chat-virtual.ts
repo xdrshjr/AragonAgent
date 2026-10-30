@@ -5,6 +5,7 @@
  */
 
 import type { Entry } from '@aragon-agent/tui/model/agent/reducer';
+import type { TranscriptRow } from './chat-tool-groups.js';
 
 /** Estimated heights (px) before a row is measured; close enough that the scrollbar is steady. */
 const ESTIMATES: Record<Entry['kind'], number> = {
@@ -12,8 +13,22 @@ const ESTIMATES: Record<Entry['kind'], number> = {
   todo: 140, retry: 28, fast: 48, compaction: 36, service: 40,
 };
 
-export function estimateHeight(entry: Entry): number {
-  return ESTIMATES[entry.kind] ?? 60;
+/** Height of the fixed attachment strip (96 px thumbnails plus its gap) under a user bubble. */
+export const ATTACHMENT_STRIP_ESTIMATE = 104;
+
+/** A folded group is one header line. Opened, it is that line plus each member's own row. */
+export const GROUP_ROW_PX = 40;
+
+export function estimateHeight(row: TranscriptRow): number {
+  if (row.kind === 'toolGroup') {
+    return GROUP_ROW_PX + (row.expanded ? row.members.reduce((sum, member) => sum + estimateHeight(member), 0) : 0);
+  }
+  const entry: Entry = row;
+  const base = ESTIMATES[entry.kind] ?? 60;
+  if ((entry.kind === 'user' || entry.kind === 'queued') && entry.attachments?.length) {
+    return base + ATTACHMENT_STRIP_ESTIMATE;
+  }
+  return base;
 }
 
 export interface VirtualRange {

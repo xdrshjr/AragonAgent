@@ -28,6 +28,18 @@ import type {
   SessionRunStatus,
 } from '../../shared/port-protocol.js';
 import { SessionPort } from './port-client.js';
+import {
+  COMMAND_TIMEOUT_MS_WITH_ATTACHMENTS,
+  type ImageMode,
+  type SubmitResultValue,
+} from '../../shared/attachments.js';
+import { translate } from '../i18n/index.js';
+import {
+  restoreAttachmentDrafts,
+  toSubmitAttachment,
+  type AttachmentDraft,
+} from '../composer/attachments/attachment-draft-store.js';
+import { isWithdrawnValue, restoreWithdrawnAttachments } from '../composer/attachments/restore-withdrawn.js';
 
 export type ConnectionPhase = 'connecting' | 'ready' | 'closed' | 'error';
 
@@ -48,6 +60,12 @@ export interface PendingSend {
   text: string;
   sentAt: number;
   state: 'sending' | 'failed';
+  /**
+   * The attachments that went with it (bytes included, in memory only). Kept so Retry resends
+   * the same files and Edit can put them back in the composer.
+   */
+  attachments?: AttachmentDraft[];
+  imageMode?: ImageMode;
   /** Why it failed (a ready-made sentence is built by the view from `code`). */
   error?: { code: string; message: string };
 }
@@ -174,14 +192,17 @@ export class SessionStore {
    * answers. Returns the host's answer for callers that want it; the bubble is the user-visible
    * outcome either way.
    */
-  async sendMessage(id: string, text: string): Promise<CommandResult> {
+  async sendMessage(
+    id: string, text: string, attachments?: readonly AttachmentDraft[], imageMode?: ImageMode,
+  ): Promise<CommandResult> {
     const mirror = this.mirrors.get(id);
     if (!mirror) return { ok: false, code: 'port_closed', message: 'The session is not connected.' };
     const localId = `ps${++this.sendCounter}`;
     const outstanding = mirror.pendingSends.filter((send) => send.state === 'sending').length;
     this.sendTracking.set(localId, { baseline: sentCount(mirror.view) + outstanding, accepted: false });
+    const carried = attachments?.length ? { attachments: [...attachments], imageMode: imageMode ?? 'inline' } : {};
     this.update(id, {
-      pendingSends: [...mirror.pendingSends, { localId, text, sentAt: Date.now(), state: 'sending' }],
+      pendingSends: [...mirror.pendingSends, { localId, text, sentAt: Date.now(), state: 'sending', ...carried }],
     });
     return this.dispatchSend(id, localId, text);
   }
@@ -196,21 +217,33 @@ export class SessionStore {
     return this.dispatchSend(id, localId, send.text);
   }
 
-  /** Remove a bubble and hand back its text (the "Edit" action puts it in the composer). */
+  /**
+   * Remove a bubble and hand back its text (the "Edit" action puts it in the composer). Its
+   * attachments go straight back into the session's tray, so text and files return together.
+   */
   takePendingSend(id: string, localId: string): string | null {
     const send = this.mirrors.get(id)?.pendingSends.find((candidate) => candidate.localId === localId);
     if (!send) return null;
     this.dropSend(id, localId);
+    if (send.attachments?.length) restoreAttachmentDrafts(id, send.attachments);
     return send.text;
   }
 
   private async dispatchSend(id: string, localId: string, text: string): Promise<CommandResult> {
-    const result = await this.command(id, { c: 'submit', text });
+    const send = this.mirrors.get(id)?.pendingSends.find((candidate) => candidate.localId === localId);
+    const files = send?.attachments;
+    // No attachments: the command is byte-identical to what it was before attachments existed.
+    const result = files?.length
+      ? await this.command(id, {
+        c: 'submit', text, attachments: files.map(toSubmitAttachment), imageMode: send?.imageMode ?? 'inline',
+      }, { timeoutMs: COMMAND_TIMEOUT_MS_WITH_ATTACHMENTS })
+      : await this.command(id, { c: 'submit', text });
     if (!this.mirrors.get(id)?.pendingSends.some((send) => send.localId === localId)) return result;
     if (!result.ok) {
       this.patchSend(id, localId, { state: 'failed', error: { code: result.code, message: result.message } });
       return result;
     }
+    this.reportSubmitOutcome(id, result.value);
     const tracking = this.sendTracking.get(localId);
     if (tracking) tracking.accepted = true;
     if (!this.settleSends(id)) {
@@ -218,6 +251,24 @@ export class SessionStore {
       setTimeout(() => this.dropSend(id, localId), PENDING_SEND_GRACE_MS);
     }
     return result;
+  }
+
+  /** What the host did with the attachments: say so for every one that did not go as the user expects. */
+  private reportSubmitOutcome(id: string, value: unknown): void {
+    const outcome = value as Partial<SubmitResultValue> | undefined;
+    for (const item of outcome?.dropped ?? []) {
+      const name = outcome?.attachments?.find((meta) => meta.ref === item.ref)?.name ?? item.ref;
+      this.dispatchLocal(id, {
+        type: 'pushToast', level: 'warn',
+        text: translate('chat.attach.droppedToast', { name, reason: translate(`chat.attach.reason.${item.reason}` as const) }),
+      });
+    }
+    if (outcome?.downgraded?.length) {
+      const names = outcome.downgraded.map((item) => outcome.attachments?.find((meta) => meta.ref === item.ref)?.name ?? item.ref);
+      this.dispatchLocal(id, {
+        type: 'pushToast', level: 'info', text: translate('chat.attach.downgradedToast', { name: names.join(', ') }),
+      });
+    }
   }
 
   private patchSend(id: string, localId: string, patch: Partial<PendingSend>): void {
@@ -325,10 +376,23 @@ export class SessionStore {
     this.update(id, { view });
   }
 
-  command(id: string, cmd: HostCommand): Promise<CommandResult> {
+  command(id: string, cmd: HostCommand, options?: { timeoutMs?: number }): Promise<CommandResult> {
     const port = this.ports.get(id);
     if (!port) return Promise.resolve({ ok: false, code: 'port_closed', message: 'The session is not connected.' });
-    return port.command(cmd);
+    const answer = port.command(cmd, options?.timeoutMs);
+    // A withdrawn queued message returns with its files: rebuild the chips as a side effect, so
+    // every caller of `queue.cancel` gets the attachments back without knowing about them.
+    if (cmd.c === 'queue.cancel') void answer.then((result) => this.restoreWithdrawn(id, result));
+    return answer;
+  }
+
+  private async restoreWithdrawn(id: string, result: CommandResult): Promise<void> {
+    if (!result.ok || !isWithdrawnValue(result.value)) return;
+    const failed = await restoreWithdrawnAttachments(id, result.value, (attachmentId) =>
+      this.command(id, { c: 'attachment.read', id: attachmentId }));
+    if (failed > 0) {
+      this.dispatchLocal(id, { type: 'pushToast', level: 'warn', text: translate('chat.attach.restoreFailed', { n: failed }) });
+    }
   }
 
   /** Answer a pending approval/question and remove its card. */

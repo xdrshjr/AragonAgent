@@ -89,8 +89,9 @@ export const CONFIG_KEY_MATRIX: readonly ParityEntry[] = [
   ...[
     'exitTranscript', 'renderGovernor', 'maxRenderIntervalMs', 'diffRender', 'scrollMode',
     'syncOutput', 'mouse', 'mouseSelect', 'paste', 'keyboardEnhancement', 'scrollResumeMs',
-    'transcriptWindow', 'developerMode',
+    'transcriptWindow',
   ].map((id) => na(id, 'Preserved, not shown', 'A terminal renderer setting with no meaning in a window.')),
+  mapped('developerMode', 'Settings > General: Developer mode (raw tool names and arguments)'),
   mapped('transcriptRetain', 'Session host view-state retention window'),
   mapped('update', 'Settings > Updates (the terminal updater is not used by the desktop app)'),
   mapped('version', 'Config file schema version (managed, never edited)'),

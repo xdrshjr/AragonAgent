@@ -37,6 +37,7 @@ export interface MountedSession {
 export const META: SessionMetaView = {
   sessionId: 's1', cwd: '/work', provider: 'anthropic', model: 'm', resumed: false,
   postureCycle: ['build'], governanceUnavailable: null, slashCommands: [],
+  imageInput: { support: 'yes', source: 'catalog', tokenEstimate: 1600 },
 };
 
 export const run = (actions: ViewAction[], state: ViewState = initialViewState()): ViewState =>

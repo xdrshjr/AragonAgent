@@ -23,6 +23,8 @@ export interface MockToolCall {
 
 export type MockFailure =
   | { status: 429 | 500 | 503; retryAfter?: number }
+  /** A 400 with the provider's own words, e.g. "this model does not support image inputs". */
+  | { status: 400; message: string }
   /** Close the connection after this many text deltas, without a terminal frame. */
   | { cutAfter: number };
 
@@ -101,9 +103,10 @@ export async function startMockLlm(models: string[] = ['mock-1']): Promise<MockL
     if (turn.delayMs) await sleep(turn.delayMs);
     if (turn.fail && 'status' in turn.fail) {
       res.writeHead(turn.fail.status, {
-        'content-type': 'application/json', ...(turn.fail.retryAfter ? { 'retry-after': String(turn.fail.retryAfter) } : {}),
+        'content-type': 'application/json', ...('retryAfter' in turn.fail && turn.fail.retryAfter ? { 'retry-after': String(turn.fail.retryAfter) } : {}),
       });
-      res.end(JSON.stringify({ error: { message: `mock failure ${turn.fail.status}`, type: 'mock_error' } }));
+      const message = 'message' in turn.fail ? turn.fail.message : `mock failure ${turn.fail.status}`;
+      res.end(JSON.stringify({ error: { message, type: turn.fail.status === 400 ? 'invalid_request_error' : 'mock_error' } }));
       return;
     }
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });

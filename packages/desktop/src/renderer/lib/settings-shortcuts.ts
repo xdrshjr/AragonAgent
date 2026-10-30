@@ -25,6 +25,7 @@ export const DESKTOP_SHORTCUTS: readonly DesktopShortcut[] = [
   { combo: 'mod+j', labelKey: 'workspace.keys.inspector' },
   { combo: 'mod+shift+b', labelKey: 'workspace.keys.agents' },
   { combo: 'mod+p', labelKey: 'workspace.keys.prompts' },
+  { combo: 'mod+u', labelKey: 'chat.attach.shortcut' },
   { combo: 'mod+,', labelKey: 'workspace.keys.settings' },
   { combo: 'mod+/', labelKey: 'workspace.keys.shortcuts' },
   { combo: '?', labelKey: 'workspace.keys.shortcutsBare' },

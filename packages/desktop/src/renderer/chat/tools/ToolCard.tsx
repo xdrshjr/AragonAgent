@@ -12,7 +12,13 @@ import {
 import { memo, useEffect, useState, type ReactNode } from 'react';
 import type { Entry } from '@aragon-agent/tui/model/agent/reducer';
 import type { FilePatch } from '@aragon-agent/tui/model/tools/patch';
-import { useT } from '../../i18n/index.js';
+import { pickActivityArgs } from '@aragon-agent/tui/model/team/activity';
+import { hash32 } from '@aragon-agent/tui/ui/persona-names';
+import type { VoiceMode } from '@aragon-agent/tui/ui/tool-voice';
+import { getLanguage, useT } from '../../i18n/index.js';
+import { makeVoice, useReducedMotion } from '../../lib/voice.js';
+import { voicePhrase, voiceTitle } from '../../lib/tool-voice-i18n.js';
+import { parseExternalToolName, serverLabel } from '../../lib/external-tool-name.js';
 import {
   clip, formatSeconds, patchCounts, summarizeToolArgs, toolFamily, type ToolFamily,
 } from '../../lib/chat-format.js';
@@ -78,6 +84,15 @@ function formatArgs(entry: ToolEntry): string {
   return clip(text, ARGS_PREVIEW_CHARS);
 }
 
+/** Screen-reader name for the header in the friendly voice: outcome first, never the identifier. */
+function friendlyLabel(entry: ToolEntry, toolName: string, t: ReturnType<typeof useT>): string {
+  const state = entry.status === 'pending' || entry.status === 'running'
+    ? t('chat.tool.status.running')
+    : t(entry.status === 'error' || entry.isError ? 'chat.tool.status.error' : 'chat.tool.status.done');
+  const detail = summarizeToolArgs(entry);
+  return `${state}: ${toolName}${detail ? ` ${detail}` : ''}`;
+}
+
 function Body(props: { sessionId: string; entry: ToolEntry; family: ToolFamily }) {
   const t = useT();
   const { entry, family } = props;
@@ -110,12 +125,40 @@ function headerSummary(entry: ToolEntry, family: ToolFamily, t: ReturnType<typeo
   return base;
 }
 
+const PHRASE_BUDGET = 80;
+
+/**
+ * What the card's header calls the tool. Friendly: a playful phrase while the call is live
+ * (chosen once per call from its id, so it never flickers) and the steady title afterwards.
+ * Developer: the registry label, exactly as before this feature.
+ */
+function useToolName(entry: ToolEntry, voiceMode: VoiceMode): string {
+  const reducedMotion = useReducedMotion();
+  if (voiceMode === 'developer') return entry.label;
+  const lang = getLanguage();
+  if (entry.status === 'pending' || entry.status === 'running') {
+    return voicePhrase(
+      {
+        tool: entry.name, args: pickActivityArgs(entry.args), wide: true,
+        variantSeed: hash32(entry.toolCallId), budget: PHRASE_BUDGET,
+      },
+      makeVoice('friendly', reducedMotion), lang,
+    );
+  }
+  // A tool from outside the app is titled by its own name (`browser_navigate`), not by the wrapper
+  // around it; where it came from is shown beside the title (see `ToolCard`).
+  return voiceTitle(parseExternalToolName(entry.name)?.tool ?? entry.name, 'friendly', lang);
+}
+
 export const ToolCard = memo(function ToolCard(props: {
-  sessionId: string; entry: ToolEntry; expanded: boolean;
+  sessionId: string; entry: ToolEntry; expanded: boolean; voiceMode: VoiceMode;
 }) {
   const t = useT();
-  const { entry, expanded, sessionId } = props;
+  const { entry, expanded, sessionId, voiceMode } = props;
+  const toolName = useToolName(entry, voiceMode);
+  const origin = voiceMode === 'friendly' ? parseExternalToolName(entry.name) : null;
   const family = toolFamily(entry.name);
+  const summary = headerSummary(entry, family, t);
   const Icon = ICONS[family];
   const liveOutput = useConfig((state) => state.result?.view?.liveToolOutput) !== false;
   const running = entry.status === 'running';
@@ -123,11 +166,13 @@ export const ToolCard = memo(function ToolCard(props: {
 
   return (
     <div className="tool" data-status={entry.status} data-failed={entry.isError ? 'true' : undefined}>
-      <button type="button" className="tool-head" aria-expanded={expanded} onClick={toggle}>
+      <button type="button" className="tool-head" aria-expanded={expanded} onClick={toggle}
+        {...(voiceMode === 'friendly' ? { 'aria-label': friendlyLabel(entry, toolName, t) } : {})}>
         <ChevronRight size={14} strokeWidth={1.5} className="chev" aria-hidden="true" />
         <Icon size={14} strokeWidth={1.5} aria-hidden="true" />
-        <span className="tool-name">{entry.label}</span>
-        <span className="tool-summary">{headerSummary(entry, family, t)}</span>
+        <span className="tool-name">{toolName}</span>
+        {origin ? <span className="tool-origin">{t('chat.tool.from', { server: serverLabel(origin.server) })}</span> : null}
+        <span className="tool-summary">{summary}</span>
         <StatusMark status={entry.status} isError={entry.isError} />
         {entry.durationMs !== undefined ? <span className="tool-time">{formatSeconds(entry.durationMs)}</span> : null}
       </button>
@@ -135,6 +180,7 @@ export const ToolCard = memo(function ToolCard(props: {
       {!expanded && running && liveOutput && entry.live && entry.live.length > 0
         ? <AnsiOutput rows={entry.live} tail={LIVE_TAIL_ROWS} label={t('chat.tool.live')} />
         : null}
+      {expanded && voiceMode === 'developer' ? <code className="tool-ident selectable">{entry.name}</code> : null}
       {expanded ? <Body sessionId={sessionId} entry={entry} family={family} /> : null}
     </div>
   );

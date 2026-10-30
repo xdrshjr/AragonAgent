@@ -147,6 +147,7 @@ function boot(init: HostInit): Boot {
     ...(session.saved?.meta?.updatedAt ? { restoredAt: session.saved.meta.updatedAt } : {}),
     initialEntries: session.entries,
     writer,
+    homeRoot: actualHome,
     control: send,
     slashCommands: listSlashCommands({ skills: controller.getSkillService() }),
     version: readCliVersion(),

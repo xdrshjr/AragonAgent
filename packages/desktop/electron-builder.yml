@@ -19,6 +19,13 @@ buildDependenciesFromSource: false
 files:
   - dist/main/**
   - dist/shared/**
+  # `dist/host/**` is the utilityProcess entry and ships in the engine, NOT here. The one
+  # exception is the attachment ledger: the main process resolves an attachment id to a path
+  # through it (`native-bridge`, `attachment-paths`). A module that is imported at startup but
+  # absent from the asar kills the main process before the first window - invisible in dev, where
+  # dist/host exists. `verify-bundle` check 8c fails the build if main ever imports another host
+  # module that is not listed here.
+  - dist/host/attachment-ledger.js
   - dist/preload/index.cjs
   - dist/renderer/**
   - package.json

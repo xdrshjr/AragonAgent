@@ -22,6 +22,7 @@ export function describeFailure(t: Translate, failure: CommandFailure): string {
     case 'busy': return `${t('chat.err.busy')} ${failure.message}`.trim();
     case 'rejected': return `${t('chat.err.rejected')} ${failure.message}`.trim();
     case 'invalid_argument': return `${t('chat.err.invalid')} ${failure.message}`.trim();
+    case 'attachment_rejected': return `${t('workspace.cmd.attachment_rejected')} ${failure.message}`.trim();
     case 'internal': return `${t('chat.err.internal')} ${failure.message}`.trim();
   }
 }

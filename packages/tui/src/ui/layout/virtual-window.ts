@@ -83,7 +83,7 @@ export function entryRevision(entry: Entry): string {
       return entry.invocation
         ? `i${entry.invocation.input.length}.${entry.invocation.inputHidden > 0 ? 1 : 0}.${
           entry.invocation.note ? 1 : 0}`
-        : 'u';
+        : entry.attachments?.length ? 'ua' : 'u';
     case 'notice':
       return 'n';
     // `thinkingMs` is O(1) and it CHANGES THE ROW: sealing the clock turns
@@ -312,8 +312,10 @@ export function estimateEntryRows(
       // self-correct: this file's own note above records that "an entry
       // estimated at 400 rows is exactly the one that never gets mounted", and
       // an unmounted entry is never measured.
+      // `+ 1` for the single dim attachment row `UserEntry` adds (desktop-origin entries only).
       return (
         separation + Math.min(wrappedRows(entry.text, usable), USER_ENTRY_MAX_ROWS + 1)
+        + (entry.attachments?.length ? 1 : 0)
       );
     case 'notice':
       return separation + wrappedRows(entry.text, usable);

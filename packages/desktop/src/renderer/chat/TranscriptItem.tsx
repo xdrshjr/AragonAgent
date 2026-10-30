@@ -2,6 +2,7 @@
 
 import { memo } from 'react';
 import type { Entry } from '@aragon-agent/tui/model/agent/reducer';
+import type { VoiceMode } from '@aragon-agent/tui/ui/tool-voice';
 import type { ErrorAction } from '../lib/chat-errors.js';
 import { AssistantMessage } from './AssistantMessage.js';
 import { CompactionRow } from './CompactionRow.js';
@@ -21,6 +22,8 @@ export interface RowProps {
   running: boolean;
   queueNumber: number;
   canRetry: boolean;
+  /** Required: a forgotten prop is a compile error, not a silent fall back to one voice. */
+  voiceMode: VoiceMode;
   onErrorAction(action: ErrorAction): void;
 }
 
@@ -33,9 +36,9 @@ export const TranscriptItem = memo(function TranscriptItem(props: RowProps) {
     case 'assistant':
       return <AssistantMessage sessionId={sessionId} entry={entry} thinkingVisible={props.thinkingVisible} running={props.running} />;
     case 'tool':
-      return <ToolCard sessionId={sessionId} entry={entry} expanded={props.expanded} />;
+      return <ToolCard sessionId={sessionId} entry={entry} expanded={props.expanded} voiceMode={props.voiceMode} />;
     case 'notice':
-      return <NoticeRow entry={entry} canRetry={props.canRetry} onAction={props.onErrorAction} />;
+      return <NoticeRow sessionId={props.sessionId} entry={entry} canRetry={props.canRetry} onAction={props.onErrorAction} />;
     case 'team':
       return <TeamRow entry={entry} />;
     case 'governance':

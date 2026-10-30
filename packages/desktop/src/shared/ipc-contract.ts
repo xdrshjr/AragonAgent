@@ -31,9 +31,18 @@ export type IpcErrorCode =
   | 'not_found'
   | 'engine_unavailable'
   | 'cancelled'
+  | 'too_large'
+  | 'unavailable'
   | 'internal';
 
 export type IpcResult<T> = { ok: true; value: T } | { ok: false; code: IpcErrorCode; message: string };
+
+export interface ClipboardImageResult {
+  /** A PNG. */
+  bytes: ArrayBuffer;
+  width: number;
+  height: number;
+}
 
 export interface AppInfo {
   versions: { desktop: string; cli: string; core: string; tui: string; electron: string; node: string };
@@ -46,6 +55,8 @@ export interface AppInfo {
   isPackaged: boolean;
   /** desktop-state.json was unreadable at launch and was set aside; preferences are back to defaults. */
   preferencesReset?: boolean;
+  /** Product switches. Absent = everything on (older callers and test fixtures do not set it). */
+  features?: { attachments: boolean };
 }
 
 export type SessionOrigin = 'exec' | 'tui';
@@ -187,6 +198,20 @@ export interface IpcContract {
   'prompts:use': { in: { id: string }; out: { ok: true } };
   'native:open-path': { in: { sessionId: string; relPath: string; reveal?: boolean }; out: { opened: boolean } };
   'native:open-external': { in: { url: string }; out: { opened: boolean } };
+  /** Type and size of a path the user just dropped or picked. Never reads content. */
+  'native:stat-path': { in: { path: string }; out: { kind: 'file' | 'folder' | 'missing'; size: number } };
+  /**
+   * The picture on the OS clipboard, or null when there is none. Image only (no text, no files),
+   * read on demand from a paste or a menu click, never polled.
+   */
+  'native:read-clipboard-image': { in: void; out: ClipboardImageResult | null };
+  /** Show a staged attachment in the file manager. The renderer names an id, never a path. */
+  'native:reveal-attachment': { in: { sessionId: string; attachmentId: string }; out: { opened: boolean } };
+  /** Copy a staged attachment where the user chooses; `path` is null when they cancel. */
+  'native:save-attachment': {
+    in: { sessionId: string; attachmentId: string; suggestedName: string };
+    out: { path: string | null };
+  };
   'native:notify': { in: { title: string; body: string; sessionId?: string }; out: { shown: boolean } };
   'diagnostics:export': { in: void; out: { savedTo: string | null } };
   /** The renderer built the Markdown; the main process asks where to save it and removes secrets. */
@@ -229,7 +254,8 @@ export const IPC_CHANNELS = [
   'skills:list', 'sessions:list', 'sessions:open', 'sessions:close', 'sessions:park', 'sessions:restart',
   'sessions:pin', 'sessions:remove', 'sessions:branch', 'workspace:pick', 'workspace:recent',
   'prompts:list', 'prompts:create', 'prompts:update', 'prompts:delete', 'prompts:favorite',
-  'prompts:use', 'native:open-path', 'native:open-external', 'native:notify',
+  'prompts:use', 'native:open-path', 'native:open-external', 'native:stat-path', 'native:read-clipboard-image',
+  'native:reveal-attachment', 'native:save-attachment', 'native:notify',
   'diagnostics:export', 'session:export', 'native:activity', 'window:set-chrome', 'update:check', 'update:install', 'update:skip-version', 'update:open-download',
   'desktop-state:get',
   'desktop-state:patch', 'app:quit-plan', 'app:quit-confirmed', 'app:cancel-quit',

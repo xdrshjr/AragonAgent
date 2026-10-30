@@ -47,4 +47,6 @@ export const BUDGETS = {
   longTaskMaxMs: 100,
   bigTranscriptFirstPaintMs: 1000,
   soakSlopeMbPerMin: 2,
+  /** Writing a session checkpoint that holds eight ~1 MiB pictures (attachments R-1). */
+  checkpointWithImagesMs: 150,
 };

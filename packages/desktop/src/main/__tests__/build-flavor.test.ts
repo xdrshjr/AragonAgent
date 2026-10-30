@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { allowsTestSwitches, resolveFlavor } from '../build-flavor.js';
 import {
@@ -6,7 +7,11 @@ import {
 import { ConfigService } from '../config-service.js';
 
 /** Every switch the harness knows, so "release ignores them all" is checked against all of them. */
-const ALL_SWITCHES = ['--e2e', '--e2e-fault=enospc', '--e2e-feed=http://127.0.0.1:4010/latest.json', '--e2e-restore-window'];
+const E2E_USER_DATA = resolve('e2e-user-data-fixture');
+const ALL_SWITCHES = [
+  '--e2e', '--e2e-fault=enospc', '--e2e-feed=http://127.0.0.1:4010/latest.json', '--e2e-restore-window',
+  `--e2e-user-data=${E2E_USER_DATA}`,
+];
 
 describe('resolveFlavor', () => {
   it('derives the flavor from packaging when nothing was baked: packaged is release, never e2e', () => {
@@ -26,8 +31,17 @@ describe('resolveFlavor', () => {
 
 describe('parseE2eOptions', () => {
   it('reads the three switches in a non-release build', () => {
-    expect(parseE2eOptions(ALL_SWITCHES, 'e2e')).toEqual({ enabled: true, fault: 'enospc', feedUrl: 'http://127.0.0.1:4010/latest.json', restoreWindow: true });
-    expect(parseE2eOptions(['--e2e-fault=eacces'], 'dev')).toEqual({ enabled: false, fault: 'eacces', feedUrl: null, restoreWindow: false });
+    expect(parseE2eOptions(ALL_SWITCHES, 'e2e')).toEqual({ enabled: true, fault: 'enospc', feedUrl: 'http://127.0.0.1:4010/latest.json', restoreWindow: true, userDataDir: E2E_USER_DATA });
+    expect(parseE2eOptions(['--e2e-fault=eacces'], 'dev')).toEqual({ enabled: false, fault: 'eacces', feedUrl: null, restoreWindow: false, userDataDir: null });
+  });
+
+  it('--e2e-user-data: an absolute path is read in dev / e2e, a relative or NUL-bearing one is refused, release ignores it', () => {
+    expect(parseE2eOptions([`--e2e-user-data=${E2E_USER_DATA}`], 'e2e').userDataDir).toBe(E2E_USER_DATA);
+    expect(parseE2eOptions([`--e2e-user-data=${E2E_USER_DATA}`], 'dev').userDataDir).toBe(E2E_USER_DATA);
+    expect(parseE2eOptions(['--e2e-user-data=relative/dir'], 'e2e').userDataDir).toBeNull();
+    expect(parseE2eOptions([`--e2e-user-data=${E2E_USER_DATA}\x00evil`], 'e2e').userDataDir).toBeNull();
+    expect(parseE2eOptions(['--e2e-user-data='], 'e2e').userDataDir).toBeNull();
+    expect(parseE2eOptions([`--e2e-user-data=${E2E_USER_DATA}`], 'release').userDataDir).toBeNull();
   });
 
   it('--e2e-restore-window is read in dev / e2e builds and is a no-op in release', () => {

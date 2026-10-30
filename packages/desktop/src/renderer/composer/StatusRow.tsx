@@ -12,6 +12,8 @@ export function StatusRow(props: {
   sessionId: string;
   running: boolean;
   canSend: boolean;
+  /** Why Send is unavailable even though there is content (attachments still processing / failed). */
+  blockedReason?: string | null;
   sending: boolean;
   enterToSend: boolean;
   onSend(): void;
@@ -32,7 +34,8 @@ export function StatusRow(props: {
           <Square size={12} strokeWidth={1.5} aria-hidden="true" /> {t('chat.stop')}
         </Button>
       ) : null}
-      <Button variant="primary" size="sm" aria-disabled={!props.canSend || props.sending} title={sendHint}
+      <Button variant="primary" size="sm" aria-disabled={!props.canSend || props.sending}
+        title={props.blockedReason ?? sendHint}
         onClick={() => { if (props.canSend && !props.sending) props.onSend(); }}>
         <ArrowUp size={14} strokeWidth={1.5} aria-hidden="true" /> {props.running ? t('chat.queue') : t('chat.send')}
       </Button>

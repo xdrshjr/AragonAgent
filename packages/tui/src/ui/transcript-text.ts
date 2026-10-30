@@ -4,6 +4,7 @@ import { formatRetryLine } from '../model/agent/retry-view.js';
 import type { Glyphs } from './glyphs.js';
 import { childStatus, outcomePhrase, rosterCounts, statusMarkerCell } from './team-status.js';
 import { expandTabs } from './display-tab.js';
+import { attachmentSummaryLine } from '../model/agent/attachment-meta.js';
 import { governanceCardLines } from './layout/governance-card.js';
 import { invocationCardLines } from './layout/invocation-card.js';
 // TYPE-ONLY: this module stays free of React, ink and the supervisor itself.
@@ -122,8 +123,11 @@ function renderEntry(entry: Entry, glyphs: Glyphs): string[] {
     case 'queued':
       return block('Queued but never sent:', entry.text);
     case 'user':
-      return entry.invocation
-        ? [...block(glyphs.user, entry.text), ...invocationCardLines(entry.invocation)]
+      if (entry.invocation) {
+        return [...block(glyphs.user, entry.text), ...invocationCardLines(entry.invocation)];
+      }
+      return entry.attachments?.length
+        ? [...block(glyphs.user, entry.text), `  ${attachmentSummaryLine(entry.attachments)}`]
         : block(glyphs.user, entry.text);
     case 'assistant': {
       const suffix = entry.aborted ? ' (aborted)' : '';

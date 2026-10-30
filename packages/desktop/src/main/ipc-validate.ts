@@ -92,8 +92,8 @@ const partialPromptDraft: Validator<Record<string, unknown>> = (raw) => {
 
 const desktopStatePatch: Validator<Record<string, unknown>> = (raw) => {
   if (!isRecord(raw)) return INVALID;
-  const allowed = ['language', 'enterToSend', 'maxLiveHosts', 'parkAfterIdleMinutes', 'dismissedHints',
-    'recentWorkspaces', 'windows', 'update'];
+  const allowed = ['language', 'enterToSend', 'groupToolRuns', 'maxLiveHosts', 'parkAfterIdleMinutes', 'dismissedHints',
+    'recentWorkspaces', 'windows', 'update', 'imageInputOverrides'];
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(raw)) {
     if (!allowed.includes(key)) return INVALID;
@@ -137,6 +137,10 @@ export const IPC_VALIDATORS: ValidatorMap = {
   'prompts:use': object({ id: str(128, 1) }),
   'native:open-path': object({ sessionId, relPath: str(4096), reveal: optional(bool) }),
   'native:open-external': object({ url: str(4096, 1) }),
+  'native:stat-path': object({ path: str(4096, 1) }),
+  'native:read-clipboard-image': none,
+  'native:reveal-attachment': object({ sessionId, attachmentId: str(32, 1) }),
+  'native:save-attachment': object({ sessionId, attachmentId: str(32, 1), suggestedName: str(300) }),
   'native:notify': object({ title: str(200, 1), body: str(1000), sessionId: optional(sessionId) }),
   'diagnostics:export': none,
   'session:export': object({

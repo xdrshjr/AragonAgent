@@ -37,6 +37,6 @@ export function useCopy(): { copied: boolean; copy(text: string): void } {
 }
 
 /** Show a toast in one session's pane (toasts are renderer-only view state). */
-export function pushToast(sessionId: string, level: ToastLevel, text: string): void {
-  sessionStore.dispatchLocal(sessionId, { type: 'pushToast', level, text });
+export function pushToast(sessionId: string, level: ToastLevel, text: string, ttlMs?: number): void {
+  sessionStore.dispatchLocal(sessionId, { type: 'pushToast', level, text, ...(ttlMs === undefined ? {} : { ttlMs }) });
 }

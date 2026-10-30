@@ -15,9 +15,8 @@
 // `resources/engine`: that is `electron . --smoke` run against the unpacked app, which CI runs as
 // the second half of AC-38.
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, posix, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ENGINE, readDeclaredEngineRanges, satisfies } from './lib/engine-versions.mjs';
 import { readBakedFlavor } from './lib/flavor.mjs';
 import { expectedWire } from './lib/fuses.mjs';
 
@@ -42,20 +41,17 @@ function walk(dir, visit) {
 const engine = join(staging, 'engine');
 if (!existsSync(join(engine, 'node_modules'))) fail(`no staged engine at ${engine} (run \`npm run stage\`)`);
 
-// 1. Versions: what is installed is exactly what the manifest recorded, and inside the range this
-//    package declares. The engine is a published npm dependency (it is not in this repository), so
-//    the declared range in packages/desktop/package.json is the only source of truth available here.
+// 1. Versions: what is installed is exactly what the manifest says was packed.
 const manifestPath = join(staging, 'manifest.json');
 if (existsSync(manifestPath)) {
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  const declared = readDeclaredEngineRanges(root);
-  for (const name of ENGINE) {
-    const installedPath = join(engine, 'node_modules', '@aragon-agent', name, 'package.json');
-    if (!existsSync(installedPath)) { fail(`@aragon-agent/${name} is missing from the staged engine`); continue; }
-    const version = JSON.parse(readFileSync(installedPath, 'utf8')).version;
-    const ok = satisfies(version, declared[name]);
-    if (version !== manifest.engine[name] || ok !== true) {
-      fail(`@aragon-agent/${name}: installed ${version}, staged ${manifest.engine[name]}, declared ${declared[name]}`);
+  for (const name of ['core', 'tui', 'cli']) {
+    const installed = join(engine, 'node_modules', '@aragon-agent', name, 'package.json');
+    if (!existsSync(installed)) { fail(`@aragon-agent/${name} is missing from the staged engine`); continue; }
+    const version = JSON.parse(readFileSync(installed, 'utf8')).version;
+    const source = JSON.parse(readFileSync(join(root, '..', name, 'package.json'), 'utf8')).version;
+    if (version !== manifest.engine[name] || version !== source) {
+      fail(`@aragon-agent/${name}: installed ${version}, packed ${manifest.engine[name]}, source ${source}`);
     }
   }
 } else fail('build-staging/manifest.json is missing');
@@ -120,6 +116,29 @@ async function verifyArtifact(app, asar) {
     else if (baked !== expectFlavor) fail(`app.asar is flavor ${JSON.stringify(baked)}, expected ${JSON.stringify(expectFlavor)}`);
   } catch (error) {
     fail(`cannot read build-flavor.js from app.asar: ${error instanceof Error ? error.message : error}`);
+  }
+  // 8c. Every relative import the packaged main/shared code makes must be IN the asar. A module
+  //     that exists in `dist/` but is left out of the `files` list in `electron-builder.yml` is
+  //     imported at startup and kills the main process before the first window - and no test sees
+  //     it, because in development `dist/` has everything. `dist/host/**` is the trap: it ships in
+  //     the engine, not here, while the attachment ledger is shared with the main process.
+  try {
+    const { extractFile, listPackage } = await import('@electron/asar');
+    const entries = new Set();
+    // `listPackage` answers platform-separated paths and `extractFile` only accepts them in that
+    // form, so the set is normalised to posix while extraction goes back through `join`.
+    for (const raw of listPackage(asar)) entries.add(posix.normalize(raw.split(/[\\/]/).join('/')).replace(/^\/+/, ''));
+    const relative = /(?:^|[^\w$])(?:from|import)\s*\(?\s*['"](\.[^'"]+)['"]/g;
+    for (const entry of entries) {
+      if (!/^dist\/(main|shared)\//.test(entry) || !entry.endsWith('.js')) continue;
+      const text = extractFile(asar, join(...entry.split('/'))).toString('utf8');
+      for (const match of text.matchAll(relative)) {
+        const target = posix.normalize(posix.join(posix.dirname(entry), match[1]));
+        if (!entries.has(target)) fail(`app.asar: ${entry} imports "${match[1]}" (${target}) which is not packaged`);
+      }
+    }
+  } catch (error) {
+    fail(`cannot check the packaged import graph: ${error instanceof Error ? error.message : error}`);
   }
   // 8b. Fuses. Read from the executable.
   try {

@@ -13,7 +13,11 @@
  *   --e2e-fault=enospc|eacces  every config write fails the way a full / read-only disk does
  *   --e2e-feed=<url>         the update check reads this manifest; loopback http is allowed here
  *                            and nowhere else
+ *   --e2e-user-data=<abs>    Electron's userData lives here, so the single-instance lock is keyed to
+ *                            THIS run and not to whatever installed / dev instance is already open
  */
+
+import { isAbsolute } from 'node:path';
 
 import { allowsTestSwitches, type BuildFlavor } from './build-flavor.js';
 
@@ -25,9 +29,11 @@ export interface E2eOptions {
   feedUrl: string | null;
   /** `--e2e` normally pins a 1280x800 window and never reads or writes window state. */
   restoreWindow: boolean;
+  /** Absolute directory for Electron's `userData`, applied before the single-instance lock is requested. */
+  userDataDir: string | null;
 }
 
-export const E2E_OFF: E2eOptions = { enabled: false, fault: null, feedUrl: null, restoreWindow: false };
+export const E2E_OFF: E2eOptions = { enabled: false, fault: null, feedUrl: null, restoreWindow: false, userDataDir: null };
 
 export const E2E_WINDOW = { width: 1280, height: 800 } as const;
 
@@ -40,11 +46,13 @@ export function parseE2eOptions(argv: readonly string[], flavor: BuildFlavor): E
     return hit ? hit.slice(name.length + 3) : null;
   };
   const fault = value('e2e-fault');
+  const userData = value('e2e-user-data');
   return {
     enabled: argv.includes('--e2e'),
     fault: FAULTS.find((candidate) => candidate === fault) ?? null,
     feedUrl: value('e2e-feed') || null,
     restoreWindow: argv.includes('--e2e-restore-window'),
+    userDataDir: userData && isAbsolute(userData) && !userData.includes('\x00') ? userData : null,
   };
 }
 

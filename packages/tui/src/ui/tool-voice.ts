@@ -34,7 +34,7 @@ import {
   type ActivityArgs,
 } from '../model/team/activity.js';
 import type { SubagentPhase, SubagentRun } from '../model/team/types.js';
-import { pickActivityPhrase } from './activity-phrases.js';
+import { ACTIVITY_PHRASES, pickActivityPhrase } from './activity-phrases.js';
 import { hash32 } from './persona-names.js';
 
 export type VoiceMode = 'friendly' | 'developer';
@@ -132,6 +132,14 @@ const TOOL_PHRASES: Readonly<Record<string, { variants: Variants; noun: string }
 function capitalize(text: string): string {
   return text.length === 0 ? text : text.charAt(0).toUpperCase() + text.slice(1);
 }
+
+/** Tool names that have a title and gerund. Exported so a translated table can be parity-tested. */
+export const KNOWN_VOICE_TOOLS: readonly string[] = Object.keys(TOOL_NAMES);
+/** Tool names that have 3 phrase variants. */
+export const PHRASE_VOICE_TOOLS: readonly string[] = Object.keys(TOOL_PHRASES);
+
+/** Number of thinking words, for translation parity checks. */
+export const THINKING_WORD_COUNT: number = ACTIVITY_PHRASES.length;
 
 /**
  * An unregistered tool's name as words: `skill_find` -> `Skill find`.

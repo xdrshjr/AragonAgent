@@ -162,7 +162,7 @@ function EntryViewImpl({
         theme.user,
         entry.invocation
           ? <InvocationCard card={entry.invocation} theme={theme} caps={caps} />
-          : <UserEntry text={entry.text} theme={theme} caps={caps} />,
+          : <UserEntry text={entry.text} theme={theme} caps={caps} attachments={entry.attachments} />,
       );
     case 'queued':
       // `theme.muted`: quieter than a user message, louder than a notice --

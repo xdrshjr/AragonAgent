@@ -111,3 +111,7 @@
 }
 .update-badge:hover { background: var(--bg-surface-200); }
 .update-badge:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.dev-chip {
+  flex: none; padding: 1px 6px; border: 1px solid var(--warning); border-radius: 999px; background: var(--warning-soft);
+  color: var(--warning); font-size: 10px; font-weight: 600; letter-spacing: 0.04em;
+}
